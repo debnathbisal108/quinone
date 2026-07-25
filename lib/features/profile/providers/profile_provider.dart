@@ -2,18 +2,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../repositories/profile_repository.dart';
 
-final profileProvider = StateNotifierProvider<
-    ProfileNotifier,
-    ProfileState>(
+final profileProvider =
+    StateNotifierProvider<ProfileNotifier, ProfileState>(
   (ref) => ProfileNotifier(),
 );
 
 class ProfileState {
-  final Map<String, dynamic>? profile;
-  final bool isLoading;
-  final bool isSaving;
-  final String? error;
-
   const ProfileState({
     this.profile,
     this.isLoading = false,
@@ -21,8 +15,25 @@ class ProfileState {
     this.error,
   });
 
+  final Map<String, dynamic>? profile;
+  final bool isLoading;
+  final bool isSaving;
+  final String? error;
+
   bool get hasProfile =>
       profile != null && profile!.isNotEmpty;
+
+  Map<String, dynamic>? get backendPayload {
+    final currentProfile = profile;
+
+    if (currentProfile == null || currentProfile.isEmpty) {
+      return null;
+    }
+
+    return Map<String, dynamic>.unmodifiable(
+      currentProfile,
+    );
+  }
 
   ProfileState copyWith({
     Map<String, dynamic>? profile,
@@ -45,10 +56,8 @@ class ProfileState {
   }
 }
 
-class ProfileNotifier
-    extends StateNotifier<ProfileState> {
-  ProfileNotifier()
-      : super(const ProfileState()) {
+class ProfileNotifier extends StateNotifier<ProfileState> {
+  ProfileNotifier() : super(const ProfileState()) {
     loadProfile();
   }
 
@@ -70,8 +79,7 @@ class ProfileNotifier
     } catch (_) {
       state = state.copyWith(
         isLoading: false,
-        error:
-            'Your saved profile could not be loaded.',
+        error: 'Your saved profile could not be loaded.',
       );
     }
   }
@@ -96,8 +104,7 @@ class ProfileNotifier
     } catch (_) {
       state = state.copyWith(
         isSaving: false,
-        error:
-            'Your profile could not be deleted.',
+        error: 'Your profile could not be deleted.',
       );
     }
   }
