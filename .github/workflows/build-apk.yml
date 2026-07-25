@@ -1,0 +1,81 @@
+name: Build Flutter APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.22.0"
+          channel: stable
+          cache: true
+
+      - name: Show Flutter version
+        run: flutter --version
+
+      - name: Verify Flutter project
+        run: |
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "pubspec.yaml was not found in the repository root."
+            exit 1
+          fi
+
+      - name: Create Android platform if missing
+        run: |
+          if [ ! -d "android" ]; then
+            echo "Android folder is missing. Creating Android platform files..."
+            flutter create . --platforms android
+          else
+            echo "Android folder already exists."
+          fi
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze project
+        run: flutter analyze
+        continue-on-error: true
+
+      - name: Clean previous build
+        run: flutter clean
+
+      - name: Restore dependencies
+        run: flutter pub get
+
+      - name: Build release APK
+        run: |
+          flutter build apk \
+            --release \
+            --dart-define=API_BASE_URL="${{ secrets.API_BASE_URL }}"
+
+      - name: Verify APK exists
+        run: |
+          if [ ! -f "build/app/outputs/flutter-apk/app-release.apk" ]; then
+            echo "APK was not generated."
+            exit 1
+          fi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: quinone-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
