@@ -2,7 +2,12 @@ class ApiConfig {
   ApiConfig._();
 
   /// Change this when you deploy your backend.
-  static const String baseUrl = "https://your-render-url.onrender.com";
+  // static const String baseUrl = "https://your-render-url.onrender.com";
+
+  static const String baseUrl = String.fromEnvironment(
+  'API_BASE_URL',
+    defaultValue: 'https://quinone.onrender.com',
+  );
 
   /// API Version
   static const String apiVersion = "/api/v1";
