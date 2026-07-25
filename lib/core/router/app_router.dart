@@ -27,6 +27,13 @@ class AppRouter {
         },
       ),
       GoRoute(
+        path: '/profile',
+        name: 'profile',
+        builder: (context, state) {
+          return const ProfileSetupScreen();
+        },
+      ),
+      GoRoute(
         path: '/result',
         name: 'result',
         builder: (context, state) {
