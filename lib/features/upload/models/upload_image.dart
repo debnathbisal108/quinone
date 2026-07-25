@@ -3,92 +3,70 @@ import 'dart:io';
 import 'package:equatable/equatable.dart';
 
 enum UploadImageType {
-  unknown,
-
-  food,
-
-  nutritionLabel,
-
-  brandedProduct,
-
-  ignored,
+  meal,
+  backLabel,
 }
 
 enum UploadStatus {
-  pending,
-
+  ready,
   uploading,
-
   uploaded,
-
-  waitingBackLabel,
-
-  processing,
-
-  completed,
-
   failed,
 }
 
 class UploadImage extends Equatable {
-  final String id;
-
-  final File file;
-
-  final UploadImageType type;
-
-  final UploadStatus status;
-
-  final double uploadProgress;
-
-  final String? backendId;
-
-  final String? message;
-
-  final bool isBackLabel;
-
   const UploadImage({
     required this.id,
-    required this.file,
-    this.type = UploadImageType.unknown,
-    this.status = UploadStatus.pending,
+    required this.path,
+    this.type = UploadImageType.meal,
+    this.status = UploadStatus.ready,
     this.uploadProgress = 0,
     this.backendId,
     this.message,
-    this.isBackLabel = false,
   });
+
+  final String id;
+  final String path;
+  final UploadImageType type;
+  final UploadStatus status;
+  final double uploadProgress;
+  final String? backendId;
+  final String? message;
+
+  File get file => File(path);
+
+  bool get isBackLabel => type == UploadImageType.backLabel;
 
   UploadImage copyWith({
     String? id,
-    File? file,
+    String? path,
     UploadImageType? type,
     UploadStatus? status,
     double? uploadProgress,
     String? backendId,
     String? message,
-    bool? isBackLabel,
+    bool clearBackendId = false,
+    bool clearMessage = false,
   }) {
     return UploadImage(
       id: id ?? this.id,
-      file: file ?? this.file,
+      path: path ?? this.path,
       type: type ?? this.type,
       status: status ?? this.status,
       uploadProgress: uploadProgress ?? this.uploadProgress,
-      backendId: backendId ?? this.backendId,
-      message: message ?? this.message,
-      isBackLabel: isBackLabel ?? this.isBackLabel,
+      backendId: clearBackendId ? null : backendId ?? this.backendId,
+      message: clearMessage ? null : message ?? this.message,
     );
   }
 
   @override
   List<Object?> get props => [
         id,
-        file.path,
+        path,
         type,
         status,
         uploadProgress,
         backendId,
         message,
-        isBackLabel,
       ];
 }
