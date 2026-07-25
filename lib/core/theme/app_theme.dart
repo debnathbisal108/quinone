@@ -68,7 +68,7 @@ class AppTheme {
         ),
       ),
 
-      cardTheme: CardThemeData(
+      cardTheme: CardTheme(
         elevation: 0,
         margin: EdgeInsets.zero,
         color: colorScheme.surfaceContainerLow,
@@ -208,7 +208,7 @@ class AppTheme {
         ),
       ),
 
-      dialogTheme: DialogThemeData(
+      dialogTheme: DialogTheme(
         backgroundColor: colorScheme.surface,
         surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(
@@ -246,7 +246,7 @@ class AppTheme {
         selectedColor: colorScheme.primaryContainer,
         disabledColor:
             colorScheme.surfaceContainerHighest
-                .withValues(alpha: 0.5),
+                .withOpacity(0.5),
         side: BorderSide(
           color: colorScheme.outlineVariant,
         ),
