@@ -5,70 +5,39 @@ import '../models/upload_image.dart';
 class ImagePickerService {
   ImagePickerService._();
 
-  static final ImagePickerService instance =
-      ImagePickerService._();
+  static final ImagePickerService instance = ImagePickerService._();
 
   final ImagePicker _picker = ImagePicker();
 
-  // -------------------------------------------------------
-  // Camera
-  // -------------------------------------------------------
-
   Future<UploadImage?> pickFromCamera() async {
-    final pickedFile = await _picker.pickImage(
+    final XFile? pickedFile = await _picker.pickImage(
       source: ImageSource.camera,
       imageQuality: 88,
       preferredCameraDevice: CameraDevice.rear,
     );
 
-    if (pickedFile == null) {
-      return null;
-    }
-
-    return UploadImage(
-      id: _createId(pickedFile.path),
-      path: pickedFile.path,
+    return _toUploadImage(
+      pickedFile,
       type: UploadImageType.meal,
-      status: UploadStatus.ready,
     );
   }
 
-  // -------------------------------------------------------
-  // Single gallery image
-  // -------------------------------------------------------
-
-  Future<UploadImage?>
-      pickSingleFromGallery() async {
-    final pickedFile = await _picker.pickImage(
+  Future<UploadImage?> pickSingleFromGallery() async {
+    final XFile? pickedFile = await _picker.pickImage(
       source: ImageSource.gallery,
       imageQuality: 88,
     );
 
-    if (pickedFile == null) {
-      return null;
-    }
-
-    return UploadImage(
-      id: _createId(pickedFile.path),
-      path: pickedFile.path,
+    return _toUploadImage(
+      pickedFile,
       type: UploadImageType.meal,
-      status: UploadStatus.ready,
     );
   }
 
-  // -------------------------------------------------------
-  // Multiple gallery images
-  // -------------------------------------------------------
-
-  Future<List<UploadImage>>
-      pickMultipleFromGallery() async {
-    final pickedFiles = await _picker.pickMultiImage(
+  Future<List<UploadImage>> pickMultipleFromGallery() async {
+    final List<XFile> pickedFiles = await _picker.pickMultiImage(
       imageQuality: 88,
     );
-
-    if (pickedFiles.isEmpty) {
-      return const [];
-    }
 
     return pickedFiles
         .map(
@@ -79,52 +48,46 @@ class ImagePickerService {
             status: UploadStatus.ready,
           ),
         )
-        .toList();
+        .toList(growable: false);
   }
 
-  // -------------------------------------------------------
-  // Nutrition-label camera image
-  // -------------------------------------------------------
-
-  Future<UploadImage?>
-      pickBackLabelFromCamera() async {
-    final pickedFile = await _picker.pickImage(
+  Future<UploadImage?> pickBackLabelFromCamera() async {
+    final XFile? pickedFile = await _picker.pickImage(
       source: ImageSource.camera,
       imageQuality: 95,
       preferredCameraDevice: CameraDevice.rear,
     );
 
-    if (pickedFile == null) {
-      return null;
-    }
-
-    return UploadImage(
-      id: _createId(pickedFile.path),
-      path: pickedFile.path,
+    return _toUploadImage(
+      pickedFile,
       type: UploadImageType.backLabel,
-      status: UploadStatus.ready,
     );
   }
 
-  // -------------------------------------------------------
-  // Nutrition-label gallery image
-  // -------------------------------------------------------
-
-  Future<UploadImage?>
-      pickBackLabelFromGallery() async {
-    final pickedFile = await _picker.pickImage(
+  Future<UploadImage?> pickBackLabelFromGallery() async {
+    final XFile? pickedFile = await _picker.pickImage(
       source: ImageSource.gallery,
       imageQuality: 95,
     );
 
-    if (pickedFile == null) {
+    return _toUploadImage(
+      pickedFile,
+      type: UploadImageType.backLabel,
+    );
+  }
+
+  UploadImage? _toUploadImage(
+    XFile? file, {
+    required UploadImageType type,
+  }) {
+    if (file == null) {
       return null;
     }
 
     return UploadImage(
-      id: _createId(pickedFile.path),
-      path: pickedFile.path,
-      type: UploadImageType.backLabel,
+      id: _createId(file.path),
+      path: file.path,
+      type: type,
       status: UploadStatus.ready,
     );
   }
