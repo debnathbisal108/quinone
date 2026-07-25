@@ -428,7 +428,7 @@ class _ProfileSetupScreenState
                     child:
                         DropdownButtonFormField<
                             String>(
-                      initialValue: _selectedSex,
+                      value: _selectedSex,
                       isExpanded: true,
                       decoration:
                           const InputDecoration(
@@ -513,7 +513,7 @@ class _ProfileSetupScreenState
               const SizedBox(height: 14),
 
               DropdownButtonFormField<String>(
-                initialValue:
+                value:
                     _selectedActivityLevel,
                 isExpanded: true,
                 decoration: const InputDecoration(
@@ -540,7 +540,7 @@ class _ProfileSetupScreenState
               const SizedBox(height: 14),
 
               DropdownButtonFormField<String>(
-                initialValue: _selectedGoal,
+                value: _selectedGoal,
                 isExpanded: true,
                 decoration: const InputDecoration(
                   labelText: 'Primary goal',
