@@ -8,16 +8,12 @@ import '../models/upload_request.dart';
 import '../models/upload_response.dart';
 
 class UploadService {
-  UploadService({
+  const UploadService({
     required Dio dio,
   }) : _dio = dio;
 
   final Dio _dio;
 
-  /// Uploads images to the same analysis endpoint for:
-  ///
-  /// 1. Initial meal analysis
-  /// 2. Nutrition-label continuation after the backend requests it
   Future<UploadResponse> uploadImages({
     required UploadRequest request,
     ProgressCallback? onSendProgress,
@@ -32,12 +28,12 @@ class UploadService {
     try {
       final formData = FormData();
 
-      for (final path in request.imagePaths) {
-        final file = File(path);
+      for (final imagePath in request.imagePaths) {
+        final file = File(imagePath);
 
         if (!await file.exists()) {
           throw UploadServiceException(
-            'The selected image could not be found: $path',
+            'The selected image could not be found: $imagePath',
           );
         }
 
@@ -45,45 +41,36 @@ class UploadService {
           MapEntry(
             'images[]',
             await MultipartFile.fromFile(
-              path,
+              imagePath,
               filename: file.uri.pathSegments.isNotEmpty
                   ? file.uri.pathSegments.last
-                  : 'food_image.jpg',
+                  : 'meal_image.jpg',
             ),
           ),
         );
       }
 
-      final userProfile = request.userProfile;
-
-      if (userProfile != null && userProfile.isNotEmpty) {
+      final profile = request.userProfile;
+      if (profile != null && profile.isNotEmpty) {
         formData.fields.add(
           MapEntry(
             'user_profile',
-            jsonEncode(userProfile),
+            jsonEncode(profile),
           ),
         );
       }
 
       final analysisId = request.analysisId?.trim();
-
       if (analysisId != null && analysisId.isNotEmpty) {
         formData.fields.add(
-          MapEntry(
-            'analysis_id',
-            analysisId,
-          ),
+          MapEntry('analysis_id', analysisId),
         );
       }
 
       final foodId = request.foodId?.trim();
-
       if (foodId != null && foodId.isNotEmpty) {
         formData.fields.add(
-          MapEntry(
-            'food_id',
-            foodId,
-          ),
+          MapEntry('food_id', foodId),
         );
       }
 
@@ -101,15 +88,15 @@ class UploadService {
         ),
       );
 
-      final responseData = response.data;
+      final data = response.data;
 
-      if (responseData is Map<String, dynamic>) {
-        return UploadResponse.fromJson(responseData);
+      if (data is Map<String, dynamic>) {
+        return UploadResponse.fromJson(data);
       }
 
-      if (responseData is Map) {
+      if (data is Map) {
         return UploadResponse.fromJson(
-          Map<String, dynamic>.from(responseData),
+          Map<String, dynamic>.from(data),
         );
       }
 
@@ -119,8 +106,6 @@ class UploadService {
     } on UploadServiceException {
       rethrow;
     } on DioException {
-      // The repository is responsible for mapping Dio errors
-      // into user-friendly messages.
       rethrow;
     } on FormatException catch (error) {
       throw UploadServiceException(
@@ -135,9 +120,9 @@ class UploadService {
 }
 
 class UploadServiceException implements Exception {
-  final String message;
-
   const UploadServiceException(this.message);
+
+  final String message;
 
   @override
   String toString() => message;
