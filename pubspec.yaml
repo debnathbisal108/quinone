@@ -1,82 +1,118 @@
-name: quinone
-description: AI-powered nutrition intelligence platform.
-publish_to: "none"
+```yaml
+name: Build Flutter APK
 
-version: 1.0.0+1
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
 
-environment:
-  sdk: ">=3.5.0 <4.0.0"
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
 
-dependencies:
-  flutter:
-    sdk: flutter
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-  cupertino_icons: ^1.0.8
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
 
-  # -------------------------------
-  # State Management
-  # -------------------------------
-  flutter_riverpod: ^2.6.1
-  reorderable_grid_view: ^2.2.8
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.5"
+          channel: stable
+          cache: true
 
-  # -------------------------------
-  # Networking
-  # -------------------------------
-  dio: ^5.7.0
+      - name: Disable Flutter analytics
+        run: flutter config --no-analytics
 
-  # -------------------------------
-  # Routing
-  # -------------------------------
-  go_router: ^14.6.2
+      - name: Show installed versions
+        run: |
+          flutter --version
+          dart --version
+          java -version
 
-  # -------------------------------
-  # Image Handling
-  # -------------------------------
-  image_picker: ^1.1.2
-  file_picker: ^8.1.2
-  image: ^4.3.0
+      - name: Verify Flutter project
+        run: |
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "Error: pubspec.yaml was not found."
+            exit 1
+          fi
 
-  # -------------------------------
-  # Local Storage
-  # -------------------------------
-  hive: ^2.2.3
-  hive_flutter: ^1.1.0
-  path_provider: ^2.1.5
+          if [ ! -d "lib" ]; then
+            echo "Error: lib directory was not found."
+            exit 1
+          fi
 
-  # -------------------------------
-  # Utilities
-  # -------------------------------
-  intl: ^0.20.1
-  uuid: ^4.5.1
-  equatable: ^2.0.7
-  collection: ^1.18.0
+          if [ ! -f "lib/main.dart" ]; then
+            echo "Error: lib/main.dart was not found."
+            exit 1
+          fi
 
-  # -------------------------------
-  # Animations
-  # -------------------------------
-  flutter_animate: ^4.5.2
+      - name: Create Android platform
+        run: |
+          if [ ! -d "android" ]; then
+            flutter create . \
+              --platforms=android \
+              --project-name=quinone \
+              --org=com.quinone
+          fi
 
-  # -------------------------------
-  # UI
-  # -------------------------------
-  flutter_staggered_grid_view: ^0.7.0
-  reorderables: ^0.6.0
-  cached_network_image: ^3.4.1
+          rm -f test/widget_test.dart
 
-  # -------------------------------
-  # JSON
-  # -------------------------------
-  json_annotation: ^4.9.0
+      - name: Prepare asset directories
+        run: |
+          mkdir -p assets/images
+          mkdir -p assets/icons
+          mkdir -p assets/animations
 
-dev_dependencies:
-  flutter_test:
-    sdk: flutter
+      - name: Set Android SDK 35
+        run: |
+          if [ -f "android/app/build.gradle" ]; then
+            sed -i \
+              's/compileSdk flutter.compileSdkVersion/compileSdk 35/' \
+              android/app/build.gradle
 
-  flutter_lints: ^5.0.0
+            sed -i \
+              's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 35/' \
+              android/app/build.gradle
+          fi
 
-  build_runner: ^2.4.13
-  json_serializable: ^6.9.0
+          if [ -f "android/app/build.gradle.kts" ]; then
+            sed -i \
+              's/compileSdk = flutter.compileSdkVersion/compileSdk = 35/' \
+              android/app/build.gradle.kts
+          fi
 
-flutter:
+      - name: Install dependencies
+        run: flutter pub get
 
-  uses-material-design: true
+      - name: Analyze project
+        run: flutter analyze
+
+      - name: Build release APK
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+        run: |
+          if [ -z "$API_BASE_URL" ]; then
+            echo "Error: API_BASE_URL GitHub secret is not configured."
+            exit 1
+          fi
+
+          flutter build apk \
+            --release \
+            --dart-define=API_BASE_URL="$API_BASE_URL"
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: quinone-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
+```
