@@ -11,7 +11,7 @@ class ResultScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    // final theme = Theme.of(context);
 
     final mealName = _firstText(
       result,
@@ -283,7 +283,7 @@ class _ResultHeader extends StatelessWidget {
               style: theme.textTheme.bodyLarge?.copyWith(
                 color: theme
                     .colorScheme.onPrimaryContainer
-                    .withValues(alpha: 0.82),
+                    .withOpacity(0.82),
                 height: 1.45,
               ),
             ),
