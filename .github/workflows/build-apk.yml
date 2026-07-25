@@ -23,12 +23,17 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.22.0"
+          flutter-version: "3.24.5"
           channel: stable
           cache: true
 
-      - name: Show Flutter version
-        run: flutter --version
+      - name: Disable Flutter analytics
+        run: flutter config --no-analytics
+
+      - name: Show Flutter and Dart versions
+        run: |
+          flutter --version
+          dart --version
 
       - name: Verify Flutter project
         run: |
@@ -40,8 +45,8 @@ jobs:
       - name: Create Android platform if missing
         run: |
           if [ ! -d "android" ]; then
-            echo "Android folder is missing. Creating Android platform files..."
-            flutter create . --platforms android
+            echo "Android folder is missing. Creating Android files..."
+            flutter create . --platforms=android
           else
             echo "Android folder already exists."
           fi
@@ -53,24 +58,22 @@ jobs:
         run: flutter analyze
         continue-on-error: true
 
-      - name: Clean previous build
-        run: flutter clean
-
-      - name: Restore dependencies
-        run: flutter pub get
-
       - name: Build release APK
         run: |
           flutter build apk \
             --release \
             --dart-define=API_BASE_URL="${{ secrets.API_BASE_URL }}"
 
-      - name: Verify APK exists
+      - name: Verify APK
         run: |
-          if [ ! -f "build/app/outputs/flutter-apk/app-release.apk" ]; then
-            echo "APK was not generated."
+          APK_PATH="build/app/outputs/flutter-apk/app-release.apk"
+
+          if [ ! -f "$APK_PATH" ]; then
+            echo "APK was not generated at $APK_PATH"
             exit 1
           fi
+
+          ls -lh "$APK_PATH"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
