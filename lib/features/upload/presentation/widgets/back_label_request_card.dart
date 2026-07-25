@@ -6,16 +6,16 @@ import '../../providers/upload_provider.dart';
 import '../../services/image_picker_service.dart';
 
 class BackLabelRequestCard extends ConsumerWidget {
-  final String? analysisId;
-  final String? foodId;
-  final String foodName;
-
   const BackLabelRequestCard({
     super.key,
     required this.analysisId,
     required this.foodId,
     required this.foodName,
   });
+
+  final String? analysisId;
+  final String? foodId;
+  final String foodName;
 
   Future<void> _pickFromCamera(
     BuildContext context,
@@ -72,8 +72,7 @@ class BackLabelRequestCard extends ConsumerWidget {
       return;
     }
 
-    final profilePayload =
-        ref.read(profileProvider).backendPayload;
+    final profilePayload = ref.read(profileProvider).profile;
 
     await ref.read(uploadProvider.notifier).uploadBackLabel(
           imagePath: imagePath,
@@ -111,9 +110,7 @@ class BackLabelRequestCard extends ConsumerWidget {
         color: theme.colorScheme.tertiaryContainer,
         borderRadius: BorderRadius.circular(24),
         border: Border.all(
-          color: theme.colorScheme.tertiary.withValues(
-            alpha: 0.25,
-          ),
+          color: theme.colorScheme.tertiary.withOpacity(0.25),
         ),
       ),
       child: Column(
@@ -125,11 +122,11 @@ class BackLabelRequestCard extends ConsumerWidget {
               Container(
                 width: 48,
                 height: 48,
+                alignment: Alignment.center,
                 decoration: BoxDecoration(
                   color: theme.colorScheme.tertiary,
                   shape: BoxShape.circle,
                 ),
-                alignment: Alignment.center,
                 child: Icon(
                   Icons.document_scanner_rounded,
                   color: theme.colorScheme.onTertiary,
@@ -174,33 +171,39 @@ class BackLabelRequestCard extends ConsumerWidget {
                 theme.colorScheme.onTertiaryContainer,
           ),
           const SizedBox(height: 22),
-          FilledButton.icon(
-            onPressed: uploadState.isUploading
-                ? null
-                : () => _pickFromCamera(
-                      context,
-                      ref,
-                    ),
-            icon: const Icon(
-              Icons.camera_alt_rounded,
-            ),
-            label: const Text(
-              'Take label photo',
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: uploadState.isUploading
+                  ? null
+                  : () => _pickFromCamera(
+                        context,
+                        ref,
+                      ),
+              icon: const Icon(
+                Icons.camera_alt_rounded,
+              ),
+              label: const Text(
+                'Take label photo',
+              ),
             ),
           ),
           const SizedBox(height: 10),
-          OutlinedButton.icon(
-            onPressed: uploadState.isUploading
-                ? null
-                : () => _pickFromGallery(
-                      context,
-                      ref,
-                    ),
-            icon: const Icon(
-              Icons.photo_library_outlined,
-            ),
-            label: const Text(
-              'Choose from gallery',
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: uploadState.isUploading
+                  ? null
+                  : () => _pickFromGallery(
+                        context,
+                        ref,
+                      ),
+              icon: const Icon(
+                Icons.photo_library_outlined,
+              ),
+              label: const Text(
+                'Choose from gallery',
+              ),
             ),
           ),
           if (uploadState.isUploading) ...[
@@ -226,15 +229,15 @@ class BackLabelRequestCard extends ConsumerWidget {
 }
 
 class _LabelTips extends StatelessWidget {
-  final Color textColor;
-
   const _LabelTips({
     required this.textColor,
   });
 
+  final Color textColor;
+
   @override
   Widget build(BuildContext context) {
-    const tips = [
+    const tips = <String>[
       'Keep the complete label inside the frame.',
       'Make sure text and numbers are readable.',
       'Avoid glare, shadows, and motion blur.',
@@ -243,7 +246,7 @@ class _LabelTips extends StatelessWidget {
 
     return Column(
       children: [
-        for (final tip in tips) ...[
+        for (var index = 0; index < tips.length; index++) ...[
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -255,7 +258,7 @@ class _LabelTips extends StatelessWidget {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  tip,
+                  tips[index],
                   style: Theme.of(context)
                       .textTheme
                       .bodyMedium
@@ -266,11 +269,10 @@ class _LabelTips extends StatelessWidget {
               ),
             ],
           ),
-          if (tip != tips.last)
+          if (index < tips.length - 1)
             const SizedBox(height: 10),
         ],
       ],
     );
   }
 }
-
