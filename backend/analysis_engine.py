@@ -9,7 +9,6 @@ from typing import Any
 from difflib import SequenceMatcher
 
 # API_KEY = "YOUR_API_KEY"
-# API_KEY = "AIzaSyDBE_voqLSs9anTp92RjIwbwnMIX6P5aDs"
 
 # client = genai.Client(api_key=API_KEY)
 
