@@ -243,7 +243,7 @@ class _SourceOption extends StatelessWidget {
       color: enabled
           ? theme.colorScheme.surfaceContainerLow
           : theme.colorScheme.surfaceContainerLow
-              .withValues(alpha: 0.55),
+              .withOpacity(0.55),
       borderRadius: BorderRadius.circular(20),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
