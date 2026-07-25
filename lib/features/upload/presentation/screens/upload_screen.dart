@@ -66,7 +66,7 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
     _handledResponse = false;
 
     final profilePayload =
-        ref.read(profileProvider).backendPayload;
+        ref.read(profileProvider).profile;
 
     await ref.read(uploadProvider.notifier).upload(
           userProfile: profilePayload,
