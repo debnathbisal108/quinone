@@ -31,7 +31,6 @@ logger.setLevel(os.environ.get("NUTRICA_LOG_LEVEL", "INFO"))
 # =========================================================================
 
 USDA_SEARCH_URL = "https://api.nal.usda.gov/fdc/v1/foods/search"
-# USDA_API_KEY = "clHQe1vDE6rhklUbXUk3hUzRo2p7dM26pilm0vua"
 
 USDA_API_KEY = os.environ.get(
     "USDA_API_KEY"
