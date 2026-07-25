@@ -1,4 +1,3 @@
-```dart
 import 'package:image_picker/image_picker.dart';
 
 import '../models/upload_image.dart';
@@ -134,4 +133,3 @@ class ImagePickerService {
     return '${DateTime.now().microsecondsSinceEpoch}_${path.hashCode}';
   }
 }
-```
