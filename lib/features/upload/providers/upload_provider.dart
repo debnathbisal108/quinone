@@ -436,18 +436,15 @@ class UploadState {
   bool get hasImages => images.isNotEmpty;
 
   bool get isWaitingForBackLabel {
-    final data = response?.data;
-
-    if (data is Map<String, dynamic>) {
-      return data['status'] ==
-          'waiting_for_back_label';
+    final Object? rawData = response?.data;
+  
+    if (rawData is! Map) {
+      return false;
     }
-
-    if (data is Map) {
-      return data['status'] ==
-          'waiting_for_back_label';
-    }
-
-    return false;
+  
+    final data = Map<String, dynamic>.from(rawData);
+  
+    return data['status']?.toString() ==
+        'waiting_for_back_label';
   }
 }
