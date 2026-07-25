@@ -27,13 +27,11 @@ class UploadRepository {
     _cancelToken = cancelToken;
 
     try {
-      final response = await _service.uploadImages(
+      return await _service.uploadImages(
         request: request,
         cancelToken: cancelToken,
         onSendProgress: onSendProgress,
       );
-
-      return response;
     } on DioException catch (error) {
       throw _mapDioException(error);
     } finally {
@@ -52,20 +50,17 @@ class UploadRepository {
   void _cancelCurrentRequest({
     String reason = 'A new upload was started.',
   }) {
-    final currentToken = _cancelToken;
+    final token = _cancelToken;
 
-    if (currentToken == null ||
-        currentToken.isCancelled) {
+    if (token == null || token.isCancelled) {
       return;
     }
 
-    currentToken.cancel(reason);
+    token.cancel(reason);
     _cancelToken = null;
   }
 
-  Exception _mapDioException(
-    DioException error,
-  ) {
+  Exception _mapDioException(DioException error) {
     if (CancelToken.isCancel(error)) {
       return Exception('Upload cancelled.');
     }
@@ -84,6 +79,11 @@ class UploadRepository {
       case DioExceptionType.receiveTimeout:
         return Exception(
           'The server took too long to finish the analysis.',
+        );
+
+      case DioExceptionType.transformTimeout:
+        return Exception(
+          'The server response took too long to process.',
         );
 
       case DioExceptionType.connectionError:
@@ -107,9 +107,7 @@ class UploadRepository {
         final originalError = error.error;
 
         if (originalError != null) {
-          return Exception(
-            originalError.toString(),
-          );
+          return Exception(originalError.toString());
         }
 
         return Exception(
@@ -118,15 +116,13 @@ class UploadRepository {
     }
   }
 
-  Exception _mapBadResponse(
-    Response<dynamic>? response,
-  ) {
+  Exception _mapBadResponse(Response<dynamic>? response) {
     final statusCode = response?.statusCode;
-    final serverMessage =
-        _extractServerMessage(response?.data);
+    final serverMessage = _extractServerMessage(
+      response?.data,
+    );
 
-    if (serverMessage != null &&
-        serverMessage.isNotEmpty) {
+    if (serverMessage != null && serverMessage.isNotEmpty) {
       return Exception(serverMessage);
     }
 
@@ -135,60 +131,49 @@ class UploadRepository {
         return Exception(
           'The server could not process the uploaded data.',
         );
-
       case 401:
         return Exception(
           'The analysis request was not authorized.',
         );
-
       case 403:
         return Exception(
           'The server refused the analysis request.',
         );
-
       case 404:
         return Exception(
           'The analysis endpoint was not found.',
         );
-
       case 408:
         return Exception(
           'The analysis request timed out.',
         );
-
       case 413:
         return Exception(
           'The selected images are too large to upload.',
         );
-
       case 415:
         return Exception(
           'One or more selected image formats are unsupported.',
         );
-
       case 422:
         return Exception(
           'The server could not validate the analysis request.',
         );
-
       case 429:
         return Exception(
           'Too many analysis requests were sent. '
           'Please try again shortly.',
         );
-
       case 500:
         return Exception(
           'The server encountered an internal error.',
         );
-
       case 502:
       case 503:
       case 504:
         return Exception(
           'The analysis service is temporarily unavailable.',
         );
-
       default:
         return Exception(
           statusCode == null
@@ -199,9 +184,7 @@ class UploadRepository {
     }
   }
 
-  String? _extractServerMessage(
-    dynamic data,
-  ) {
+  String? _extractServerMessage(dynamic data) {
     if (data == null) {
       return null;
     }
@@ -224,10 +207,8 @@ class UploadRepository {
     return null;
   }
 
-  String? _messageFromMap(
-    Map<String, dynamic> data,
-  ) {
-    const messageKeys = [
+  String? _messageFromMap(Map<String, dynamic> data) {
+    const messageKeys = <String>[
       'message',
       'error',
       'detail',
@@ -237,8 +218,7 @@ class UploadRepository {
     for (final key in messageKeys) {
       final value = data[key];
 
-      if (value is String &&
-          value.trim().isNotEmpty) {
+      if (value is String && value.trim().isNotEmpty) {
         return value.trim();
       }
 
@@ -247,8 +227,7 @@ class UploadRepository {
       }
 
       if (value is Map) {
-        final nestedMessage =
-            _extractServerMessage(value);
+        final nestedMessage = _extractServerMessage(value);
 
         if (nestedMessage != null) {
           return nestedMessage;
