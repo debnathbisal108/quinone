@@ -377,9 +377,14 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
               if (!uploadState.isUploading &&
                   !isWaitingForLabel) ...[
                 const SizedBox(height: 28),
+                // AnalyzeButton(
+                //   enabled: uploadState.images.isNotEmpty,
+                //   isLoading: false,
+                //   onPressed: _startAnalysis,
+                // ),
                 AnalyzeButton(
                   enabled: uploadState.images.isNotEmpty,
-                  isLoading: false,
+                  loading: false,
                   onPressed: _startAnalysis,
                 ),
               ],
