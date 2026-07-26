@@ -10,10 +10,10 @@ class ApiConfig {
   static const String apiVersion = "/api/v1";
 
   /// Analyze endpoint
-  static const String analyzeEndpoint = "$apiVersion/analyze";
+  static const String analyzeEndpoint = "/analyze";
 
   /// Health check
-  static const String healthEndpoint = "$apiVersion/health";
+  static const String healthEndpoint = "/health";
 
   /// Timeout
   static const Duration connectTimeout = Duration(seconds: 60);
