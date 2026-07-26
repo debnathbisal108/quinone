@@ -584,7 +584,7 @@ async def _resolve_one_food(client: httpx.AsyncClient, food: Dict[str, Any]) -> 
 
 
 async def resolve_meal(
-    nalysis_result: Dict[str, Any],
+    analysis_result: Dict[str, Any],
 ) -> Dict[str, Any]:
     """    
     Main entry point.
