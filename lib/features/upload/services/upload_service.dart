@@ -39,7 +39,7 @@ class UploadService {
 
         formData.files.add(
           MapEntry(
-            'images[]',
+            'images',
             await MultipartFile.fromFile(
               imagePath,
               filename: file.uri.pathSegments.isNotEmpty
@@ -54,7 +54,7 @@ class UploadService {
       if (profile != null && profile.isNotEmpty) {
         formData.fields.add(
           MapEntry(
-            'user_profile',
+            'profile',
             jsonEncode(profile),
           ),
         );
