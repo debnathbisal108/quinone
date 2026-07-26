@@ -87,26 +87,27 @@ class UploadRepository {
         );
 
       case DioExceptionType.connectionError:
-        // return Exception(
-        //   'Could not connect to the analysis server. '
-        //   'Check your internet connection and server URL.',
-        // );
+        return Exception(
+          'Could not connect to the analysis server.\n'
+          'URL: ${error.requestOptions.uri}\n'
+          'Details: ${error.message}',
+        );
 
-        final status = error.response?.statusCode;
+        // final status = error.response?.statusCode;
 
-        if (status == 404) {
-          return 'The analysis endpoint was not found. Check the API URL.';
-        }
+        // if (status == 404) {
+        //   return 'The analysis endpoint was not found. Check the API URL.';
+        // }
 
-        if (status == 401 || status == 403) {
-          return 'The analysis server rejected the request.';
-        }
+        // if (status == 401 || status == 403) {
+        //   return 'The analysis server rejected the request.';
+        // }
 
-        if (status != null && status >= 500) {
-          return 'The analysis server encountered an error.';
-        }
+        // if (status != null && status >= 500) {
+        //   return 'The analysis server encountered an error.';
+        // }
 
-        return 'The server returned an unexpected response${status != null ? ' ($status)' : ''}.';
+        // return 'The server returned an unexpected response${status != null ? ' ($status)' : ''}.';
 
       case DioExceptionType.badCertificate:
         return Exception(
