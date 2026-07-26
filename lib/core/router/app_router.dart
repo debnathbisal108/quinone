@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../features/onboarding/presentation/screens/onboarding_screen.dart';
+import '../../features/result/models/analysis_result.dart';
 import '../../features/result/presentation/screens/result_screen.dart';
 import '../../features/upload/presentation/screens/upload_screen.dart';
 import '../../features/profile/presentation/screens/profile_setup_screen.dart';
@@ -37,17 +38,13 @@ class AppRouter {
         path: '/result',
         name: 'result',
         builder: (context, state) {
-          final result = _normalizeResult(
-            state.extra,
-          );
+          final result = _normalizeResult(state.extra);
 
           if (result == null) {
             return const _MissingResultScreen();
           }
 
-          return ResultScreen(
-            result: result,
-          );
+          return ResultScreen(result: AnalysisResult.fromJson(result));
         },
       ),
     ],
