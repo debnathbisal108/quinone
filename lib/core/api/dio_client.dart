@@ -5,7 +5,7 @@ class DioClient {
 
   /// Change this when you deploy.
   static const String baseUrl =
-      'http://10.0.2.2:8000';
+      'https://quinone.onrender.com';
 
   static final Dio instance = Dio(
     BaseOptions(
