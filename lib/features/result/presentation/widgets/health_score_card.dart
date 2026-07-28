@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import '../../models/analysis_result.dart';
 
+// import 'package:flutter/material.dart';
+// import 'package:quinone/features/result/models/analysis_result.dart';
+
 class HealthScoreCard extends StatelessWidget {
   const HealthScoreCard({super.key, required this.item});
   final HealthScore item;
