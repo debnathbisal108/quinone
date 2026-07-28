@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../models/analysis_result.dart';
+// import 'package:flutter/material.dart';
+// import 'package:quinone/features/result/models/analysis_result.dart';
 
 class FoodCard extends StatelessWidget {
   const FoodCard({super.key, required this.food});
