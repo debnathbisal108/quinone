@@ -1,19 +1,31 @@
+import 'package:flutter/foundation.dart';
 import '../../result/models/analysis_result.dart';
+
+// import 'package:quinone/features/result/models/analysis_result.dart';
 
 class UploadResponse {
   final bool success;
   final Map<String, dynamic> data;
   final String? message;
 
-  const UploadResponse({required this.success, required this.data, this.message});
+  const UploadResponse({
+    required this.success,
+    required this.data,
+    this.message,
+  });
 
   AnalysisResult? get analysisResult {
     final status = data['status']?.toString().toLowerCase();
-    if (status == 'waiting_for_back_label' || status == 'no_food_detected') return null;
+    if (status == 'waiting_for_back_label' || status == 'no_food_detected') {
+      return null;
+    }
+
     try {
       return AnalysisResult.fromJson(data);
-    } catch (_) {
-      return null;
+    } on FormatException catch (error, stackTrace) {
+      debugPrint('Invalid analysis response: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      rethrow;
     }
   }
 
