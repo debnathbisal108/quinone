@@ -14,11 +14,16 @@ from analysis_engine import (
     analyze_meal,
     continue_with_back_label,
 )
-from evidence_engine import POPULATION_MODIFIERS, attach_evidence
+from evidence_engine import attach_evidence
 from feature_engineering import compute_features
 from health_domain_scoring import attach_domain_scores
 from food_resolver import resolve_meal
 from nutrient_profile import attach_nutrients
+from personalization_engine import (
+    attach_personalization,
+    determine_active_modifiers,
+    load_modifier_database,
+)
 
 
 APP_NAME = "Quinone API"
@@ -331,121 +336,139 @@ async def run_nutrica_pipeline(
     profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Run the complete post-vision pipeline:
+    Run the complete post-vision pipeline.
 
-    1. Resolve foods.
-    2. Attach standardized nutrients.
-    3. Compute derived features.
-    4. Evaluate health evidence.
-    5. Aggregate health-domain scores.
-
-    Population modifiers are opt-in. They are read only from the explicit
-    profile fields "active_modifiers" or "health_modifiers"; medical
-    conditions are never inferred from arbitrary profile text.
+    Generic health-domain scores are always calculated first. The separate
+    personalization phase runs only when the normalized user profile activates
+    at least one supported modifier. This prevents empty/basic profiles from
+    changing the generic result and avoids applying modifiers twice.
     """
-    active_modifiers = extract_active_modifiers(
-        profile
+    resolved_result = await resolve_meal(analysis_result)
+    nutrient_result = await attach_nutrients(resolved_result)
+    feature_result = await compute_features(nutrient_result)
+
+    # Evidence remains population-neutral here. Personal reweighting is handled
+    # once, after domain scoring, by personalization_engine.py.
+    evidence_result = await attach_evidence(feature_result)
+    scored_result = await attach_domain_scores(evidence_result)
+
+    personalization_profile = normalize_personalization_profile(profile)
+    active_modifiers = determine_active_modifiers(
+        personalization_profile,
+        load_modifier_database(),
     )
 
-    resolved_result = await resolve_meal(
-        analysis_result
+    if not active_modifiers:
+        return scored_result
+
+    return await attach_personalization(
+        scored_result,
+        personalization_profile,
     )
 
-    nutrient_result = await attach_nutrients(
-        resolved_result
-    )
 
-    feature_result = await compute_features(
-        nutrient_result
-    )
-
-    evidence_result = await attach_evidence(
-        feature_result,
-        active_modifiers=active_modifiers,
-    )
-
-    scored_result = await attach_domain_scores(
-        evidence_result
-    )
-
-    return scored_result
-
-
-def extract_active_modifiers(
+def normalize_personalization_profile(
     profile: dict[str, Any] | None,
-) -> tuple[str, ...]:
-    """
-    Return validated, explicitly selected evidence-engine modifiers.
-
-    Accepted profile examples:
-
-        {"active_modifiers": ["hypertension", "ckd"]}
-
-    or:
-
-        {"health_modifiers": ["vegetarian_vegan"]}
-
-    Unknown values are rejected so spelling mistakes do not silently
-    disable clinically relevant modifier behavior.
-    """
+) -> dict[str, Any]:
+    """Convert Quinone's current Flutter profile payload to the engine schema."""
     if not isinstance(profile, dict):
-        return ()
+        return {}
 
-    raw_modifiers = profile.get(
-        "active_modifiers"
-    )
+    normalized = dict(profile)
 
-    if raw_modifiers is None:
-        raw_modifiers = profile.get(
-            "health_modifiers"
-        )
+    # Flutter currently sends chronic_conditions as a map of booleans.
+    raw_conditions = profile.get("chronic_conditions")
+    conditions: list[str] = []
+    if isinstance(raw_conditions, dict):
+        aliases = {
+            "diabetes": "diabetes",
+            "type_2_diabetes": "type_2_diabetes",
+            "prediabetes": "prediabetes",
+            "ckd": "ckd",
+            "chronic_kidney_disease": "chronic_kidney_disease",
+            "hypertension": "hypertension",
+            "high_blood_pressure": "high_blood_pressure",
+            "hyperlipidemia": "hyperlipidemia",
+            "dyslipidemia": "dyslipidemia",
+            "ibs": "ibs",
+            "ibd": "ibd",
+            "osteoporosis": "osteoporosis",
+            "osteoarthritis": "osteoarthritis",
+            "rheumatoid_arthritis": "rheumatoid_arthritis",
+            "heart_failure": "heart_failure",
+        }
+        for key, enabled in raw_conditions.items():
+            if enabled:
+                conditions.append(aliases.get(str(key).strip().lower(), str(key).strip().lower()))
+    elif isinstance(raw_conditions, (list, tuple, set)):
+        conditions.extend(str(value).strip().lower() for value in raw_conditions if str(value).strip())
 
-    if raw_modifiers is None:
-        return ()
+    # Support older/profile-setup payloads that store conditions as free text.
+    health_conditions = profile.get("health_conditions")
+    if isinstance(health_conditions, str) and health_conditions.strip():
+        text = health_conditions.lower().replace(";", ",")
+        keyword_aliases = {
+            "diabetes": "diabetes",
+            "prediabetes": "prediabetes",
+            "kidney": "ckd",
+            "ckd": "ckd",
+            "hypertension": "hypertension",
+            "high blood pressure": "high_blood_pressure",
+            "cholesterol": "high_cholesterol",
+            "hyperlipidemia": "hyperlipidemia",
+            "ibs": "ibs",
+            "osteoporosis": "osteoporosis",
+            "osteoarthritis": "osteoarthritis",
+            "rheumatoid": "rheumatoid_arthritis",
+        }
+        for keyword, condition_id in keyword_aliases.items():
+            if keyword in text:
+                conditions.append(condition_id)
 
-    if not isinstance(
-        raw_modifiers,
-        list,
-    ):
-        raise ValueError(
-            "'active_modifiers' must be "
-            "a JSON array of strings."
-        )
+    normalized["chronic_conditions"] = list(dict.fromkeys(conditions))
 
-    available_modifiers = {
-        modifier.modifier_id
-        for modifier in POPULATION_MODIFIERS
-    }
+    if profile.get("vegetarian") is True:
+        normalized["diet_type"] = "vegetarian"
+    elif profile.get("vegan") is True:
+        normalized["diet_type"] = "vegan"
+    elif not normalized.get("diet_type"):
+        preference = profile.get("dietary_preferences")
+        if isinstance(preference, str):
+            lowered = preference.strip().lower()
+            if "vegan" in lowered:
+                normalized["diet_type"] = "vegan"
+            elif "vegetarian" in lowered:
+                normalized["diet_type"] = "vegetarian"
 
-    selected: list[str] = []
-    unknown: list[str] = []
+    # Normalize common UI labels to the IDs used by the modifier database.
+    goal = normalized.get("goal")
+    if isinstance(goal, str):
+        normalized_goal = goal.strip().lower().replace(" ", "_").replace("-", "_")
+        goal_aliases = {
+            "lose_weight": "weight_loss",
+            "weight_reduction": "weight_loss",
+            "gain_muscle": "muscle_gain",
+            "build_muscle": "muscle_gain",
+        }
+        normalized["goal"] = goal_aliases.get(normalized_goal, normalized_goal)
 
-    for value in raw_modifiers:
-        if not isinstance(value, str):
-            raise ValueError(
-                "Every active modifier must "
-                "be a string."
-            )
+    activity = normalized.get("activity_level")
+    if isinstance(activity, str):
+        normalized_activity = activity.strip().lower().replace(" ", "_").replace("-", "_")
+        activity_aliases = {
+            "lightly_active": "active",
+            "moderately_active": "active",
+            "highly_active": "very_active",
+        }
+        normalized["activity_level"] = activity_aliases.get(normalized_activity, normalized_activity)
 
-        modifier_id = value.strip()
+    return normalized
 
-        if not modifier_id:
-            continue
 
-        if modifier_id not in available_modifiers:
-            unknown.append(modifier_id)
-            continue
-
-        if modifier_id not in selected:
-            selected.append(modifier_id)
-
-    if unknown:
-        raise ValueError(
-            "Unknown health modifier(s): "
-            + ", ".join(sorted(unknown))
-        )
-
-    return tuple(selected)
+def has_personalization_modifiers(profile: dict[str, Any] | None) -> bool:
+    """Public helper for tests/diagnostics."""
+    normalized = normalize_personalization_profile(profile)
+    return bool(determine_active_modifiers(normalized, load_modifier_database()))
 
 
 async def save_upload(
