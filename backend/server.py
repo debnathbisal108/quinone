@@ -19,11 +19,25 @@ from feature_engineering import compute_features
 from health_domain_scoring import attach_domain_scores
 from food_resolver import resolve_meal
 from nutrient_profile import attach_nutrients
-from personalization_engine import (
-    attach_personalization,
-    determine_active_modifiers,
-    load_modifier_database,
-)
+
+# ENABLE_PERSONALIZATION = True
+
+ENABLE_PERSONALIZATION = False
+
+if ENABLE_PERSONALIZATION:
+    from personalization_engine import (
+        attach_personalization,
+        normalize_profile,
+        determine_active_modifiers,
+        load_modifier_database
+    )
+
+
+# from personalization_engine import (
+#     attach_personalization,
+#     determine_active_modifiers,
+#     load_modifier_database,
+# )
 
 
 APP_NAME = "Quinone API"
@@ -352,19 +366,19 @@ async def run_nutrica_pipeline(
     evidence_result = await attach_evidence(feature_result)
     scored_result = await attach_domain_scores(evidence_result)
 
-    personalization_profile = normalize_personalization_profile(profile)
-    active_modifiers = determine_active_modifiers(
-        personalization_profile,
-        load_modifier_database(),
-    )
+    # personalization_profile = normalize_personalization_profile(profile)
+    # active_modifiers = determine_active_modifiers(
+    #     personalization_profile,
+    #     load_modifier_database(),
+    # )
 
-    if not active_modifiers:
-        return scored_result
+    # if not active_modifiers:
+    return scored_result
 
-    return await attach_personalization(
-        scored_result,
-        personalization_profile,
-    )
+    # return await attach_personalization(
+    #     scored_result,
+    #     personalization_profile,
+    # )
 
 
 def normalize_personalization_profile(
@@ -469,6 +483,7 @@ def has_personalization_modifiers(profile: dict[str, Any] | None) -> bool:
     """Public helper for tests/diagnostics."""
     normalized = normalize_personalization_profile(profile)
     return bool(determine_active_modifiers(normalized, load_modifier_database()))
+    # return False
 
 
 async def save_upload(
