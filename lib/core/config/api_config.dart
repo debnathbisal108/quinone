@@ -12,6 +12,9 @@ class ApiConfig {
   /// Analyze endpoint
   static const String analyzeEndpoint = "/analyze";
 
+  static const String backLabelEndpoint =
+      "/analyze/back-label";
+
   /// Health check
   static const String healthEndpoint = "/health";
 
