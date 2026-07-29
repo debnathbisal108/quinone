@@ -38,13 +38,30 @@ class AppRouter {
         path: '/result',
         name: 'result',
         builder: (context, state) {
-          final result = _normalizeResult(state.extra);
+          final extra = state.extra;
 
+          if (extra is AnalysisResult) {
+            return ResultScreen(result: extra);
+          }
+
+          final result = _normalizeResult(extra);
           if (result == null) {
             return const _MissingResultScreen();
           }
 
-          return ResultScreen(result: AnalysisResult.fromJson(result));
+          try {
+            return ResultScreen(
+              result: AnalysisResult.fromJson(result),
+            );
+          } on FormatException catch (error) {
+            return _InvalidResultScreen(
+              errorMessage: error.message,
+            );
+          } catch (error) {
+            return _InvalidResultScreen(
+              errorMessage: error.toString(),
+            );
+          }
         },
       ),
     ],
@@ -71,6 +88,64 @@ class AppRouter {
     }
 
     return null;
+  }
+}
+
+
+class _InvalidResultScreen extends StatelessWidget {
+  const _InvalidResultScreen({
+    required this.errorMessage,
+  });
+
+  final String errorMessage;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Analysis result'),
+      ),
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.warning_amber_rounded,
+                  size: 58,
+                  color: theme.colorScheme.error,
+                ),
+                const SizedBox(height: 18),
+                Text(
+                  'The result could not be displayed',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  errorMessage,
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 24),
+                FilledButton(
+                  onPressed: () => context.go('/upload'),
+                  child: const Text('Back to analysis'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
