@@ -190,9 +190,8 @@ class UploadNotifier extends StateNotifier<UploadState> {
         uploadProgress: 1,
         progressMessage: 'Analysis complete',
         response: response,
-        analysisId:
-            responseData?['analysis_id']?.toString(),
-        foodId: responseData?['food_id']?.toString(),
+        analysisId: _extractAnalysisId(responseData),
+        foodId: _extractFoodId(responseData),
       );
     } catch (error) {
       _stopProcessingProgress();
@@ -283,10 +282,10 @@ class UploadNotifier extends StateNotifier<UploadState> {
         progressMessage: 'Analysis complete',
         response: response,
         analysisId:
-            responseData?['analysis_id']?.toString() ??
+            _extractAnalysisId(responseData) ??
                 resolvedAnalysisId,
         foodId:
-            responseData?['food_id']?.toString() ??
+            _extractFoodId(responseData) ??
                 resolvedFoodId,
       );
     } catch (error) {
@@ -400,6 +399,108 @@ class UploadNotifier extends StateNotifier<UploadState> {
 
     if (data is Map) {
       return Map<String, dynamic>.from(data);
+    }
+
+    return null;
+  }
+
+  String? _extractAnalysisId(
+    Map<String, dynamic>? responseData,
+  ) {
+    if (responseData == null) {
+      return null;
+    }
+
+    return _firstNonEmptyText([
+      responseData['analysis_id'],
+      _findFirstValue(
+        responseData,
+        const {'analysis_id'},
+      ),
+    ]);
+  }
+
+  String? _extractFoodId(
+    Map<String, dynamic>? responseData,
+  ) {
+    if (responseData == null) {
+      return null;
+    }
+
+    return _firstNonEmptyText([
+      responseData['food_id'],
+      responseData['target_food_id'],
+      _findFirstValue(
+        responseData,
+        const {
+          'food_id',
+          'target_food_id',
+        },
+      ),
+    ]);
+  }
+
+  dynamic _findFirstValue(
+    dynamic value,
+    Set<String> targetKeys,
+  ) {
+    if (value is List) {
+      for (final item in value) {
+        final result = _findFirstValue(
+          item,
+          targetKeys,
+        );
+
+        if (_firstNonEmptyText([result]) != null) {
+          return result;
+        }
+      }
+
+      return null;
+    }
+
+    if (value is! Map) {
+      return null;
+    }
+
+    final map = Map<String, dynamic>.from(value);
+
+    for (final key in targetKeys) {
+      final directValue = map[key];
+
+      if (_firstNonEmptyText([directValue]) != null) {
+        return directValue;
+      }
+    }
+
+    for (final nestedValue in map.values) {
+      final result = _findFirstValue(
+        nestedValue,
+        targetKeys,
+      );
+
+      if (_firstNonEmptyText([result]) != null) {
+        return result;
+      }
+    }
+
+    return null;
+  }
+
+  String? _firstNonEmptyText(
+    List<dynamic> values,
+  ) {
+    for (final value in values) {
+      if (value == null) {
+        continue;
+      }
+
+      final text = value.toString().trim();
+
+      if (text.isNotEmpty &&
+          text.toLowerCase() != 'null') {
+        return text;
+      }
     }
 
     return null;
