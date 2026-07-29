@@ -90,12 +90,12 @@ class AnalysisResult {
         .toList(growable: false);
 
     final authoritativeNutrition = _findAuthoritativeNutrition(root, meal);
-    if (authoritativeNutrition == null) {
-      throw const FormatException(
-        'The backend response does not contain authoritative meal-level nutrition totals.',
-      );
-    }
-    final nutrition = authoritativeNutrition;
+    final usedAuthoritativeTotals = authoritativeNutrition != null;
+
+    // The current backend may return nutrients only inside each detected food.
+    // In that valid response shape, build the meal totals from the unique foods
+    // instead of rejecting the completed response.
+    final nutrition = authoritativeNutrition ?? _aggregateFoodNutrition(foods);
 
     final macros = _extractMacroMap(nutrition);
     final vitamins = _extractSection(nutrition, const ['vitamins']);
@@ -112,6 +112,7 @@ class AnalysisResult {
     );
     final scoreMap = personalizedScores ??
         _asMap(meal['health_domain_scores']) ??
+        _asMap(root['health_domain_scores']) ??
         _asMap(root['health_scores']) ??
         const <String, dynamic>{};
 
@@ -154,7 +155,7 @@ class AnalysisResult {
       healthScores: List.unmodifiable(scores),
       micronutrients: List.unmodifiable(micronutrients),
       foods: List.unmodifiable(foods),
-      usedAuthoritativeNutritionTotals: true,
+      usedAuthoritativeNutritionTotals: usedAuthoritativeTotals,
     );
   }
 
@@ -333,6 +334,48 @@ const _definitions = <String, _NutrientDefinition>{
   'selenium_ug': _NutrientDefinition('Selenium', 55, 'µg'),
 };
 
+
+Map<String, dynamic> _aggregateFoodNutrition(List<FoodSummary> foods) {
+  final uniqueFoods = <String, FoodSummary>{};
+
+  for (final food in foods) {
+    final existing = uniqueFoods[food.identity];
+    if (existing == null ||
+        food.macronutrients.length + food.vitamins.length + food.minerals.length >
+            existing.macronutrients.length +
+                existing.vitamins.length +
+                existing.minerals.length) {
+      uniqueFoods[food.identity] = food;
+    }
+  }
+
+  final macros = <String, double>{};
+  final vitamins = <String, double>{};
+  final minerals = <String, double>{};
+
+  void addValues(Map<String, double> target, Map<String, double> source) {
+    for (final entry in source.entries) {
+      target.update(
+        entry.key,
+        (value) => value + entry.value,
+        ifAbsent: () => entry.value,
+      );
+    }
+  }
+
+  for (final food in uniqueFoods.values) {
+    addValues(macros, food.macronutrients);
+    addValues(vitamins, food.vitamins);
+    addValues(minerals, food.minerals);
+  }
+
+  return <String, dynamic>{
+    'macronutrients': macros,
+    'vitamins': vitamins,
+    'minerals': minerals,
+  };
+}
+
 Map<String, dynamic>? _findAuthoritativeNutrition(
   Map<String, dynamic> root,
   Map<String, dynamic> meal,
@@ -342,16 +385,10 @@ Map<String, dynamic>? _findAuthoritativeNutrition(
     meal['nutrition_totals'],
     meal['total_nutrition'],
     meal['nutrition_summary'],
-    meal['features'],
-    meal['nutrient_profile'],
-    meal['aggregate_nutrition'],
     root['nutrition'],
     root['nutrition_totals'],
     root['total_nutrition'],
     root['nutrition_summary'],
-    root['features'],
-    root['nutrient_profile'],
-    root['aggregate_nutrition'],
   ];
 
   for (final candidate in candidates) {
