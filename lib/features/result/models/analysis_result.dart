@@ -105,8 +105,10 @@ class AnalysisResult {
       ...minerals,
     };
 
+    final personalization =
+        _asMap(meal['personalization']) ?? _asMap(root['personalization']);
     final personalizedScores = _asMap(
-      _asMap(meal['personalization'])?['personalized_domain_scores'],
+      personalization?['personalized_domain_scores'],
     );
     final scoreMap = personalizedScores ??
         _asMap(meal['health_domain_scores']) ??
@@ -340,10 +342,16 @@ Map<String, dynamic>? _findAuthoritativeNutrition(
     meal['nutrition_totals'],
     meal['total_nutrition'],
     meal['nutrition_summary'],
+    meal['features'],
+    meal['nutrient_profile'],
+    meal['aggregate_nutrition'],
     root['nutrition'],
     root['nutrition_totals'],
     root['total_nutrition'],
     root['nutrition_summary'],
+    root['features'],
+    root['nutrient_profile'],
+    root['aggregate_nutrition'],
   ];
 
   for (final candidate in candidates) {
