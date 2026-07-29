@@ -146,6 +146,102 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
     return null;
   }
 
+  Map<String, dynamic> _readBackLabelRequest(
+    Map<String, dynamic> responseData,
+  ) {
+    return _findBackLabelRequest(responseData) ??
+        const <String, dynamic>{};
+  }
+
+  Map<String, dynamic>? _findBackLabelRequest(
+    dynamic value,
+  ) {
+    if (value is List) {
+      for (final item in value) {
+        final result = _findBackLabelRequest(item);
+
+        if (result != null) {
+          return result;
+        }
+      }
+
+      return null;
+    }
+
+    if (value is! Map) {
+      return null;
+    }
+
+    final map = Map<String, dynamic>.from(value);
+
+    const preferredKeys = [
+      'back_label_request',
+      'label_request',
+      'nutrition_label_request',
+      'requested_label',
+      'branded_product',
+      'target_food',
+      'food_requiring_label',
+    ];
+
+    for (final key in preferredKeys) {
+      final nested = map[key];
+
+      if (nested is Map) {
+        return Map<String, dynamic>.from(nested);
+      }
+    }
+
+    final containsFoodIdentifier =
+        _firstNonEmptyText([
+          map['food_id'],
+          map['target_food_id'],
+          map['id'],
+        ]) !=
+        null;
+
+    final containsFoodName =
+        _firstNonEmptyText([
+          map['food_name'],
+          map['product_name'],
+          map['name'],
+        ]) !=
+        null;
+
+    if (containsFoodIdentifier && containsFoodName) {
+      return map;
+    }
+
+    for (final nestedValue in map.values) {
+      final result = _findBackLabelRequest(nestedValue);
+
+      if (result != null) {
+        return result;
+      }
+    }
+
+    return null;
+  }
+
+  String? _firstNonEmptyText(
+    List<dynamic> values,
+  ) {
+    for (final value in values) {
+      if (value == null) {
+        continue;
+      }
+
+      final text = value.toString().trim();
+
+      if (text.isNotEmpty &&
+          text.toLowerCase() != 'null') {
+        return text;
+      }
+    }
+
+    return null;
+  }
+
   bool _isFinalResponse(
     String? status,
     Map<String, dynamic> data,
@@ -246,6 +342,34 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
 
     final isWaitingForLabel =
         responseStatus == 'waiting_for_back_label';
+
+    final backLabelRequest = responseData == null
+        ? const <String, dynamic>{}
+        : _readBackLabelRequest(responseData);
+
+    final resolvedAnalysisId = _firstNonEmptyText([
+      responseData?['analysis_id'],
+      backLabelRequest['analysis_id'],
+      uploadState.analysisId,
+    ]);
+
+    final resolvedFoodId = _firstNonEmptyText([
+      backLabelRequest['food_id'],
+      backLabelRequest['target_food_id'],
+      backLabelRequest['id'],
+      responseData?['food_id'],
+      responseData?['target_food_id'],
+      uploadState.foodId,
+    ]);
+
+    final resolvedFoodName = _firstNonEmptyText([
+          backLabelRequest['food_name'],
+          backLabelRequest['name'],
+          backLabelRequest['product_name'],
+          responseData?['food_name'],
+          responseData?['product_name'],
+        ]) ??
+        'Branded food';
 
     ref.listen<UploadState>(
       uploadProvider,
@@ -359,18 +483,9 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
                   !uploadState.isUploading) ...[
                 const SizedBox(height: 8),
                 BackLabelRequestCard(
-                  analysisId:
-                      responseData['analysis_id']
-                              ?.toString() ??
-                          uploadState.analysisId,
-                  foodId:
-                      responseData['food_id']
-                              ?.toString() ??
-                          uploadState.foodId,
-                  foodName:
-                      responseData['food_name']
-                              ?.toString() ??
-                          'Branded food',
+                  analysisId: resolvedAnalysisId,
+                  foodId: resolvedFoodId,
+                  foodName: resolvedFoodName,
                 ),
               ],
 
