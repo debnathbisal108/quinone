@@ -2279,12 +2279,51 @@ Schema
       "unit": "g"
   },
 
-  "serving_size": {...},
-
-  "nutrition_per_serving": {...},
-
-  "nutrition_per_100g": {...},
-
+  "serving_size": {
+        "value": null,
+        "unit": null
+    },
+    
+    "nutrition_basis": {
+        "value": null,
+        "unit": null
+    },
+    
+    "nutrition_per_serving": {
+        "energy_kcal": null,
+        "protein_g": null,
+        "fat_g": null,
+        "saturated_fat_g": null,
+        "trans_fat_g": null,
+        "carbohydrate_g": null,
+        "sugars_g": null,
+        "added_sugars_g": null,
+        "fiber_g": null,
+        "sodium_mg": null,
+        "cholesterol_mg": null,
+        "potassium_mg": null,
+        "calcium_mg": null,
+        "iron_mg": null,
+        "caffeine_mg": null
+    },
+    
+    "nutrition_per_100g": {
+        "energy_kcal": null,
+        "protein_g": null,
+        "fat_g": null,
+        "saturated_fat_g": null,
+        "trans_fat_g": null,
+        "carbohydrate_g": null,
+        "sugars_g": null,
+        "added_sugars_g": null,
+        "fiber_g": null,
+        "sodium_mg": null,
+        "cholesterol_mg": null,
+        "potassium_mg": null,
+        "calcium_mg": null,
+        "iron_mg": null,
+        "caffeine_mg": null
+    },
   "ingredients": [],
 
   "allergens": [],
@@ -2306,6 +2345,16 @@ Rules
   return BOTH.
 - Never estimate values.
 - Missing values must be null.
+- Use the exact field names shown in the schema.
+- For beverages, nutrition_per_100g may represent values per 100 ml.
+    If both "per serving" and "per 100 g" are present,
+    return BOTH.
+- Set nutrition_basis.value to the printed reference quantity, usually 100.
+- Set nutrition_basis.unit to "g" or "ml" exactly as printed.
+- Return each ingredient as a separate string in the ingredients list.
+- Preserve the printed ingredient order.
+- Extract allergens and claims when visible.
+- Do not calculate per-serving or per-100 values when they are not printed.
 - Return valid JSON only.
 """
 
@@ -2388,6 +2437,86 @@ def is_combinable(food):
     return food.get("belongs_to_food_id") is not None
 
 
+def attach_label_to_food(
+    food: dict[str, Any],
+    label: dict[str, Any],
+) -> None:
+    """
+    Attach a successfully extracted nutrition label to a branded food.
+    """
+
+    if not isinstance(label, dict):
+        raise ValueError(
+            "The extracted nutrition label is invalid."
+        )
+
+    food["nutrition_label"] = label
+    food["requires_back_image"] = False
+    food["back_image_received"] = True
+
+    label_ingredients = label.get("ingredients")
+
+    if isinstance(label_ingredients, list):
+        cleaned_ingredients = []
+
+        for ingredient in label_ingredients:
+            if isinstance(ingredient, dict):
+                ingredient_name = str(
+                    ingredient.get("name")
+                    or ingredient.get("ingredient")
+                    or ""
+                ).strip()
+            else:
+                ingredient_name = str(
+                    ingredient or ""
+                ).strip()
+
+            if not ingredient_name:
+                continue
+
+            cleaned_ingredients.append(
+                {
+                    "name": ingredient_name,
+                    "canonical_name": ingredient_name,
+                    "ingredient_category": "Other",
+                    "usda_food_description": None,
+                    "possible_usda_queries": [],
+                    "estimated_percentage": None,
+                    "estimated_weight_g": None,
+                    "confidence": float(
+                        label.get(
+                            "ocr_confidence",
+                            0.8,
+                        )
+                        or 0.8
+                    ),
+                }
+            )
+
+        food["ingredients"] = cleaned_ingredients
+        food["label_ingredients"] = (
+            label_ingredients
+        )
+    else:
+        food["ingredients"] = []
+        food["label_ingredients"] = []
+
+    allergens = label.get("allergens")
+
+    food["allergens"] = (
+        allergens
+        if isinstance(allergens, list)
+        else []
+    )
+
+    claims = label.get("claims")
+
+    food["claims"] = (
+        claims
+        if isinstance(claims, list)
+        else []
+    )
+
 def create_food_from_label(label):
     """Create a proper food object when only a nutrition label was uploaded."""
     brand = label.get("brand") or None
@@ -2452,16 +2581,52 @@ def create_food_from_label(label):
         "unit": unit,
         "edible_fraction": 1.0,
         "detection_confidence": 0.95,
+        # "analysis_route": "NUTRITION_LABEL",
+        # # "requires_back_image": False,
+        # "requires_back_image": True,
+        # "back_image_received": True,          
+        # "usda_food_description": None,
+        # "possible_usda_queries": [],
+        # "ingredients": [],
+        # "spices": [],
+        # "nutrition_label": label
         "analysis_route": "NUTRITION_LABEL",
-        # "requires_back_image": False,
-        "requires_back_image": True,
-        "back_image_received": True,          
+        "requires_back_image": False,
+        "back_image_received": True,
         "usda_food_description": None,
         "possible_usda_queries": [],
         "ingredients": [],
         "spices": [],
-        "nutrition_label": label
+        "nutrition_label": label,
+        "label_ingredients": (
+            label.get("ingredients")
+            if isinstance(
+                label.get("ingredients"),
+                list,
+            )
+            else []
+        ),
+        "allergens": (
+            label.get("allergens")
+            if isinstance(
+                label.get("allergens"),
+                list,
+            )
+            else []
+        ),
+        "claims": (
+            label.get("claims")
+            if isinstance(
+                label.get("claims"),
+                list,
+            )
+            else []
+        ),
     }
+    attach_label_to_food(
+        food=food,
+        label=label,
+    )
     return food
 
 def namespace_food_ids(
@@ -2684,8 +2849,16 @@ def post_process(
         )
 
     for food in foods:
+        if (
+            food.get("analysis_route")
+            == "NUTRITION_LABEL"
+        ):
+            food.setdefault("ingredients", [])
+            food.setdefault("spices", [])
+            continue
+    
         new_ingredients = []
-
+    
         for ingredient in food.get(
             "ingredients",
             [],
@@ -2695,13 +2868,13 @@ def post_process(
                     ingredient
                 )
             )
-
+    
         food["ingredients"] = (
             new_ingredients
         )
-
+    
         new_spices = []
-
+    
         for spice in food.get(
             "spices",
             [],
@@ -2711,7 +2884,7 @@ def post_process(
                     spice
                 )
             )
-
+    
         food["spices"] = new_spices
 
     id_mapping: dict[str, str] = {}
@@ -2862,16 +3035,21 @@ def continue_with_back_label(
             "attached to this food."
         )
 
-    target_food["nutrition_label"] = (
-        label_result
-    )
+    # target_food["nutrition_label"] = (
+    #     label_result
+    # )
 
-    target_food["requires_back_image"] = (
-        True
-    )
+    # target_food["requires_back_image"] = (
+    #     True
+    # )
 
-    target_food["back_image_received"] = (
-        True
+    # target_food["back_image_received"] = (
+    #     True
+    # )
+
+    attach_label_to_food(
+        food=target_food,
+        label=label_result,
     )
 
     remaining = [
@@ -3090,9 +3268,16 @@ def analyze_meal(
             # food["requires_back_image"] = False
             # food["label_match_confidence"] = score
 
-            food["nutrition_label"] = label
-            food["requires_back_image"] = True
-            food["back_image_received"] = True
+            # food["nutrition_label"] = label
+            # food["requires_back_image"] = True
+            # food["back_image_received"] = True
+            # food["label_match_confidence"] = score
+
+            attach_label_to_food(
+                food=food,
+                label=label,
+            )
+            
             food["label_match_confidence"] = score
 
             used_label_indices.add(
