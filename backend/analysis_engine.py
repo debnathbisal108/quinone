@@ -2442,7 +2442,10 @@ def attach_label_to_food(
     label: dict[str, Any],
 ) -> None:
     """
-    Attach a successfully extracted nutrition label to a branded food.
+    Attach a successfully extracted package label.
+
+    Printed label ingredients are descriptive only.
+    They must not enter the USDA ingredient pipeline.
     """
 
     if not isinstance(label, dict):
@@ -2454,69 +2457,37 @@ def attach_label_to_food(
     food["requires_back_image"] = False
     food["back_image_received"] = True
 
-    label_ingredients = label.get("ingredients")
+    raw_ingredients = label.get("ingredients")
 
-    if isinstance(label_ingredients, list):
-        cleaned_ingredients = []
+    food["label_ingredients"] = (
+        [
+            str(item).strip()
+            for item in raw_ingredients
+            if str(item).strip()
+        ]
+        if isinstance(raw_ingredients, list)
+        else []
+    )
 
-        for ingredient in label_ingredients:
-            if isinstance(ingredient, dict):
-                ingredient_name = str(
-                    ingredient.get("name")
-                    or ingredient.get("ingredient")
-                    or ""
-                ).strip()
-            else:
-                ingredient_name = str(
-                    ingredient or ""
-                ).strip()
+    # Important:
+    # NUTRITION_LABEL foods must not contain recipe ingredients.
+    food["ingredients"] = []
+    food["spices"] = []
 
-            if not ingredient_name:
-                continue
-
-            cleaned_ingredients.append(
-                {
-                    "name": ingredient_name,
-                    "canonical_name": ingredient_name,
-                    "ingredient_category": "Other",
-                    "usda_food_description": None,
-                    "possible_usda_queries": [],
-                    "estimated_percentage": None,
-                    "estimated_weight_g": None,
-                    "confidence": float(
-                        label.get(
-                            "ocr_confidence",
-                            0.8,
-                        )
-                        or 0.8
-                    ),
-                }
-            )
-
-        food["ingredients"] = cleaned_ingredients
-        food["label_ingredients"] = (
-            label_ingredients
-        )
-    else:
-        food["ingredients"] = []
-        food["label_ingredients"] = []
-
-    allergens = label.get("allergens")
-
+    raw_allergens = label.get("allergens")
     food["allergens"] = (
-        allergens
-        if isinstance(allergens, list)
+        raw_allergens
+        if isinstance(raw_allergens, list)
         else []
     )
 
-    claims = label.get("claims")
-
+    raw_claims = label.get("claims")
     food["claims"] = (
-        claims
-        if isinstance(claims, list)
+        raw_claims
+        if isinstance(raw_claims, list)
         else []
     )
-
+    
 def create_food_from_label(label):
     """Create a proper food object when only a nutrition label was uploaded."""
     brand = label.get("brand") or None
