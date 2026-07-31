@@ -67,7 +67,7 @@ class NutrientStatus:
 # =========================================================================
 
 CANONICAL_NUTRIENT_KEYS: List[str] = [
-    "energy_kcal", "protein_g", "fat_g", "carbohydrate_g", "fiber_g", "sugars_g",
+    "energy_kcal", "protein_g", "fat_g", "carbohydrate_g", "fiber_g", "sugars_g", "added_sugars_g",
     "calcium_mg", "iron_mg", "magnesium_mg", "phosphorus_mg", "potassium_mg",
     "sodium_mg", "zinc_mg", "copper_mg", "manganese_mg", "selenium_ug",
     "vitamin_a_ug", "vitamin_c_mg", "vitamin_d_ug", "vitamin_e_mg", "vitamin_k_ug",
@@ -621,6 +621,479 @@ def _attach_profile(entry: Dict[str, Any], profiles_by_id: Dict[int, Dict[str, A
     entry["nutrients"] = _scale_nutrients(profile["nutrients"], weight_g)
     entry["all_nutrients"] = _scale_all_nutrients(profile["all_nutrients"], weight_g)
 
+LABEL_NUTRIENT_KEYS = {
+    "energy_kcal",
+    "protein_g",
+    "fat_g",
+    "saturated_fat_g",
+    "trans_fat_g",
+    "carbohydrate_g",
+    "fiber_g",
+    "sugars_g",
+    "added_sugars_g",
+    "sodium_mg",
+    "cholesterol_mg",
+    "potassium_mg",
+    "calcium_mg",
+    "iron_mg",
+    "caffeine_mg",
+}
+
+
+def _read_number(
+    value: Any,
+) -> Optional[float]:
+    """
+    Read a numeric label value without estimating it.
+    """
+
+    if value is None or isinstance(value, bool):
+        return None
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    if isinstance(value, dict):
+        for key in (
+            "value",
+            "amount",
+            "quantity",
+        ):
+            parsed = _read_number(
+                value.get(key)
+            )
+
+            if parsed is not None:
+                return parsed
+
+        return None
+
+    text = str(value).strip().lower()
+
+    if not text:
+        return None
+
+    replacements = (
+        "kcal",
+        "calories",
+        "calorie",
+        "grams",
+        "gram",
+        "milligrams",
+        "milligram",
+        "micrograms",
+        "microgram",
+        "mg",
+        "mcg",
+        "µg",
+        "ug",
+        "ml",
+        "g",
+    )
+
+    cleaned = text.replace(",", "")
+
+    for token in replacements:
+        cleaned = cleaned.replace(
+            token,
+            "",
+        )
+
+    cleaned = cleaned.strip()
+
+    try:
+        return float(cleaned)
+
+    except ValueError:
+        return None
+
+
+def _normalize_quantity_unit(
+    value: Any,
+) -> str:
+    unit = str(value or "").strip().lower()
+
+    aliases = {
+        "gram": "g",
+        "grams": "g",
+        "g": "g",
+        "millilitre": "ml",
+        "millilitres": "ml",
+        "milliliter": "ml",
+        "milliliters": "ml",
+        "ml": "ml",
+    }
+
+    return aliases.get(unit, unit)
+
+
+def _has_reported_nutrients(
+    nutrient_data: Any,
+) -> bool:
+    if not isinstance(nutrient_data, dict):
+        return False
+
+    return any(
+        _read_number(
+            nutrient_data.get(key)
+        )
+        is not None
+        for key in LABEL_NUTRIENT_KEYS
+    )
+
+
+def _extract_label_nutrients(
+    nutrient_data: Dict[str, Any],
+) -> Dict[str, Optional[float]]:
+    """
+    Convert Gemini's fixed nutrition-label schema into
+    the canonical nutrient dictionary.
+    """
+
+    canonical = _empty_canonical()
+
+    for key in LABEL_NUTRIENT_KEYS:
+        if key not in canonical:
+            continue
+
+        canonical[key] = _read_number(
+            nutrient_data.get(key)
+        )
+
+    return canonical
+
+
+def _scale_by_factor(
+    nutrients: Dict[str, Optional[float]],
+    factor: float,
+) -> Dict[str, Optional[float]]:
+    return {
+        key: (
+            None
+            if value is None
+            else round(
+                value * factor,
+                4,
+            )
+        )
+        for key, value in nutrients.items()
+    }
+
+
+def _canonical_unit(
+    nutrient_key: str,
+) -> str:
+    if nutrient_key == "energy_kcal":
+        return "kcal"
+
+    if nutrient_key.endswith("_g"):
+        return "g"
+
+    if nutrient_key.endswith("_mg"):
+        return "mg"
+
+    if nutrient_key.endswith("_ug"):
+        return "ug"
+
+    return ""
+
+
+def _label_all_nutrients(
+    nutrients: Dict[str, Optional[float]],
+) -> List[Dict[str, Any]]:
+    """
+    Preserve the reported label nutrients in a structure
+    similar to USDA's all_nutrients output.
+    """
+
+    result: List[Dict[str, Any]] = []
+
+    for key, value in nutrients.items():
+        if value is None:
+            continue
+
+        result.append(
+            {
+                "id": None,
+                "number": None,
+                "name": key,
+                "amount": value,
+                "unit": _canonical_unit(key),
+                "source": "nutrition_label",
+            }
+        )
+
+    return result
+
+
+def _label_basis(
+    label: Dict[str, Any],
+) -> tuple[Optional[float], str]:
+    raw_basis = label.get(
+        "nutrition_basis"
+    )
+
+    if not isinstance(raw_basis, dict):
+        return None, ""
+
+    basis_value = _read_number(
+        raw_basis.get("value")
+    )
+
+    basis_unit = _normalize_quantity_unit(
+        raw_basis.get("unit")
+    )
+
+    return basis_value, basis_unit
+
+
+def _serving_basis(
+    label: Dict[str, Any],
+) -> tuple[Optional[float], str]:
+    raw_serving = label.get(
+        "serving_size"
+    )
+
+    if not isinstance(raw_serving, dict):
+        return None, ""
+
+    serving_value = _read_number(
+        raw_serving.get("value")
+    )
+
+    serving_unit = _normalize_quantity_unit(
+        raw_serving.get("unit")
+    )
+
+    return serving_value, serving_unit
+
+
+def _attach_label_profile(
+    food: Dict[str, Any],
+) -> None:
+    """
+    Attach nutrients from an uploaded package label.
+
+    The printed label is authoritative. USDA is not used
+    for NUTRITION_LABEL foods.
+    """
+
+    label = food.get(
+        "nutrition_label"
+    )
+
+    if not isinstance(label, dict):
+        food["nutrient_status"] = (
+            "missing_nutrition_label"
+        )
+        food["nutrients"] = (
+            _empty_canonical()
+        )
+        food["all_nutrients"] = []
+        return
+
+    food_quantity = _read_number(
+        food.get("quantity")
+    )
+
+    food_unit = _normalize_quantity_unit(
+        food.get("unit")
+    )
+
+    per_100 = label.get(
+        "nutrition_per_100g"
+    )
+
+    per_serving = label.get(
+        "nutrition_per_serving"
+    )
+
+    # Prefer the printed per-100 block because it scales
+    # directly to the detected consumed quantity.
+    if _has_reported_nutrients(per_100):
+        nutrients = _extract_label_nutrients(
+            per_100
+        )
+
+        basis_value, basis_unit = (
+            _label_basis(label)
+        )
+
+        # Gemini may omit nutrition_basis even when the
+        # panel clearly says per 100 g or per 100 ml.
+        if basis_value is None:
+            basis_value = 100.0
+
+        if not basis_unit:
+            basis_unit = food_unit
+
+        if (
+            food_quantity is not None
+            and food_quantity > 0
+            and basis_value > 0
+            and food_unit in {"g", "ml"}
+            and food_unit == basis_unit
+        ):
+            factor = (
+                food_quantity
+                / basis_value
+            )
+
+            nutrients = _scale_by_factor(
+                nutrients,
+                factor,
+            )
+
+            scaling_status = (
+                "scaled_to_consumed_quantity"
+            )
+        else:
+            # Do not pretend the per-100 values are the
+            # consumed totals when units do not match.
+            food["nutrient_status"] = (
+                "label_quantity_unit_mismatch"
+            )
+            food["nutrients"] = (
+                _empty_canonical()
+            )
+            food["all_nutrients"] = []
+            food["nutrition_label_error"] = {
+                "food_quantity": food_quantity,
+                "food_unit": food_unit,
+                "basis_value": basis_value,
+                "basis_unit": basis_unit,
+            }
+            return
+
+        food["nutrients"] = nutrients
+        food["all_nutrients"] = (
+            _label_all_nutrients(
+                nutrients
+            )
+        )
+        food["nutrient_status"] = (
+            "nutrition_label_attached"
+        )
+        food["nutrient_source"] = (
+            "uploaded_nutrition_label"
+        )
+        food["nutrition_label_basis"] = {
+            "source": "nutrition_per_100g",
+            "value": basis_value,
+            "unit": basis_unit,
+            "scaling_status": scaling_status,
+        }
+        return
+
+    if _has_reported_nutrients(
+        per_serving
+    ):
+        nutrients = _extract_label_nutrients(
+            per_serving
+        )
+
+        serving_value, serving_unit = (
+            _serving_basis(label)
+        )
+
+        if (
+            food_quantity is not None
+            and food_quantity > 0
+            and serving_value is not None
+            and serving_value > 0
+            and food_unit in {"g", "ml"}
+            and food_unit == serving_unit
+        ):
+            serving_count = (
+                food_quantity
+                / serving_value
+            )
+
+            nutrients = _scale_by_factor(
+                nutrients,
+                serving_count,
+            )
+
+            scaling_status = (
+                "scaled_by_serving_count"
+            )
+        else:
+            # If the food quantity is itself a count of
+            # servings, allow direct count scaling.
+            if (
+                food_quantity is not None
+                and food_quantity > 0
+                and food_unit in {
+                    "piece",
+                    "serving",
+                }
+            ):
+                nutrients = _scale_by_factor(
+                    nutrients,
+                    food_quantity,
+                )
+
+                serving_count = (
+                    food_quantity
+                )
+
+                scaling_status = (
+                    "scaled_by_detected_count"
+                )
+            else:
+                food["nutrient_status"] = (
+                    "label_serving_unit_mismatch"
+                )
+                food["nutrients"] = (
+                    _empty_canonical()
+                )
+                food["all_nutrients"] = []
+                food[
+                    "nutrition_label_error"
+                ] = {
+                    "food_quantity": (
+                        food_quantity
+                    ),
+                    "food_unit": food_unit,
+                    "serving_value": (
+                        serving_value
+                    ),
+                    "serving_unit": (
+                        serving_unit
+                    ),
+                }
+                return
+
+        food["nutrients"] = nutrients
+        food["all_nutrients"] = (
+            _label_all_nutrients(
+                nutrients
+            )
+        )
+        food["nutrient_status"] = (
+            "nutrition_label_attached"
+        )
+        food["nutrient_source"] = (
+            "uploaded_nutrition_label"
+        )
+        food["nutrition_label_basis"] = {
+            "source": (
+                "nutrition_per_serving"
+            ),
+            "serving_value": serving_value,
+            "serving_unit": serving_unit,
+            "serving_count": serving_count,
+            "scaling_status": scaling_status,
+        }
+        return
+
+    food["nutrient_status"] = (
+        "label_has_no_reported_nutrients"
+    )
+    food["nutrients"] = (
+        _empty_canonical()
+    )
+    food["all_nutrients"] = []
 
 async def attach_nutrients(
     resolved_result: Dict[str, Any],
@@ -709,17 +1182,24 @@ async def attach_nutrients(
         )
 
     for food in result_foods:
-        # Nutrition-label foods already obtain their
-        # nutrition information from the uploaded label.
         if (
             food.get("analysis_route")
-            != "NUTRITION_LABEL"
+            == "NUTRITION_LABEL"
         ):
-            _attach_profile(
-                food,
-                profiles_by_id,
+            _attach_label_profile(
+                food
             )
-
+    
+            # Printed package ingredients are descriptive.
+            # Do not send them through USDA resolution or
+            # count them again as separate nutrient sources.
+            continue
+    
+        _attach_profile(
+            food,
+            profiles_by_id,
+        )
+    
         for ingredient in (
             food.get("ingredients") or []
         ):
@@ -727,7 +1207,14 @@ async def attach_nutrients(
                 ingredient,
                 profiles_by_id,
             )
-
+    
+        for spice in (
+            food.get("spices") or []
+        ):
+            _attach_profile(
+                spice,
+                profiles_by_id,
+            )
         for spice in (
             food.get("spices") or []
         ):
