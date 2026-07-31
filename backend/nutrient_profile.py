@@ -539,24 +539,51 @@ def _scale_all_nutrients(
 # ATTACH TO MEAL
 # =========================================================================
 
-def _collect_resolved_fdc_ids(foods: List[Dict[str, Any]]) -> List[int]:
-    """Gather every unique fdc_id across foods, ingredients, and spices, so
-    each one is downloaded at most once even if it appears many times."""
+def _collect_resolved_fdc_ids(
+    foods: List[Dict[str, Any]],
+) -> List[int]:
+    """
+    Collect USDA IDs only for non-label foods.
+
+    Branded nutrition-label products must never trigger
+    USDA requests for either the product or printed ingredients.
+    """
+
     ids: Set[int] = set()
+
     for food in foods:
+        if (
+            food.get("analysis_route")
+            == "NUTRITION_LABEL"
+        ):
+            continue
+
         resolver = food.get("resolver") or {}
+
         if resolver.get("fdc_id") is not None:
             ids.add(int(resolver["fdc_id"]))
-        for ingredient in food.get("ingredients") or []:
-            r = ingredient.get("resolver") or {}
-            if r.get("fdc_id") is not None:
-                ids.add(int(r["fdc_id"]))
-        for spice in food.get("spices") or []:
-            r = spice.get("resolver") or {}
-            if r.get("fdc_id") is not None:
-                ids.add(int(r["fdc_id"]))
-    return list(ids)
 
+        for ingredient in (
+            food.get("ingredients") or []
+        ):
+            resolver = (
+                ingredient.get("resolver") or {}
+            )
+
+            if resolver.get("fdc_id") is not None:
+                ids.add(
+                    int(resolver["fdc_id"])
+                )
+
+        for spice in food.get("spices") or []:
+            resolver = spice.get("resolver") or {}
+
+            if resolver.get("fdc_id") is not None:
+                ids.add(
+                    int(resolver["fdc_id"])
+                )
+
+    return list(ids)
 
 def _resolve_entry_weight_g(entry: Dict[str, Any]) -> Optional[float]:
     """
