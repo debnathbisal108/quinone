@@ -551,6 +551,8 @@ vegetables, legumes, grains, dairy, oils). Spices and seasonings do NOT
 belong in this list — they go in the separate "spices" array covered in
 the SPICES section below.
 
+Do not attach or score the parent’s USDA nutrients when ingredients are being used.
+
 DO NOT include visible garnishes or foods that are already detected as
 their own separate top-level food object elsewhere in the meal — see
 DUPLICATE PREVENTION below for the full rule and example.
