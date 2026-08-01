@@ -24,7 +24,7 @@ if not logger.handlers:
     )
     logger.addHandler(_handler)
 logger.setLevel(os.environ.get("NUTRICA_LOG_LEVEL", "INFO"))
-
+logger.propagate = False
 
 # =========================================================================
 # CONFIG
@@ -42,8 +42,8 @@ if not USDA_API_KEY:
     )
 
 PAGE_SIZE = 10
-REQUEST_TIMEOUT_S = 10.0
-MAX_RETRIES = 3
+REQUEST_TIMEOUT_S = 8.0
+MAX_RETRIES = 2
 RETRY_BACKOFF_BASE_S = 1.5
 MAX_CONCURRENT_REQUESTS = 5
 MIN_REQUEST_INTERVAL_S = 0.15  # spacing between outbound calls, be polite to USDA
@@ -192,24 +192,31 @@ async def search_food(
     page_size: int = PAGE_SIZE,
 ) -> List[Dict[str, Any]]:
     """
-    Search USDA FoodData Central for a query string.
+    Search USDA FoodData Central.
 
-    Returns a list of raw candidate dicts as returned by the API's "foods"
-    array. Returns [] on empty results OR on unrecoverable failure - callers
-    should not distinguish the two, since both mean "nothing usable found".
-
-    Every successful response (including legitimately empty ones) is cached.
-    Transient failures (timeouts, 5xx, network errors) are retried with
-    exponential backoff and are NOT cached, so a temporary outage doesn't
-    poison the cache for the rest of the process lifetime.
+    Returns an empty list when the query is rejected, no food is
+    found, or all temporary retries fail. A single failed lookup
+    must not terminate the complete meal analysis.
     """
-    query = (query or "").strip()
+
+    original_query = str(
+        query or ""
+    ).strip()
+
+    query = sanitize_usda_query(
+        original_query
+    )
+
     if not query:
         return []
 
     cached = await _cache.get(query)
+
     if cached is not None:
-        logger.debug("Cache hit for query %r", query)
+        logger.debug(
+            "Cache hit for query %r",
+            query,
+        )
         return cached
 
     params = {
@@ -219,72 +226,160 @@ async def search_food(
     }
 
     last_exc: Optional[Exception] = None
-    for attempt in range(1, MAX_RETRIES + 1):
+
+    for attempt in range(
+        1,
+        MAX_RETRIES + 1,
+    ):
         try:
             async with _semaphore:
                 await _throttle()
+
                 response = await client.get(
-                    USDA_SEARCH_URL, params=params, timeout=REQUEST_TIMEOUT_S
+                    USDA_SEARCH_URL,
+                    params=params,
+                    timeout=REQUEST_TIMEOUT_S,
                 )
 
-            if response.status_code == 429:
-                wait = RETRY_BACKOFF_BASE_S * attempt * 2
+            if response.status_code == 400:
                 logger.warning(
-                    "USDA rate limit hit for %r, backing off %.1fs", query, wait
+                    "USDA rejected search query %r "
+                    "(original query: %r).",
+                    query,
+                    original_query,
                 )
-                await asyncio.sleep(wait)
+
+                # Do not retry the same rejected request.
+                return []
+
+            if response.status_code in {
+                401,
+                403,
+            }:
+                logger.error(
+                    "USDA rejected the API credentials "
+                    "with status %s.",
+                    response.status_code,
+                )
+
+                # Retrying cannot fix an invalid or disabled key.
+                return []
+
+            if response.status_code == 404:
+                logger.warning(
+                    "USDA search endpoint returned 404 "
+                    "for query %r.",
+                    query,
+                )
+                return []
+
+            if response.status_code == 429:
+                wait = (
+                    RETRY_BACKOFF_BASE_S
+                    * attempt
+                    * 2
+                )
+
+                logger.warning(
+                    "USDA rate limit hit for %r. "
+                    "Backing off %.1f seconds.",
+                    query,
+                    wait,
+                )
+
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(wait)
+
                 continue
 
             if response.status_code >= 500:
                 logger.warning(
-                    "USDA server error %s (attempt %d/%d) for %r",
+                    "USDA server error %s "
+                    "(attempt %d/%d) for %r.",
                     response.status_code,
                     attempt,
                     MAX_RETRIES,
                     query,
                 )
-                await asyncio.sleep(RETRY_BACKOFF_BASE_S * attempt)
+
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(
+                        RETRY_BACKOFF_BASE_S
+                        * attempt
+                    )
+
                 continue
 
             response.raise_for_status()
+
             data = response.json()
-            foods = data.get("foods", []) if isinstance(data, dict) else []
 
-            print("\nSEARCH:", query)
+            foods = (
+                data.get("foods", [])
+                if isinstance(data, dict)
+                else []
+            )
 
-            for f in foods:
-                print(
-                    f["fdcId"],
-                    "|",
-                    f["description"],
-                    "|",
-                    f["dataType"]
-                )
+            if not isinstance(foods, list):
+                foods = []
 
-            await _cache.set(query, foods)
+            logger.debug(
+                "USDA search %r returned %d candidates.",
+                query,
+                len(foods),
+            )
+
+            await _cache.set(
+                query,
+                foods,
+            )
+
             return foods
 
         except httpx.TimeoutException as exc:
             last_exc = exc
+
             logger.warning(
-                "USDA search timeout (attempt %d/%d) for %r", attempt, MAX_RETRIES, query
-            )
-        except httpx.HTTPStatusError as exc:
-            last_exc = exc
-            logger.warning(
-                "USDA search HTTP error %s (attempt %d/%d) for %r",
-                exc.response.status_code,
+                "USDA search timeout "
+                "(attempt %d/%d) for %r.",
                 attempt,
                 MAX_RETRIES,
                 query,
             )
-            # 4xx other than 429 won't fix itself on retry (bad api key, bad query, etc)
-            if 400 <= exc.response.status_code < 500 and exc.response.status_code != 429:
-                break
-        except (httpx.RequestError, json.JSONDecodeError) as exc:
+
+        except httpx.HTTPStatusError as exc:
             last_exc = exc
+
+            status_code = (
+                exc.response.status_code
+            )
+
             logger.warning(
-                "USDA search failed (attempt %d/%d) for %r: %s",
+                "USDA search HTTP error %s "
+                "(attempt %d/%d) for %r.",
+                status_code,
+                attempt,
+                MAX_RETRIES,
+                query,
+            )
+
+            # Any client-side rejection except 429 should
+            # not be retried unchanged.
+            if (
+                400 <= status_code < 500
+                and status_code != 429
+            ):
+                return []
+
+        except (
+            httpx.RequestError,
+            json.JSONDecodeError,
+        ) as exc:
+            last_exc = exc
+
+            logger.warning(
+                "USDA search failed "
+                "(attempt %d/%d) for %r: %s",
                 attempt,
                 MAX_RETRIES,
                 query,
@@ -292,13 +387,60 @@ async def search_food(
             )
 
         if attempt < MAX_RETRIES:
-            await asyncio.sleep(RETRY_BACKOFF_BASE_S * attempt)
+            await asyncio.sleep(
+                RETRY_BACKOFF_BASE_S
+                * attempt
+            )
 
-    print("USDA SEARCH:", repr(query))
+    logger.error(
+        "USDA search exhausted retries "
+        "for %r: %s",
+        query,
+        last_exc,
+    )
 
-    logger.error("USDA search exhausted retries for %r: %s", query, last_exc)
     return []
+def sanitize_usda_query(
+    query: str,
+) -> str:
+    """
+    Simplify AI-generated USDA search text.
 
+    Removes punctuation and bracketed alternative names that
+    occasionally produce rejected or unnecessarily specific
+    FoodData Central searches.
+    """
+
+    cleaned = str(
+        query or ""
+    ).strip()
+
+    if not cleaned:
+        return ""
+
+    # Example:
+    # "Coriander (cilantro) leaves, raw"
+    # becomes:
+    # "Coriander leaves raw"
+    cleaned = re.sub(
+        r"\([^)]*\)",
+        " ",
+        cleaned,
+    )
+
+    cleaned = re.sub(
+        r"[,;/\\|]+",
+        " ",
+        cleaned,
+    )
+
+    cleaned = re.sub(
+        r"\s+",
+        " ",
+        cleaned,
+    )
+
+    return cleaned.strip()
 
 # =========================================================================
 # RANKING / MATCHING
@@ -402,17 +544,49 @@ async def _resolve_single(
     a high-confidence match is found so we don't burn extra API calls.
     """
 
-    print("=" * 80)
-    print("PRIMARY :", primary_query)
-    print("FALLBACKS :", fallback_queries)
+    # print("=" * 80)
+    # print("PRIMARY :", primary_query)
+    # print("FALLBACKS :", fallback_queries)
 
     queries_to_try: List[str] = []
-    if primary_query:
-        queries_to_try.append(primary_query)
-    for q in fallback_queries:
-        if q and q not in queries_to_try:
-            queries_to_try.append(q)
+    seen_queries: set[str] = set()
+    
+    raw_queries = [
+        primary_query,
+        *fallback_queries,
+    ]
+    
+    for raw_query in raw_queries:
+        cleaned_query = sanitize_usda_query(
+            raw_query or ""
+        )
+    
+        if not cleaned_query:
+            continue
+    
+        normalized_query = (
+            cleaned_query.lower()
+        )
+    
+        if normalized_query in seen_queries:
+            continue
+    
+        seen_queries.add(
+            normalized_query
+        )
+    
+        queries_to_try.append(
+            cleaned_query
+        )
 
+    MAX_QUERIES_PER_ENTRY = 3
+
+    queries_to_try = (
+        queries_to_try[
+            :MAX_QUERIES_PER_ENTRY
+        ]
+    )
+    
     if not queries_to_try:
         return {
             "status": ResolverStatus.ERROR,
@@ -551,32 +725,85 @@ async def _resolve_one_food(client: httpx.AsyncClient, food: Dict[str, Any]) -> 
         return
 
     if route == "DECOMPOSE":
-        ingredients = food.get("ingredients") or []
-        spices = food.get("spices") or []
-
-        dish_task = resolve_food(client, food)
+        ingredients = (
+            food.get("ingredients")
+            or []
+        )
+    
+        spices = (
+            food.get("spices")
+            or []
+        )
+    
+        # The decomposed parent is a grouping object.
+        # Its nutrition comes from its ingredients and spices,
+        # so the parent itself must not receive another USDA
+        # nutrient profile.
+        food["resolver"] = {
+            "status": (
+                "decomposed_from_ingredients"
+            ),
+            "fdc_id": None,
+            "matched_name": None,
+            "data_type": None,
+            "match_query": None,
+            "match_score": None,
+            "note": (
+                "Parent dish USDA lookup skipped to "
+                "prevent double counting."
+            ),
+        }
+    
         ingredients_task = (
-            asyncio.gather(*[resolve_ingredient(client, ing) for ing in ingredients])
+            asyncio.gather(
+                *[
+                    resolve_ingredient(
+                        client,
+                        ingredient,
+                    )
+                    for ingredient in ingredients
+                ]
+            )
             if ingredients
             else _empty_list()
         )
+    
         spices_task = (
-            asyncio.gather(*[resolve_spice(client, sp) for sp in spices])
+            asyncio.gather(
+                *[
+                    resolve_spice(
+                        client,
+                        spice,
+                    )
+                    for spice in spices
+                ]
+            )
             if spices
             else _empty_list()
         )
-
-        dish_result, ingredient_results, spice_results = await asyncio.gather(
-            dish_task, ingredients_task, spices_task
+    
+        (
+            ingredient_results,
+            spice_results,
+        ) = await asyncio.gather(
+            ingredients_task,
+            spices_task,
         )
-
-        food["resolver"] = dish_result
-        for ing, res in zip(ingredients, ingredient_results):
-            ing["resolver"] = res
-        for sp, res in zip(spices, spice_results):
-            sp["resolver"] = res
+    
+        for ingredient, resolver in zip(
+            ingredients,
+            ingredient_results,
+        ):
+            ingredient["resolver"] = resolver
+    
+        for spice, resolver in zip(
+            spices,
+            spice_results,
+        ):
+            spice["resolver"] = resolver
+    
         return
-
+        
     logger.warning(
         "Unknown analysis_route %r for food %r; defaulting to DIRECT_USDA", route, name
     )
