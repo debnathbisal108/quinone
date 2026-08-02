@@ -359,6 +359,20 @@ async def run_nutrica_pipeline(
     """
     resolved_result = await resolve_meal(analysis_result)
     nutrient_result = await attach_nutrients(resolved_result)
+
+    print("\n" + "=" * 100)
+    print("NUTRIENT RESULT FROM BACKEND")
+    print("=" * 100)
+    print(
+        json.dumps(
+            nutrient_result,
+            indent=2,
+            ensure_ascii=False,
+            default=str,
+        )
+    )
+    print("=" * 100 + "\n")
+    
     feature_result = await compute_features(nutrient_result)
 
     # Evidence remains population-neutral here. Personal reweighting is handled
