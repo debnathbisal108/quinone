@@ -29,8 +29,8 @@ class AnalysisResult {
   final double carbohydrates;
   final double fat;
   final double fiber;
-  final double sugars;
-  final double addedSugars;
+  final double? sugars;
+  final double? addedSugars;
   final List<HealthScore> healthScores;
   final List<Micronutrient> micronutrients;
   final List<FoodSummary> foods;
