@@ -322,15 +322,15 @@ class ResultScreen extends StatelessWidget {
                                           ),
                                           _NutrientDetailItem(
                                             label: 'Total sugars',
-                                            value: result.sugars,
+                                            value: result.sugars ?? 0,
                                             unit: 'g',
-                                            available: result.sugars > 0,
+                                            available: result.sugars != null,
                                           ),
                                           _NutrientDetailItem(
                                             label: 'Added sugars',
-                                            value: result.addedSugars,
+                                            value: result.addedSugars ?? 0,
                                             unit: 'g',
-                                            available: result.addedSugars > 0,
+                                            available: result.addedSugars != null,
                                           ),
                                           _NutrientDetailItem(
                                             label: 'Dietary fiber',
