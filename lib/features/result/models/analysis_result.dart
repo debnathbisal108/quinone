@@ -160,7 +160,7 @@ class AnalysisResult {
           'dietary_fiber_g',
         ],
       ),
-      sugars: _firstNumber(
+      sugars: _firstNullableNumber(
         macros,
         const [
           'sugars_g',
@@ -169,7 +169,7 @@ class AnalysisResult {
           'sugars',
         ],
       ),
-      addedSugars: _firstNumber(
+      addedSugars: _firstNullableNumber(
         macros,
         const [
           'added_sugars_g',
@@ -539,6 +539,21 @@ double _firstNumber(Map<String, double> source, List<String> keys) {
     if (value != null) return value;
   }
   return 0;
+}
+
+double? _firstNullableNumber(
+  Map<String, double> source,
+  List<String> keys,
+) {
+  for (final key in keys) {
+    final value = source[key];
+
+    if (value != null) {
+      return value;
+    }
+  }
+
+  return null;
 }
 
 double _fraction(double value) {
