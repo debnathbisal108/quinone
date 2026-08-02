@@ -14,6 +14,8 @@ class AnalysisResult {
     required this.carbohydrates,
     required this.fat,
     required this.fiber,
+    required this.sugars,
+    required this.addedSugars,
     required this.healthScores,
     required this.micronutrients,
     required this.foods,
@@ -27,6 +29,8 @@ class AnalysisResult {
   final double carbohydrates;
   final double fat;
   final double fiber;
+  final double sugars;
+  final double addedSugars;
   final List<HealthScore> healthScores;
   final List<Micronutrient> micronutrients;
   final List<FoodSummary> foods;
@@ -150,7 +154,28 @@ class AnalysisResult {
       fat: _firstNumber(macros, const ['fat_g', 'total_fat_g', 'fat']),
       fiber: _firstNumber(
         macros,
-        const ['fiber_g', 'fibre_g', 'dietary_fiber_g'],
+        const [
+          'fiber_g',
+          'fibre_g',
+          'dietary_fiber_g',
+        ],
+      ),
+      sugars: _firstNumber(
+        macros,
+        const [
+          'sugars_g',
+          'total_sugars_g',
+          'sugar_g',
+          'sugars',
+        ],
+      ),
+      addedSugars: _firstNumber(
+        macros,
+        const [
+          'added_sugars_g',
+          'added_sugar_g',
+          'added_sugars',
+        ],
       ),
       healthScores: List.unmodifiable(scores),
       micronutrients: List.unmodifiable(micronutrients),
@@ -267,8 +292,17 @@ class FoodSummary {
       };
 
   factory FoodSummary.fromJson(Map<String, dynamic> json) {
-    final features = _asMap(json['features']) ?? const {};
-    final macros = _doubleMap(_asMap(features['macronutrients']));
+    final features =
+    _asMap(json['features']) ?? const {};
+
+    final macros = <String, double>{
+      ..._doubleMap(
+        _asMap(json['nutrients']),
+      ),
+      ..._doubleMap(
+        _asMap(features['macronutrients']),
+      ),
+    };
 
     return FoodSummary(
       id: _firstText(json, const ['id', 'food_id', 'entity_id']),
@@ -453,6 +487,9 @@ bool _containsAnyNutritionValue(Map<String, double> values) {
     'total_fat_g',
     'fiber_g',
     'fibre_g',
+    'sugars_g',
+    'total_sugars_g',
+    'added_sugars_g',
   };
   return values.entries.any((entry) => keys.contains(entry.key));
 }
