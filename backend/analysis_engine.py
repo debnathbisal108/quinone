@@ -1093,19 +1093,26 @@ since they are not part of the ingredient weight-percentage breakdown).
 USDA SEARCH
 ==========================
 
-Generate exactly FIVE USDA search queries for EVERY food, ingredient, and
-spice that requires USDA resolution. This includes:
+Generate exactly FIVE USDA search queries for every entity that requires
+USDA resolution. This includes:
 
 - DIRECT_USDA foods
-- the parent dish itself of DECOMPOSE foods
 - every ingredient inside a DECOMPOSE food
 - every spice inside a DECOMPOSE food
+
+The parent object of a DECOMPOSE food is not resolved directly through
+USDA. Its nutrients are calculated by summing its resolved ingredients
+and spices.
+
+For the parent object of a DECOMPOSE food:
+
+- usda_food_description must be null
+- possible_usda_queries must be an empty list
 
 NUTRITION_LABEL foods are the only exception — possible_usda_queries must
 be an empty list for those, since no USDA search is performed.
 
-For DIRECT_USDA foods (and the parent dish of DECOMPOSE foods),
-the queries should describe the food itself.
+For DIRECT_USDA foods, the queries should describe the food itself.
 
 Example
 
@@ -1118,30 +1125,6 @@ Basmati rice cooked
 Long grain white rice cooked
 White rice cooked
 Rice
-
-For DECOMPOSE foods,
-the queries should describe the COMPLETE DISH,
-NOT the ingredients.
-
-Example
-
-Chicken Curry
-
-↓
-
-Chicken curry
-Indian chicken curry
-Butter chicken
-Chicken tikka masala
-Creamy chicken curry
-
-Incorrect
-
-Chicken
-Tomato
-Onion
-Garlic
-Butter
 
 For ingredients and spices WITHIN a DECOMPOSE food, the queries should
 describe that single ingredient/spice as it would appear in USDA
@@ -1169,12 +1152,30 @@ Do not repeat the same query using different word order.
 USDA DESCRIPTION
 ==========================
 
-For every food, ingredient, and spice that requires USDA resolution
-(i.e. everything except NUTRITION_LABEL foods), generate ONE field:
+Generate usda_food_description only for:
+
+- DIRECT_USDA foods
+- ingredients inside DECOMPOSE foods
+- spices inside DECOMPOSE foods
+
+Do NOT generate a USDA description for the parent object of a DECOMPOSE food.
+
+For every DECOMPOSE parent food, return:
+
+usda_food_description = null
+
+possible_usda_queries = []
+
+The parent DECOMPOSE food is an aggregation object. Its nutrients are
+calculated by resolving and summing its ingredients and spices.
+
+For every DIRECT_USDA food, DECOMPOSE ingredient, and DECOMPOSE spice,
+generate ONE field:
 
 usda_food_description
 
-This field should contain the SINGLE FoodData Central (USDA) food description that is most likely to exist in the USDA database.
+This field should contain the SINGLE FoodData Central description most
+likely to exist for that exact food, ingredient, or spice.
 
 Think like you are selecting the exact USDA entry, not describing the food.
 
@@ -1214,35 +1215,46 @@ French Fries
 →
 Potatoes, french fried
 
-Chicken Curry
-→
-Chicken curry
-
-Dal Tadka
-→
-Lentil curry
-
-Aloo Bhujia
-→
-Potato curry
-
 Naan
 →
 Naan bread
-
-Vegetable Salad
-→
-Salad, vegetable
 
 Mashed Potato
 →
 Potatoes, mashed
 
-Onion (as an ingredient)
+Onion as an ingredient inside a DECOMPOSE food
 →
 Onions, raw
 
-The description should maximize the probability of finding the correct USDA FoodData Central entry.
+Fresh cheese as an ingredient inside Paneer Tikka
+→
+Cheese, fresh
+
+Yogurt as an ingredient inside Paneer Tikka
+→
+Yogurt, plain, whole milk
+
+Example of a DECOMPOSE parent
+
+Paneer Tikka
+→
+usda_food_description = null
+possible_usda_queries = []
+
+Chicken Curry
+→
+usda_food_description = null
+possible_usda_queries = []
+
+Dal Tadka
+→
+usda_food_description = null
+possible_usda_queries = []
+
+The description should maximize the probability of finding the correct
+USDA FoodData Central entry for the exact DIRECT_USDA food, ingredient,
+or spice.
 
 ==========================
 FOOD ROLE
@@ -2209,7 +2221,12 @@ Requirements
 - Every food must have a preparation value.
 - Every food must have preparation_confidence greater than 0.
 - Every food must have detection_confidence greater than 0.
-- Every food, every DECOMPOSE ingredient, and every DECOMPOSE spice must contain exactly FIVE USDA search queries (NUTRITION_LABEL foods are the only exception - their possible_usda_queries must be empty).
+- Every DIRECT_USDA food, every DECOMPOSE ingredient, and every DECOMPOSE spice must contain exactly FIVE USDA search queries.
+
+  The parent object of every DECOMPOSE food must contain:
+
+  usda_food_description = null
+  possible_usda_queries = []
 - Every DECOMPOSE food must contain at least one ingredient.
 - Every DECOMPOSE ingredient must contain canonical_name, ingredient_category, usda_food_description, possible_usda_queries, estimated_percentage, estimated_weight_g, and confidence.
 - Every DECOMPOSE spice must contain canonical_name, usda_food_description, possible_usda_queries, estimated_weight_g, and confidence.
