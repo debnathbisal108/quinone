@@ -930,15 +930,22 @@ async def _resolve_one_food(client: httpx.AsyncClient, food: Dict[str, Any]) -> 
             or []
         )
     
-        # Resolve the complete dish for authoritative
-        # top-level nutrition shown by the frontend.
-        dish_task = resolve_food(
-            client,
-            food,
-        )
+        # A DECOMPOSE parent is an aggregation object.
+        # Its nutrients are calculated from its ingredients
+        # and spices, not from a complete-dish USDA match.
+        food["resolver"] = {
+            "status": "resolved_from_components",
+            "fdc_id": None,
+            "matched_name": None,
+            "data_type": None,
+            "match_query": None,
+            "match_score": None,
+            "note": (
+                "Parent nutrition is calculated from "
+                "resolved ingredients and spices."
+            ),
+        }
     
-        # Resolve ingredients separately only for details,
-        # evidence and contribution explanations.
         ingredients_task = (
             asyncio.gather(
                 *[
@@ -968,16 +975,12 @@ async def _resolve_one_food(client: httpx.AsyncClient, food: Dict[str, Any]) -> 
         )
     
         (
-            dish_result,
             ingredient_results,
             spice_results,
         ) = await asyncio.gather(
-            dish_task,
             ingredients_task,
             spices_task,
         )
-    
-        food["resolver"] = dish_result
     
         for ingredient, resolver in zip(
             ingredients,
