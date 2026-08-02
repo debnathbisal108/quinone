@@ -648,6 +648,146 @@ def _attach_profile(entry: Dict[str, Any], profiles_by_id: Dict[int, Dict[str, A
     entry["nutrients"] = _scale_nutrients(profile["nutrients"], weight_g)
     entry["all_nutrients"] = _scale_all_nutrients(profile["all_nutrients"], weight_g)
 
+def _sum_decomposed_components(
+    food: Dict[str, Any],
+) -> None:
+    """
+    Build a DECOMPOSE parent's nutrients from its resolved
+    ingredients and spices.
+
+    The parent is not independently matched to a USDA dish.
+    """
+
+    totals: Dict[str, Optional[float]] = (
+        _empty_canonical()
+    )
+
+    ingredients = (
+        food.get("ingredients")
+        or []
+    )
+
+    spices = (
+        food.get("spices")
+        or []
+    )
+
+    contributions: List[Dict[str, Any]] = []
+    resolved_component_count = 0
+
+    def add_component(
+        component: Dict[str, Any],
+        component_type: str,
+    ) -> None:
+        nonlocal resolved_component_count
+
+        nutrients = component.get("nutrients")
+
+        if not isinstance(nutrients, dict):
+            return
+
+        component_has_value = False
+
+        for key in CANONICAL_NUTRIENT_KEYS:
+            raw_value = nutrients.get(key)
+
+            if (
+                raw_value is None
+                or isinstance(raw_value, bool)
+                or not isinstance(
+                    raw_value,
+                    (int, float),
+                )
+            ):
+                continue
+
+            value = float(raw_value)
+
+            if totals[key] is None:
+                totals[key] = 0.0
+
+            totals[key] = round(
+                float(totals[key]) + value,
+                4,
+            )
+
+            component_has_value = True
+
+        if not component_has_value:
+            return
+
+        resolved_component_count += 1
+
+        contributions.append(
+            {
+                "name": (
+                    component.get("name")
+                    or component.get(
+                        "canonical_name"
+                    )
+                    or "Component"
+                ),
+                "component_type": component_type,
+                "estimated_weight_g": (
+                    component.get(
+                        "estimated_weight_g"
+                    )
+                ),
+                "estimated_percentage": (
+                    component.get(
+                        "estimated_percentage"
+                    )
+                ),
+                "resolver": component.get(
+                    "resolver"
+                ),
+                "nutrient_status": (
+                    component.get(
+                        "nutrient_status"
+                    )
+                ),
+                "nutrients": dict(nutrients),
+            }
+        )
+
+    for ingredient in ingredients:
+        if isinstance(ingredient, dict):
+            add_component(
+                ingredient,
+                "ingredient",
+            )
+
+    for spice in spices:
+        if isinstance(spice, dict):
+            add_component(
+                spice,
+                "spice",
+            )
+
+    food["nutrients"] = totals
+
+    # Parent raw USDA nutrients do not exist because the
+    # parent itself was not downloaded from USDA.
+    food["all_nutrients"] = []
+
+    food["nutrient_status"] = (
+        "aggregated_from_components"
+        if resolved_component_count > 0
+        else "components_have_no_nutrients"
+    )
+
+    food["nutrient_source"] = (
+        "resolved_ingredients_and_spices"
+    )
+
+    food["resolved_component_count"] = (
+        resolved_component_count
+    )
+
+    food["nutrient_contributions"] = (
+        contributions
+    )
+
 LABEL_NUTRIENT_KEYS = {
     "energy_kcal",
     "protein_g",
@@ -1209,47 +1349,49 @@ async def attach_nutrients(
         )
 
     for food in result_foods:
-        if (
-            food.get("analysis_route")
-            == "NUTRITION_LABEL"
-        ):
+        route = food.get(
+            "analysis_route",
+            "DIRECT_USDA",
+        )
+    
+        if route == "NUTRITION_LABEL":
             _attach_label_profile(
                 food
             )
     
-            # Printed package ingredients are descriptive.
-            # Do not send them through USDA resolution or
-            # count them again as separate nutrient sources.
+            # Package ingredients are descriptive only.
             continue
     
+        if route == "DECOMPOSE":
+            for ingredient in (
+                food.get("ingredients")
+                or []
+            ):
+                _attach_profile(
+                    ingredient,
+                    profiles_by_id,
+                )
+    
+            for spice in (
+                food.get("spices")
+                or []
+            ):
+                _attach_profile(
+                    spice,
+                    profiles_by_id,
+                )
+    
+            _sum_decomposed_components(
+                food
+            )
+    
+            continue
+    
+        # DIRECT_USDA and any ordinary standalone food.
         _attach_profile(
             food,
             profiles_by_id,
         )
-    
-        for ingredient in (
-            food.get("ingredients") or []
-        ):
-            _attach_profile(
-                ingredient,
-                profiles_by_id,
-            )
-    
-        for spice in (
-            food.get("spices") or []
-        ):
-            _attach_profile(
-                spice,
-                profiles_by_id,
-            )
-        for spice in (
-            food.get("spices") or []
-        ):
-            _attach_profile(
-                spice,
-                profiles_by_id,
-            )
-
     result["nutrient_profile_status"] = (
         "completed"
     )
