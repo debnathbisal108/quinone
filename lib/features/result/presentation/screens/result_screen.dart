@@ -31,6 +31,7 @@ class ResultScreen extends StatelessWidget {
     required String nutrientKey,
     required double amount,
     required String unit,
+    List<_NutrientDetailItem> relatedValues = const [],
   }) {
     final contributions = result.contributionsFor(nutrientKey);
 
@@ -65,7 +66,83 @@ class ResultScreen extends StatelessWidget {
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
                 ),
+                if (relatedValues.isNotEmpty) ...[
+                  const SizedBox(height: 20),
+                  Text(
+                    'Breakdown',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerLow,
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: theme.colorScheme.outlineVariant,
+                      ),
+                    ),
+                    child: Column(
+                      children: [
+                        for (
+                          var index = 0;
+                          index < relatedValues.length;
+                          index++
+                        ) ...[
+                          Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 14,
+                            ),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    relatedValues[index].label,
+                                    style:
+                                        theme.textTheme.bodyLarge?.copyWith(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Text(
+                                  relatedValues[index].available
+                                      ? '${_formatNumber(relatedValues[index].value)} '
+                                          '${relatedValues[index].unit}'
+                                      : 'Not available',
+                                  style:
+                                      theme.textTheme.titleSmall?.copyWith(
+                                    fontWeight: FontWeight.w800,
+                                    color: relatedValues[index].available
+                                        ? null
+                                        : theme
+                                            .colorScheme
+                                            .onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (index < relatedValues.length - 1)
+                            Divider(
+                              height: 1,
+                              color: theme.colorScheme.outlineVariant,
+                            ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 20),
+                Text(
+                  'Food contributors',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 10),
                 if (contributions.isEmpty)
                   Container(
                     padding: const EdgeInsets.all(16),
@@ -228,13 +305,53 @@ class ResultScreen extends StatelessWidget {
                                     value: macro.value,
                                     target: macro.target,
                                     icon: macro.icon,
-                                    onTap: () => _showNutrientDetails(
+                                    onTap: () {
+                                    if (macro.nutrientKey == 'carbohydrate_g') {
+                                      _showNutrientDetails(
+                                        context,
+                                        title: macro.label,
+                                        nutrientKey: macro.nutrientKey,
+                                        amount: macro.value,
+                                        unit: 'g',
+                                        relatedValues: [
+                                          _NutrientDetailItem(
+                                            label: 'Total carbohydrates',
+                                            value: result.carbohydrates,
+                                            unit: 'g',
+                                            available: true,
+                                          ),
+                                          _NutrientDetailItem(
+                                            label: 'Total sugars',
+                                            value: result.sugars,
+                                            unit: 'g',
+                                            available: result.sugars > 0,
+                                          ),
+                                          _NutrientDetailItem(
+                                            label: 'Added sugars',
+                                            value: result.addedSugars,
+                                            unit: 'g',
+                                            available: result.addedSugars > 0,
+                                          ),
+                                          _NutrientDetailItem(
+                                            label: 'Dietary fiber',
+                                            value: result.fiber,
+                                            unit: 'g',
+                                            available: result.fiber > 0,
+                                          ),
+                                        ],
+                                      );
+                                  
+                                      return;
+                                    }
+                                  
+                                    _showNutrientDetails(
                                       context,
                                       title: macro.label,
                                       nutrientKey: macro.nutrientKey,
                                       amount: macro.value,
                                       unit: 'g',
-                                    ),
+                                    );
+                                  },
                                   ),
                                 ),
                             ],
@@ -466,4 +583,18 @@ class _MacroItem {
   final double target;
   final String nutrientKey;
   final IconData icon;
+}
+
+class _NutrientDetailItem {
+  const _NutrientDetailItem({
+    required this.label,
+    required this.value,
+    required this.unit,
+    required this.available,
+  });
+
+  final String label;
+  final double value;
+  final String unit;
+  final bool available;
 }
