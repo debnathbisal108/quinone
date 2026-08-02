@@ -483,32 +483,187 @@ def _db_priority_score(data_type: str, food_source: str) -> float:
     return table.get(data_type, 10.0)  # unrecognized data types get low nonzero priority
 
 
+_GENERIC_QUERY_WORDS = {
+    "raw",
+    "cooked",
+    "boiled",
+    "fried",
+    "baked",
+    "roasted",
+    "fresh",
+    "prepared",
+    "food",
+    "dish",
+    "with",
+    "without",
+    "and",
+    "or",
+    "the",
+}
+
+
+def _meaningful_tokens(
+    text: str,
+) -> set[str]:
+    """
+    Extract words that identify the actual food.
+
+    Preparation words are excluded because missing "raw" or
+    "cooked" should not be treated the same as missing "mint",
+    "paneer", "chicken", etc.
+    """
+
+    normalized = _normalize_text(text)
+
+    return {
+        token
+        for token in normalized.split()
+        if (
+            len(token) > 2
+            and token not in _GENERIC_QUERY_WORDS
+        )
+    }
+
+
+def _query_token_coverage(
+    query: str,
+    candidate_description: str,
+) -> float:
+    """
+    Return the fraction of meaningful query words present
+    in the USDA candidate.
+    """
+
+    query_tokens = _meaningful_tokens(query)
+    candidate_tokens = _meaningful_tokens(
+        candidate_description
+    )
+
+    if not query_tokens:
+        return 1.0
+
+    matched = (
+        query_tokens
+        & candidate_tokens
+    )
+
+    return len(matched) / len(query_tokens)
+
+
 def rank_candidates(
     query: str,
     candidates: List[Dict[str, Any]],
     food_source: str = "Generic",
 ) -> List[Dict[str, Any]]:
     """
-    Score and rank raw USDA candidates against the search query.
+    Rank USDA candidates while preserving food specificity.
 
-    Final score = FUZZY_WEIGHT * fuzzy_text_score + DB_PRIORITY_WEIGHT * db_priority_score,
-    both on a 0-100 scale. Returns candidates sorted best-first. Malformed
-    candidates (missing fdcId or description) are silently dropped.
+    A broad candidate that omits a distinguishing query word
+    must not outrank a more specific candidate merely because
+    it shares one generic food term.
     """
+
     ranked: List[Dict[str, Any]] = []
+
+    normalized_query = _normalize_text(query)
+    query_tokens = _meaningful_tokens(query)
+
     for candidate in candidates:
-        description = candidate.get("description") or ""
-        data_type = candidate.get("dataType") or "Unknown"
+        description = (
+            candidate.get("description")
+            or ""
+        )
+
+        data_type = (
+            candidate.get("dataType")
+            or "Unknown"
+        )
+
         fdc_id = candidate.get("fdcId")
+
         if fdc_id is None or not description:
             continue
 
-        fuzzy = _fuzzy_score(query, description)
-        db_priority = _db_priority_score(data_type, food_source)
-        final_score = round((FUZZY_WEIGHT * fuzzy) + (DB_PRIORITY_WEIGHT * db_priority), 2)
+        normalized_description = (
+            _normalize_text(description)
+        )
 
-        brand_owner = candidate.get("brandOwner") or candidate.get("brandName")
-        matched_name = description if not brand_owner else f"{description} ({brand_owner})"
+        description_tokens = (
+            _meaningful_tokens(description)
+        )
+
+        fuzzy = _fuzzy_score(
+            query,
+            description,
+        )
+
+        db_priority = _db_priority_score(
+            data_type,
+            food_source,
+        )
+
+        token_coverage = (
+            _query_token_coverage(
+                query,
+                description,
+            )
+        )
+
+        missing_tokens = sorted(
+            query_tokens
+            - description_tokens
+        )
+
+        # Strongly penalize candidates that discard
+        # distinctive food-identifying terms.
+        specificity_penalty = (
+            1.0 - token_coverage
+        ) * 45.0
+
+        # Reward an exact normalized phrase match.
+        exact_match_bonus = (
+            10.0
+            if normalized_query
+            == normalized_description
+            else 0.0
+        )
+
+        final_score = (
+            FUZZY_WEIGHT * fuzzy
+            + DB_PRIORITY_WEIGHT * db_priority
+            + exact_match_bonus
+            - specificity_penalty
+        )
+
+        # If a multi-word food loses half or more of its
+        # identifying terms, it cannot be called resolved.
+        if (
+            len(query_tokens) >= 2
+            and token_coverage < 0.67
+        ):
+            final_score = min(
+                final_score,
+                LOW_CONFIDENCE_THRESHOLD - 0.01,
+            )
+
+        final_score = round(
+            max(0.0, min(100.0, final_score)),
+            2,
+        )
+
+        brand_owner = (
+            candidate.get("brandOwner")
+            or candidate.get("brandName")
+        )
+
+        matched_name = (
+            description
+            if not brand_owner
+            else (
+                f"{description} "
+                f"({brand_owner})"
+            )
+        )
 
         ranked.append(
             {
@@ -516,12 +671,30 @@ def rank_candidates(
                 "matched_name": matched_name,
                 "data_type": data_type,
                 "fuzzy_score": fuzzy,
-                "db_priority_score": db_priority,
+                "db_priority_score": (
+                    db_priority
+                ),
+                "query_token_coverage": round(
+                    token_coverage,
+                    4,
+                ),
+                "missing_query_tokens": (
+                    missing_tokens
+                ),
                 "final_score": final_score,
             }
         )
 
-    ranked.sort(key=lambda c: c["final_score"], reverse=True)
+    ranked.sort(
+        key=lambda candidate: (
+            candidate[
+                "query_token_coverage"
+            ],
+            candidate["final_score"],
+        ),
+        reverse=True,
+    )
+
     return ranked
 
 
@@ -614,9 +787,16 @@ async def _resolve_single(
             if best is None or top["final_score"] > best["final_score"]:
                 best = top
                 best_query = q
-            if top["final_score"] >= RESOLVED_THRESHOLD:
+            if (
+                top["final_score"]
+                >= RESOLVED_THRESHOLD
+                and top.get(
+                    "query_token_coverage",
+                    0.0,
+                )
+                >= 0.67
+            ):
                 break
-
     if best is None:
         return {
             "status": ResolverStatus.NOT_FOUND,
@@ -627,10 +807,25 @@ async def _resolve_single(
             "match_score": 0.0,
         }
 
-    if best["final_score"] >= RESOLVED_THRESHOLD:
+    coverage = best.get(
+        "query_token_coverage",
+        0.0,
+    )
+    
+    if (
+        best["final_score"]
+        >= RESOLVED_THRESHOLD
+        and coverage >= 0.67
+    ):
         status = ResolverStatus.RESOLVED
-    elif best["final_score"] >= LOW_CONFIDENCE_THRESHOLD:
+    
+    elif (
+        best["final_score"]
+        >= LOW_CONFIDENCE_THRESHOLD
+        and coverage >= 0.67
+    ):
         status = ResolverStatus.LOW_CONFIDENCE
+    
     else:
         status = ResolverStatus.NOT_FOUND
 
