@@ -2407,7 +2407,7 @@ def similarity(a, b):
 def classify_image(client, image):
     try:
         response = client.models.generate_content(
-            model="gemini-3-flash",
+            model="gemini-3-flash-preview",
             contents=[classify_prompt, image]
         )
         text = response.text.strip()
@@ -2420,7 +2420,7 @@ def classify_image(client, image):
 
 def extract_label(client, image):
     response = client.models.generate_content(
-        model="gemini-3-flash",
+        model="gemini-3-flash-preview",
         contents=[label_prompt, image]
     )
     txt = response.text.strip()
@@ -3188,7 +3188,7 @@ def analyze_meal(
           start=1,
     ):
         response = client.models.generate_content(
-            model="gemini-3-flash",
+            model="gemini-3-flash-preview",
             contents=[
                 prompt,
                 image,
