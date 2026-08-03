@@ -13,6 +13,13 @@ class AnalysisResult {
     required this.protein,
     required this.carbohydrates,
     required this.fat,
+    required this.saturatedFat,
+    required this.monounsaturatedFat,
+    required this.polyunsaturatedFat,
+    required this.transFat,
+    required this.omega3,
+    required this.omega6,
+    required this.cholesterol,
     required this.fiber,
     required this.sugars,
     required this.addedSugars,
@@ -28,6 +35,13 @@ class AnalysisResult {
   final double protein;
   final double carbohydrates;
   final double fat;
+  final double? saturatedFat;
+  final double? monounsaturatedFat;
+  final double? polyunsaturatedFat;
+  final double? transFat;
+  final double? omega3;
+  final double? omega6;
+  final double? cholesterol;
   final double fiber;
   final double? sugars;
   final double? addedSugars;
@@ -152,6 +166,55 @@ class AnalysisResult {
         const ['carbohydrate_g', 'carbohydrates_g', 'carbs_g', 'carbs'],
       ),
       fat: _firstNumber(macros, const ['fat_g', 'total_fat_g', 'fat']),
+      saturatedFat: _firstNullableNumber(
+        macros,
+        const [
+          'saturated_fat_g',
+          'total_saturated_fat_g',
+        ],
+      ),
+      monounsaturatedFat: _firstNullableNumber(
+        macros,
+        const [
+          'monounsaturated_fat_g',
+          'total_monounsaturated_fat_g',
+        ],
+      ),
+      polyunsaturatedFat: _firstNullableNumber(
+        macros,
+        const [
+          'polyunsaturated_fat_g',
+          'total_polyunsaturated_fat_g',
+        ],
+      ),
+      transFat: _firstNullableNumber(
+        macros,
+        const [
+          'trans_fat_g',
+          'total_trans_fat_g',
+        ],
+      ),
+      omega3: _firstNullableNumber(
+        macros,
+        const [
+          'omega3_g',
+          'omega_3_g',
+        ],
+      ),
+      omega6: _firstNullableNumber(
+        macros,
+        const [
+          'omega6_g',
+          'omega_6_g',
+        ],
+      ),
+      cholesterol: _firstNullableNumber(
+        macros,
+        const [
+          'cholesterol_mg',
+          'cholesterol',
+        ],
+      ),
       fiber: _firstNumber(
         macros,
         const [
@@ -295,12 +358,24 @@ class FoodSummary {
     final features =
     _asMap(json['features']) ?? const {};
 
+    // final macros = <String, double>{
+    //   ..._doubleMap(
+    //     _asMap(json['nutrients']),
+    //   ),
+    //   ..._doubleMap(
+    //     _asMap(features['macronutrients']),
+    //   ),
+    // };
+
     final macros = <String, double>{
       ..._doubleMap(
         _asMap(json['nutrients']),
       ),
       ..._doubleMap(
         _asMap(features['macronutrients']),
+      ),
+      ..._doubleMap(
+        _asMap(features['fat_profile']),
       ),
     };
 
