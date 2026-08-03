@@ -22,6 +22,7 @@ if not logger.handlers:
     _handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logger.addHandler(_handler)
 logger.setLevel(os.environ.get("NUTRICA_LOG_LEVEL", "INFO"))
+logger.propagate = False
 
 FEATURE_VERSION = "1.1"
 _ROUND_DP = 6
@@ -213,7 +214,13 @@ def _build_fatty_acids(raw_index):
 def _build_sugars(nutrients, raw_index):
     return {
         "total_sugar_g": get_nutrient(nutrients, raw_index, "sugars_g"),
-        "added_sugar_g": get_raw_nutrient(raw_index, numbers=("539",), names=("sugars, added",)),
+        "added_sugar_g": get_nutrient(
+            nutrients,
+            raw_index,
+            "added_sugars_g",
+            numbers=("539",),
+            names=("sugars, added", "added sugars"),
+        ),
         "fructose_g": get_raw_nutrient(raw_index, numbers=("212",), names=("fructose",)),
         "glucose_g": get_raw_nutrient(raw_index, numbers=("211",), names=("glucose",)),
         "sucrose_g": get_raw_nutrient(raw_index, numbers=("210",), names=("sucrose",)),
