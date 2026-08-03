@@ -20,24 +20,15 @@ from health_domain_scoring import attach_domain_scores
 from food_resolver import resolve_meal
 from nutrient_profile import attach_nutrients
 
-# ENABLE_PERSONALIZATION = True
-
-ENABLE_PERSONALIZATION = False
-
-if ENABLE_PERSONALIZATION:
-    from personalization_engine import (
-        attach_personalization,
-        normalize_profile,
-        determine_active_modifiers,
-        load_modifier_database
-    )
-
-
-# from personalization_engine import (
-#     attach_personalization,
-#     determine_active_modifiers,
-#     load_modifier_database,
-# )
+from personalization_engine import (
+    attach_personalization,
+    determine_active_modifiers,
+    load_modifier_database,
+    normalize_user_profile,
+)
+from nutrient_target_engine import (
+    attach_nutrient_targets,
+)
 
 
 APP_NAME = "Quinone API"
@@ -352,152 +343,81 @@ async def run_nutrica_pipeline(
     """
     Run the complete post-vision pipeline.
 
-    Generic health-domain scores are always calculated first. The separate
-    personalization phase runs only when the normalized user profile activates
-    at least one supported modifier. This prevents empty/basic profiles from
-    changing the generic result and avoids applying modifiers twice.
+    The generic nutrition and health scores are calculated first.
+
+    Then:
+    1. personalization_engine.py applies the existing evidence multipliers
+       and confidence values to produce personalized health-domain scores.
+    2. nutrient_target_engine.py resolves evidence-backed nutrient targets,
+       ranges, risk flags, and clinical-input requirements.
+
+    Both engines receive the same normalized profile.
     """
-    resolved_result = await resolve_meal(analysis_result)
-    nutrient_result = await attach_nutrients(resolved_result)
+    resolved_result = await resolve_meal(
+        analysis_result
+    )
 
-    # print("\n" + "=" * 100)
-    # print("NUTRIENT RESULT FROM BACKEND")
-    # print("=" * 100)
-    # print(
-    #     json.dumps(
-    #         nutrient_result,
-    #         indent=2,
-    #         ensure_ascii=False,
-    #         default=str,
-    #     )
-    # )
-    # print("=" * 100 + "\n")
-    
-    feature_result = await compute_features(nutrient_result)
+    nutrient_result = await attach_nutrients(
+        resolved_result
+    )
 
-    # Evidence remains population-neutral here. Personal reweighting is handled
-    # once, after domain scoring, by personalization_engine.py.
-    evidence_result = await attach_evidence(feature_result)
-    scored_result = await attach_domain_scores(evidence_result)
+    feature_result = await compute_features(
+        nutrient_result
+    )
 
-    # personalization_profile = normalize_personalization_profile(profile)
-    # active_modifiers = determine_active_modifiers(
-    #     personalization_profile,
-    #     load_modifier_database(),
-    # )
+    evidence_result = await attach_evidence(
+        feature_result
+    )
 
-    # if not active_modifiers:
-    return scored_result
+    scored_result = await attach_domain_scores(
+        evidence_result
+    )
 
-    # return await attach_personalization(
-    #     scored_result,
-    #     personalization_profile,
-    # )
+    normalized_profile = normalize_user_profile(
+        profile
+    )
+
+    personalized_result = await attach_personalization(
+        scored_result,
+        normalized_profile,
+    )
+
+    final_result = attach_nutrient_targets(
+        personalized_result,
+        normalized_profile,
+    )
+
+    return final_result
 
 
 def normalize_personalization_profile(
     profile: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Convert Quinone's current Flutter profile payload to the engine schema."""
-    if not isinstance(profile, dict):
-        return {}
+    """
+    Backward-compatible wrapper.
 
-    normalized = dict(profile)
-
-    # Flutter currently sends chronic_conditions as a map of booleans.
-    raw_conditions = profile.get("chronic_conditions")
-    conditions: list[str] = []
-    if isinstance(raw_conditions, dict):
-        aliases = {
-            "diabetes": "diabetes",
-            "type_2_diabetes": "type_2_diabetes",
-            "prediabetes": "prediabetes",
-            "ckd": "ckd",
-            "chronic_kidney_disease": "chronic_kidney_disease",
-            "hypertension": "hypertension",
-            "high_blood_pressure": "high_blood_pressure",
-            "hyperlipidemia": "hyperlipidemia",
-            "dyslipidemia": "dyslipidemia",
-            "ibs": "ibs",
-            "ibd": "ibd",
-            "osteoporosis": "osteoporosis",
-            "osteoarthritis": "osteoarthritis",
-            "rheumatoid_arthritis": "rheumatoid_arthritis",
-            "heart_failure": "heart_failure",
-        }
-        for key, enabled in raw_conditions.items():
-            if enabled:
-                conditions.append(aliases.get(str(key).strip().lower(), str(key).strip().lower()))
-    elif isinstance(raw_conditions, (list, tuple, set)):
-        conditions.extend(str(value).strip().lower() for value in raw_conditions if str(value).strip())
-
-    # Support older/profile-setup payloads that store conditions as free text.
-    health_conditions = profile.get("health_conditions")
-    if isinstance(health_conditions, str) and health_conditions.strip():
-        text = health_conditions.lower().replace(";", ",")
-        keyword_aliases = {
-            "diabetes": "diabetes",
-            "prediabetes": "prediabetes",
-            "kidney": "ckd",
-            "ckd": "ckd",
-            "hypertension": "hypertension",
-            "high blood pressure": "high_blood_pressure",
-            "cholesterol": "high_cholesterol",
-            "hyperlipidemia": "hyperlipidemia",
-            "ibs": "ibs",
-            "osteoporosis": "osteoporosis",
-            "osteoarthritis": "osteoarthritis",
-            "rheumatoid": "rheumatoid_arthritis",
-        }
-        for keyword, condition_id in keyword_aliases.items():
-            if keyword in text:
-                conditions.append(condition_id)
-
-    normalized["chronic_conditions"] = list(dict.fromkeys(conditions))
-
-    if profile.get("vegetarian") is True:
-        normalized["diet_type"] = "vegetarian"
-    elif profile.get("vegan") is True:
-        normalized["diet_type"] = "vegan"
-    elif not normalized.get("diet_type"):
-        preference = profile.get("dietary_preferences")
-        if isinstance(preference, str):
-            lowered = preference.strip().lower()
-            if "vegan" in lowered:
-                normalized["diet_type"] = "vegan"
-            elif "vegetarian" in lowered:
-                normalized["diet_type"] = "vegetarian"
-
-    # Normalize common UI labels to the IDs used by the modifier database.
-    goal = normalized.get("goal")
-    if isinstance(goal, str):
-        normalized_goal = goal.strip().lower().replace(" ", "_").replace("-", "_")
-        goal_aliases = {
-            "lose_weight": "weight_loss",
-            "weight_reduction": "weight_loss",
-            "gain_muscle": "muscle_gain",
-            "build_muscle": "muscle_gain",
-        }
-        normalized["goal"] = goal_aliases.get(normalized_goal, normalized_goal)
-
-    activity = normalized.get("activity_level")
-    if isinstance(activity, str):
-        normalized_activity = activity.strip().lower().replace(" ", "_").replace("-", "_")
-        activity_aliases = {
-            "lightly_active": "active",
-            "moderately_active": "active",
-            "highly_active": "very_active",
-        }
-        normalized["activity_level"] = activity_aliases.get(normalized_activity, normalized_activity)
-
-    return normalized
+    New code should call normalize_user_profile() directly. This wrapper is
+    retained only so older tests or imports do not break.
+    """
+    return normalize_user_profile(
+        profile
+    )
 
 
-def has_personalization_modifiers(profile: dict[str, Any] | None) -> bool:
-    """Public helper for tests/diagnostics."""
-    normalized = normalize_personalization_profile(profile)
-    return bool(determine_active_modifiers(normalized, load_modifier_database()))
-    # return False
+def has_personalization_modifiers(
+    profile: dict[str, Any] | None,
+) -> bool:
+    """Return whether the profile activates any health-score modifier."""
+    normalized = normalize_user_profile(
+        profile
+    )
+
+    return bool(
+        determine_active_modifiers(
+            normalized,
+            load_modifier_database(),
+        )
+    )
 
 
 async def save_upload(
