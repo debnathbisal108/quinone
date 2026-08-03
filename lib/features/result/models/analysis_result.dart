@@ -382,9 +382,10 @@ class HealthContributor {
             const ['feature'],
           ) ??
           'Unknown feature',
-      featureValue: rawFeatureValue == null
-          ? null
-          : rawFeatureValue.toString(),
+      // featureValue: rawFeatureValue == null
+      //     ? null
+      //     : rawFeatureValue.toString(),
+      featureValue: rawFeatureValue?.toString(),
       effectiveWeight: _number(
         json['effective_weight'],
       ),
