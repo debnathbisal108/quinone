@@ -35,7 +35,7 @@ logger.setLevel(os.environ.get("NUTRICA_LOG_LEVEL", "INFO"))
 # CONFIG
 # =========================================================================
 
-# PERSONALIZATION_VERSION = "1.0"
+# PERSONALIZATION_VERSION = "1.1.0"
 
 # # When multiple active modifiers touch the same evidence item, their
 # # effects combine ADDITIVELY (not multiplicatively) - see apply_modifier()
@@ -54,115 +54,6 @@ COMBINED_MULTIPLIER_BOUNDS = (
 
 _ROUND_DP = 2
 
-
-GENERAL_NUTRIENT_TARGETS: Dict[
-    str,
-    Dict[str, Any],
-] = {
-    "protein_g": {
-        "value": 50.0,
-        "unit": "g",
-    },
-    "carbohydrate_g": {
-        "value": 275.0,
-        "unit": "g",
-    },
-    "fat_g": {
-        "value": 78.0,
-        "unit": "g",
-    },
-    "fiber_g": {
-        "value": 28.0,
-        "unit": "g",
-    },
-    "saturated_fat_g": {
-        "value": 20.0,
-        "unit": "g",
-        "limit_type": "maximum",
-    },
-    "added_sugars_g": {
-        "value": 50.0,
-        "unit": "g",
-        "limit_type": "maximum",
-    },
-    "sodium_mg": {
-        "value": 2300.0,
-        "unit": "mg",
-        "limit_type": "maximum",
-    },
-    "calcium_mg": {
-        "value": 1300.0,
-        "unit": "mg",
-    },
-    "iron_mg": {
-        "value": 18.0,
-        "unit": "mg",
-    },
-    "magnesium_mg": {
-        "value": 420.0,
-        "unit": "mg",
-    },
-    "phosphorus_mg": {
-        "value": 1250.0,
-        "unit": "mg",
-    },
-    "potassium_mg": {
-        "value": 4700.0,
-        "unit": "mg",
-    },
-    "zinc_mg": {
-        "value": 11.0,
-        "unit": "mg",
-    },
-    "vitamin_a_ug": {
-        "value": 900.0,
-        "unit": "ug",
-    },
-    "vitamin_c_mg": {
-        "value": 90.0,
-        "unit": "mg",
-    },
-    "vitamin_d_ug": {
-        "value": 20.0,
-        "unit": "ug",
-    },
-    "vitamin_e_mg": {
-        "value": 15.0,
-        "unit": "mg",
-    },
-    "vitamin_k_ug": {
-        "value": 120.0,
-        "unit": "ug",
-    },
-    "thiamin_mg": {
-        "value": 1.2,
-        "unit": "mg",
-    },
-    "riboflavin_mg": {
-        "value": 1.3,
-        "unit": "mg",
-    },
-    "niacin_mg": {
-        "value": 16.0,
-        "unit": "mg",
-    },
-    "vitamin_b6_mg": {
-        "value": 1.7,
-        "unit": "mg",
-    },
-    "folate_ug": {
-        "value": 400.0,
-        "unit": "ug",
-    },
-    "vitamin_b12_ug": {
-        "value": 2.4,
-        "unit": "ug",
-    },
-    "choline_mg": {
-        "value": 550.0,
-        "unit": "mg",
-    },
-}
 
 # =========================================================================
 # DATA STRUCTURES
@@ -379,14 +270,14 @@ DISEASE_MODIFIERS: List[Modifier] = [
         id="ibd", category="disease",
         applies_when=_has_any_condition("ibd", "inflammatory_bowel_disease", "crohns", "crohns_disease", "ulcerative_colitis"),
         reason="Gut-barrier and fiber-tolerance evidence carries elevated relevance in inflammatory bowel disease",
-        affected_domains=("Gut Health", "Inflammatory & Joint Health"),
+        affected_domains=("Gut Health", "Inflammation & Joint Support"),
         affected_features=("fiber_density", "ultra_processed_tag", "fermented_food_tag"),
         adjustment_type="weight", multiplier=1.25, confidence=0.70, evidence_strength="Moderate",
     ),
     Modifier(
         id="osteoarthritis", category="disease", applies_when=_has_any_condition("osteoarthritis", "oa"),
         reason="Weight-bearing joint load makes energy-density and weight-related evidence especially relevant in osteoarthritis",
-        affected_domains=("Joint / Arthritis Symptom Burden",),
+        affected_domains=("Inflammation & Joint Support",),
         affected_features=("energy_density", "omega3_density", "central_adiposity_proxy"),
         adjustment_type="weight", multiplier=1.25, confidence=0.80, evidence_strength="Moderate-Strong",
     ),
@@ -394,7 +285,7 @@ DISEASE_MODIFIERS: List[Modifier] = [
         id="rheumatoid_arthritis", category="disease",
         applies_when=_has_any_condition("rheumatoid_arthritis", "ra", "psoriatic_arthritis", "spondyloarthritis"),
         reason="Omega-3 and anti-inflammatory dietary pattern evidence is directly actionable in inflammatory arthritis",
-        affected_domains=("Joint / Arthritis Symptom Burden", "Inflammatory & Joint Health"),
+        affected_domains=("Inflammation & Joint Support",),
         affected_features=("omega3_density", "ultra_processed_tag", "fiber_density"),
         adjustment_type="weight", multiplier=1.30, confidence=0.80, evidence_strength="Moderate-Strong",
     ),
@@ -431,7 +322,7 @@ DIET_MODIFIERS: List[Modifier] = [
         affected_domains=("Musculoskeletal Health & Healthy Aging", "Cardiovascular Health"),
         affected_features=(
             "protein_quality_leucine_proxy", "iron_density", "omega3_density",
-            "vitamin_b12_density", "zinc_density",  # not yet individually scored anywhere - see module docstring
+            "vitamin_b12_density", "zinc_density",
         ),
         adjustment_type="weight", multiplier=1.20, confidence=0.85, evidence_strength="Moderate-Strong",
     ),
@@ -441,7 +332,7 @@ DIET_MODIFIERS: List[Modifier] = [
         affected_domains=("Musculoskeletal Health & Healthy Aging", "Cardiovascular Health", "Bone Health"),
         affected_features=(
             "protein_quality_leucine_proxy", "iron_density", "omega3_density", "calcium_density",
-            "vitamin_b12_density", "zinc_density",  # not yet individually scored anywhere - see module docstring
+            "vitamin_b12_density", "zinc_density",
         ),
         adjustment_type="weight", multiplier=1.30, confidence=0.85, evidence_strength="Moderate-Strong",
     ),
@@ -454,7 +345,7 @@ PREGNANCY_MODIFIERS: List[Modifier] = [
         affected_domains=("Cognitive & Mood Health",),
         affected_features=(
             "iron_density", "choline_density", "omega3_density", "b_vitamin_density_index",
-            "folate_density", "iodine_density",  # not yet individually scored anywhere - see module docstring
+            "folate_density", "iodine_density",
         ),
         adjustment_type="weight", multiplier=1.40, confidence=0.90, evidence_strength="Strong",
     ),
@@ -464,7 +355,7 @@ PREGNANCY_MODIFIERS: List[Modifier] = [
         affected_domains=("Cognitive & Mood Health",),
         affected_features=(
             "choline_density", "omega3_density", "energy_adequacy",
-            "iodine_density",  # not yet individually scored anywhere - see module docstring
+            "iodine_density",
         ),
         adjustment_type="weight", multiplier=1.30, confidence=0.85, evidence_strength="Moderate-Strong",
     ),
@@ -528,57 +419,159 @@ def load_modifier_database() -> List[Modifier]:
 def normalize_user_profile(
     profile: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
+    """
+    Normalize the optional profile into the shared schema consumed by both
+    score personalization and the separate nutrient-target engine.
+
+    Unknown fields are ignored. Missing fields remain absent rather than
+    being converted into false values.
+    """
     if not isinstance(profile, dict):
         return {}
 
     normalized: Dict[str, Any] = {}
 
-    age = profile.get("age")
+    def clean_text(value: Any) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
 
+        cleaned = (
+            value.strip()
+            .lower()
+            .replace(" ", "_")
+            .replace("-", "_")
+        )
+
+        return cleaned or None
+
+    age = profile.get("age")
     if (
         isinstance(age, (int, float))
         and not isinstance(age, bool)
-        and 0 < age < 130
+        and 0 < float(age) < 130
     ):
-        normalized["age"] = int(age)
+        normalized["age"] = float(age)
 
     for field_name in (
-        "sex",
-        "goal",
-        "activity_level",
-        "diet_type",
+        "height_cm",
+        "weight_kg",
+        "lactation_stage_months",
     ):
         value = profile.get(field_name)
 
-        if isinstance(value, str):
-            cleaned = (
-                value.strip()
-                .lower()
-                .replace(" ", "_")
-                .replace("-", "_")
-            )
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and float(value) >= 0
+        ):
+            normalized[field_name] = float(value)
 
-            if cleaned:
-                normalized[field_name] = cleaned
-
-    conditions = profile.get(
-        "chronic_conditions"
+    sex = clean_text(
+        profile.get("sex")
+        or profile.get("gender")
     )
+    if sex in {"male", "female"}:
+        normalized["sex"] = sex
 
-    if isinstance(conditions, list):
-        normalized[
-            "chronic_conditions"
-        ] = list(
-            dict.fromkeys(
-                str(condition)
-                .strip()
-                .lower()
-                .replace(" ", "_")
-                .replace("-", "_")
-                for condition in conditions
-                if str(condition).strip()
+    for field_name in (
+        "goal",
+        "activity_level",
+        "diet_type",
+        "smoking_status",
+        "ckd_stage",
+        "dialysis_modality",
+        "blood_pressure_status",
+        "glycemic_status",
+    ):
+        value = clean_text(
+            profile.get(field_name)
+        )
+
+        if value:
+            normalized[field_name] = value
+
+    activity_aliases = {
+        "inactive": "sedentary",
+        "lightly_active": "low_active",
+        "moderately_active": "active",
+        "highly_active": "very_active",
+    }
+
+    if "activity_level" in normalized:
+        normalized["activity_level"] = (
+            activity_aliases.get(
+                normalized["activity_level"],
+                normalized["activity_level"],
             )
         )
+
+    trimester = profile.get("trimester")
+    if (
+        isinstance(trimester, int)
+        and not isinstance(trimester, bool)
+        and trimester in (1, 2, 3)
+    ):
+        normalized["trimester"] = trimester
+
+    raw_conditions = (
+        profile.get("chronic_conditions")
+        if profile.get("chronic_conditions") is not None
+        else profile.get("conditions")
+    )
+
+    conditions: List[str] = []
+
+    if isinstance(raw_conditions, dict):
+        for key, enabled in raw_conditions.items():
+            if enabled:
+                cleaned = clean_text(key)
+                if cleaned:
+                    conditions.append(cleaned)
+
+    elif isinstance(
+        raw_conditions,
+        (list, tuple, set),
+    ):
+        for condition in raw_conditions:
+            cleaned = clean_text(condition)
+            if cleaned:
+                conditions.append(cleaned)
+
+    normalized["chronic_conditions"] = list(
+        dict.fromkeys(conditions)
+    )
+
+    raw_medications = profile.get("medications")
+    medications: List[str] = []
+
+    if isinstance(
+        raw_medications,
+        (list, tuple, set),
+    ):
+        for medication in raw_medications:
+            cleaned = clean_text(medication)
+            if cleaned:
+                medications.append(cleaned)
+
+    normalized["medications"] = list(
+        dict.fromkeys(medications)
+    )
+
+    raw_allergies = profile.get("allergies")
+    allergies: List[str] = []
+
+    if isinstance(
+        raw_allergies,
+        (list, tuple, set),
+    ):
+        for allergy in raw_allergies:
+            cleaned = clean_text(allergy)
+            if cleaned:
+                allergies.append(cleaned)
+
+    normalized["allergies"] = list(
+        dict.fromkeys(allergies)
+    )
 
     for field_name in (
         "pregnant",
@@ -586,20 +579,12 @@ def normalize_user_profile(
         "frailty",
         "low_appetite",
         "resistance_training",
+        "endurance_training",
     ):
         value = profile.get(field_name)
 
         if isinstance(value, bool):
             normalized[field_name] = value
-
-    weight = profile.get("weight_kg")
-
-    if (
-        isinstance(weight, (int, float))
-        and not isinstance(weight, bool)
-        and 20 <= float(weight) <= 400
-    ):
-        normalized["weight_kg"] = float(weight)
 
     return normalized
 
@@ -817,41 +802,6 @@ def personalize_domain_scores(
 # EXPLANATION / SUMMARY
 # =========================================================================
 
-def build_nutrient_targets(
-    user_profile: Optional[
-        Dict[str, Any]
-    ],
-) -> Dict[str, Dict[str, Any]]:
-    """
-    Return the current general nutrient reference values.
-
-    These targets are not yet altered by age, sex,
-    pregnancy, disease, activity, or goal.
-
-    The function exists so the API response already has
-    a stable nutrient-target structure. Scientifically
-    defined personalized target rules can be added later
-    without changing the frontend response format.
-    """
-
-    profile = normalize_user_profile(
-        user_profile
-    )
-
-    targets = copy.deepcopy(
-        GENERAL_NUTRIENT_TARGETS
-    )
-
-    basis = (
-        "general_daily_value"
-        if not profile
-        else "general_reference_with_profile"
-    )
-
-    for target in targets.values():
-        target["basis"] = basis
-
-    return targets
 
 def build_personalization_summary(
     active_modifiers: Sequence[Modifier],
@@ -931,16 +881,14 @@ def process_meal(meal_json: Dict[str, Any], user_profile: Optional[Dict[str, Any
         "personalized_domain_scores": (
             personalized_scores
         ),
-        "nutrient_targets": (
-            build_nutrient_targets(
-                user_profile
-            )
-        ),
         "profile_applied": bool(
             user_profile
         ),
         "summary": summary,
     }
+
+    return result
+
 
 # =========================================================================
 # PUBLIC ENTRY POINTS
