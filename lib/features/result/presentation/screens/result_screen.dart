@@ -616,6 +616,19 @@ class ResultScreen extends StatelessWidget {
   }
 }
 
+String _displayFeatureName(String value) {
+  return value
+      .replaceAll('_', ' ')
+      .split(RegExp(r'\s+'))
+      .where((word) => word.isNotEmpty)
+      .map(
+        (word) =>
+            '${word[0].toUpperCase()}'
+            '${word.substring(1).toLowerCase()}',
+      )
+      .join(' ');
+}
+
 class _OverviewCard extends StatelessWidget {
   const _OverviewCard({required this.result});
 
@@ -894,7 +907,7 @@ class _HealthContributorTile
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  _titleCase(
+                  _displayFeatureName(
                     contributor.feature,
                   ),
                   style: theme.textTheme.bodyMedium,
