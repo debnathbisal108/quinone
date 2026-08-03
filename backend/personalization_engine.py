@@ -35,16 +35,134 @@ logger.setLevel(os.environ.get("NUTRICA_LOG_LEVEL", "INFO"))
 # CONFIG
 # =========================================================================
 
+# PERSONALIZATION_VERSION = "1.0"
+
+# # When multiple active modifiers touch the same evidence item, their
+# # effects combine ADDITIVELY (not multiplicatively) - see apply_modifier()
+# # - bounded to this range so stacking many modifiers can meaningfully
+# # amplify or dampen a weight without ever reaching an absurd extreme.
+# COMBINED_MULTIPLIER_BOUNDS = (0.3, 2.5)
+
+# _ROUND_DP = 2
+
 PERSONALIZATION_VERSION = "1.0"
 
-# When multiple active modifiers touch the same evidence item, their
-# effects combine ADDITIVELY (not multiplicatively) - see apply_modifier()
-# - bounded to this range so stacking many modifiers can meaningfully
-# amplify or dampen a weight without ever reaching an absurd extreme.
-COMBINED_MULTIPLIER_BOUNDS = (0.3, 2.5)
+COMBINED_MULTIPLIER_BOUNDS = (
+    0.3,
+    2.5,
+)
 
 _ROUND_DP = 2
 
+
+GENERAL_NUTRIENT_TARGETS: Dict[
+    str,
+    Dict[str, Any],
+] = {
+    "protein_g": {
+        "value": 50.0,
+        "unit": "g",
+    },
+    "carbohydrate_g": {
+        "value": 275.0,
+        "unit": "g",
+    },
+    "fat_g": {
+        "value": 78.0,
+        "unit": "g",
+    },
+    "fiber_g": {
+        "value": 28.0,
+        "unit": "g",
+    },
+    "saturated_fat_g": {
+        "value": 20.0,
+        "unit": "g",
+        "limit_type": "maximum",
+    },
+    "added_sugars_g": {
+        "value": 50.0,
+        "unit": "g",
+        "limit_type": "maximum",
+    },
+    "sodium_mg": {
+        "value": 2300.0,
+        "unit": "mg",
+        "limit_type": "maximum",
+    },
+    "calcium_mg": {
+        "value": 1300.0,
+        "unit": "mg",
+    },
+    "iron_mg": {
+        "value": 18.0,
+        "unit": "mg",
+    },
+    "magnesium_mg": {
+        "value": 420.0,
+        "unit": "mg",
+    },
+    "phosphorus_mg": {
+        "value": 1250.0,
+        "unit": "mg",
+    },
+    "potassium_mg": {
+        "value": 4700.0,
+        "unit": "mg",
+    },
+    "zinc_mg": {
+        "value": 11.0,
+        "unit": "mg",
+    },
+    "vitamin_a_ug": {
+        "value": 900.0,
+        "unit": "ug",
+    },
+    "vitamin_c_mg": {
+        "value": 90.0,
+        "unit": "mg",
+    },
+    "vitamin_d_ug": {
+        "value": 20.0,
+        "unit": "ug",
+    },
+    "vitamin_e_mg": {
+        "value": 15.0,
+        "unit": "mg",
+    },
+    "vitamin_k_ug": {
+        "value": 120.0,
+        "unit": "ug",
+    },
+    "thiamin_mg": {
+        "value": 1.2,
+        "unit": "mg",
+    },
+    "riboflavin_mg": {
+        "value": 1.3,
+        "unit": "mg",
+    },
+    "niacin_mg": {
+        "value": 16.0,
+        "unit": "mg",
+    },
+    "vitamin_b6_mg": {
+        "value": 1.7,
+        "unit": "mg",
+    },
+    "folate_ug": {
+        "value": 400.0,
+        "unit": "ug",
+    },
+    "vitamin_b12_ug": {
+        "value": 2.4,
+        "unit": "ug",
+    },
+    "choline_mg": {
+        "value": 550.0,
+        "unit": "mg",
+    },
+}
 
 # =========================================================================
 # DATA STRUCTURES
@@ -407,6 +525,84 @@ def load_modifier_database() -> List[Modifier]:
         all_modifiers.extend(group)
     return all_modifiers
 
+def normalize_user_profile(
+    profile: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not isinstance(profile, dict):
+        return {}
+
+    normalized: Dict[str, Any] = {}
+
+    age = profile.get("age")
+
+    if (
+        isinstance(age, (int, float))
+        and not isinstance(age, bool)
+        and 0 < age < 130
+    ):
+        normalized["age"] = int(age)
+
+    for field_name in (
+        "sex",
+        "goal",
+        "activity_level",
+        "diet_type",
+    ):
+        value = profile.get(field_name)
+
+        if isinstance(value, str):
+            cleaned = (
+                value.strip()
+                .lower()
+                .replace(" ", "_")
+                .replace("-", "_")
+            )
+
+            if cleaned:
+                normalized[field_name] = cleaned
+
+    conditions = profile.get(
+        "chronic_conditions"
+    )
+
+    if isinstance(conditions, list):
+        normalized[
+            "chronic_conditions"
+        ] = list(
+            dict.fromkeys(
+                str(condition)
+                .strip()
+                .lower()
+                .replace(" ", "_")
+                .replace("-", "_")
+                for condition in conditions
+                if str(condition).strip()
+            )
+        )
+
+    for field_name in (
+        "pregnant",
+        "lactating",
+        "frailty",
+        "low_appetite",
+        "resistance_training",
+    ):
+        value = profile.get(field_name)
+
+        if isinstance(value, bool):
+            normalized[field_name] = value
+
+    weight = profile.get("weight_kg")
+
+    if (
+        isinstance(weight, (int, float))
+        and not isinstance(weight, bool)
+        and 20 <= float(weight) <= 400
+    ):
+        normalized["weight_kg"] = float(weight)
+
+    return normalized
+
 
 def determine_active_modifiers(
     user_profile: Optional[Dict[str, Any]],
@@ -575,8 +771,32 @@ def personalize_domain_scores(
                     "modifiers_applied": applied_ids,
                 })
 
-        original_score = aggregator.score(domain_label, items)
-        personalized_score = aggregator.score(domain_label, personalized_items)
+        # original_score = aggregator.score(domain_label, items)
+        # personalized_score = aggregator.score(domain_label, personalized_items)
+        health_domain_label = (
+            items[0].get("health_domain")
+            if items
+            else domain_label
+        )
+        
+        if (
+            not isinstance(health_domain_label, str)
+            or not health_domain_label
+        ):
+            health_domain_label = domain_label
+        
+        original_score = aggregator.score(
+            domain=domain_label,
+            health_domain=health_domain_label,
+            evidence_items=items,
+        )
+        
+        personalized_score = aggregator.score(
+            domain=domain_label,
+            health_domain=health_domain_label,
+            evidence_items=personalized_items,
+        )
+        
         personalized_scores[domain_label] = personalized_score.to_dict()
 
         if touched_modifier_ids:
@@ -596,6 +816,42 @@ def personalize_domain_scores(
 # =========================================================================
 # EXPLANATION / SUMMARY
 # =========================================================================
+
+def build_nutrient_targets(
+    user_profile: Optional[
+        Dict[str, Any]
+    ],
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Return the current general nutrient reference values.
+
+    These targets are not yet altered by age, sex,
+    pregnancy, disease, activity, or goal.
+
+    The function exists so the API response already has
+    a stable nutrient-target structure. Scientifically
+    defined personalized target rules can be added later
+    without changing the frontend response format.
+    """
+
+    profile = normalize_user_profile(
+        user_profile
+    )
+
+    targets = copy.deepcopy(
+        GENERAL_NUTRIENT_TARGETS
+    )
+
+    basis = (
+        "general_daily_value"
+        if not profile
+        else "general_reference_with_profile"
+    )
+
+    for target in targets.values():
+        target["basis"] = basis
+
+    return targets
 
 def build_personalization_summary(
     active_modifiers: Sequence[Modifier],
@@ -643,7 +899,10 @@ def process_meal(meal_json: Dict[str, Any], user_profile: Optional[Dict[str, Any
         raise ValueError("Input must be a dict with a top-level 'meal' key")
 
     result = copy.deepcopy(meal_json)
-    user_profile = user_profile or {}
+    # user_profile = user_profile or {}
+    user_profile = normalize_user_profile(
+        user_profile
+    )
 
     all_modifiers = load_modifier_database()
     active_modifiers = determine_active_modifiers(user_profile, all_modifiers)
@@ -659,14 +918,29 @@ def process_meal(meal_json: Dict[str, Any], user_profile: Optional[Dict[str, Any
     summary = build_personalization_summary(active_modifiers, domain_adjustments, evidence_adjustments, user_profile)
 
     result["meal"]["personalization"] = {
-        "active_modifiers": [m.to_dict() for m in active_modifiers],
-        "domain_adjustments": domain_adjustments,
-        "evidence_adjustments": evidence_adjustments,
-        "personalized_domain_scores": personalized_scores,
+        "active_modifiers": [
+            modifier.to_dict()
+            for modifier in active_modifiers
+        ],
+        "domain_adjustments": (
+            domain_adjustments
+        ),
+        "evidence_adjustments": (
+            evidence_adjustments
+        ),
+        "personalized_domain_scores": (
+            personalized_scores
+        ),
+        "nutrient_targets": (
+            build_nutrient_targets(
+                user_profile
+            )
+        ),
+        "profile_applied": bool(
+            user_profile
+        ),
         "summary": summary,
     }
-    return result
-
 
 # =========================================================================
 # PUBLIC ENTRY POINTS
