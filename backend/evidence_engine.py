@@ -21,6 +21,7 @@ if not logger.handlers:
     )
     logger.addHandler(_handler)
 logger.setLevel(os.environ.get("NUTRICA_LOG_LEVEL", "INFO"))
+logger.propagate = False
 
 
 # =========================================================================
@@ -391,18 +392,51 @@ _B_VITAMIN_KEYS = (
 )
 
 
+_B_VITAMIN_REFERENCE_AMOUNTS = {
+    "thiamin_mg": 1.2,
+    "riboflavin_mg": 1.3,
+    "niacin_mg": 16.0,
+    "pantothenic_acid_mg": 5.0,
+    "vitamin_b6_mg": 1.7,
+    "folate_ug": 400.0,
+    "vitamin_b12_ug": 2.4,
+    "choline_mg": 550.0,
+}
+
+
 def _resolve_b_vitamin_density_index(e):
-    # This preserves the original model's simple average. Values retain
-    # their source units, so the output is an engineering index, not a
-    # chemically unit-homogeneous concentration.
-    densities = []
+    """
+    Unit-normalized B-vitamin support index.
+
+    The previous implementation averaged raw mg and ug densities together,
+    which made folate/choline numerically dominate unrelated nutrients.
+    Each available nutrient is now expressed as a fraction of a common
+    adult reference amount per 100 kcal, capped to prevent one nutrient
+    from overwhelming the index.
+    """
+    normalized = []
+
     for key in _B_VITAMIN_KEYS:
-        density = _density(e, _get(e, "vitamins", key))
-        if density is not None:
-            densities.append(density)
-    if not densities:
+        amount = _valid_number(
+            _get(e, "vitamins", key)
+        )
+        density = _density(e, amount)
+        reference = _B_VITAMIN_REFERENCE_AMOUNTS.get(key)
+
+        if density is None or reference is None or reference <= 0:
+            continue
+
+        normalized.append(
+            min(density / reference, 1.5)
+        )
+
+    if not normalized:
         return None
-    return round(sum(densities) / len(densities), 6)
+
+    return round(
+        sum(normalized) / len(normalized),
+        6,
+    )
 
 
 def _resolve_protein_quality_leucine_proxy(e):
@@ -1907,8 +1941,8 @@ BRAIN_RULES: List[Rule] = [
     ),
     Rule(
         rule_id="brain_b_vitamins", domain="brain", feature="b_vitamin_density_index",
-        display_name="B-vitamin density index", coefficient=0.45,
-        curve=CurveType.SATURATING, curve_params={"saturation_point": 10.0},
+        display_name="B-vitamin adequacy index", coefficient=0.45,
+        curve=CurveType.SATURATING, curve_params={"saturation_point": 0.25},
         mechanism="B vitamins support cellular energy metabolism and are relevant to mood/cognition, especially at suboptimal intake",
         pathway="Cellular energy metabolism", organ="Brain",
         confidence_label="Medium-high",
@@ -2914,14 +2948,14 @@ for _pm in POPULATION_MODIFIERS:
 ALL_DOMAIN_RULES: List[List[Rule]] = [
     BLOOD_SUGAR_RULES, BLOOD_PRESSURE_RULES, HEART_RULES, METABOLIC_SYNDROME_RULES,
     KIDNEY_RULES, LIVER_RULES, BONE_RULES, BRAIN_RULES, INFLAMMATION_RULES,
-    ARTHRITIS_RULES, CANCER_RULES, WEIGHT_RULES, MUSCLE_RULES, GUT_RULES,
+    CANCER_RULES, WEIGHT_RULES, MUSCLE_RULES, GUT_RULES,
 ]
 
 ALL_DOMAIN_INTERACTIONS: List[List[Interaction]] = [
     BLOOD_SUGAR_INTERACTIONS, BLOOD_PRESSURE_INTERACTIONS, HEART_INTERACTIONS,
     METABOLIC_SYNDROME_INTERACTIONS, KIDNEY_INTERACTIONS, LIVER_INTERACTIONS,
     BONE_INTERACTIONS, BRAIN_INTERACTIONS, INFLAMMATION_INTERACTIONS,
-    ARTHRITIS_INTERACTIONS, CANCER_INTERACTIONS, WEIGHT_INTERACTIONS,
+    CANCER_INTERACTIONS, WEIGHT_INTERACTIONS,
     MUSCLE_INTERACTIONS, GUT_INTERACTIONS,
 ]
 
