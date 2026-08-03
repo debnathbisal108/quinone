@@ -271,21 +271,134 @@ class HealthScore {
     required this.key,
     required this.label,
     required this.score,
+    required this.directionalScore,
     required this.confidence,
+    required this.coverage,
+    required this.reliability,
+    required this.positiveContributors,
+    required this.negativeContributors,
   });
 
   final String key;
   final String label;
   final double score;
+  final double directionalScore;
   final double confidence;
+  final double coverage;
+  final double reliability;
+  final List<HealthContributor> positiveContributors;
+  final List<HealthContributor> negativeContributors;
 
-  factory HealthScore.fromEntry(String key, dynamic value) {
+  factory HealthScore.fromEntry(
+    String key,
+    dynamic value,
+  ) {
     final map = _asMap(value);
+
     return HealthScore(
       key: key,
-      label: _titleCase(map?['health_domain']?.toString() ?? key),
-      score: _number(map?['score'] ?? value).clamp(0, 100).toDouble(),
-      confidence: _fraction(_number(map?['confidence'] ?? 1)),
+      label: _titleCase(
+        map?['health_domain']?.toString() ?? key,
+      ),
+      score: _number(
+        map?['score'] ?? value,
+      ).clamp(0, 100).toDouble(),
+      directionalScore: _number(
+        map?['directional_score'] ??
+            map?['score'] ??
+            value,
+      ).clamp(0, 100).toDouble(),
+      confidence: _fraction(
+        _number(map?['confidence']),
+      ),
+      coverage: _fraction(
+        _number(map?['coverage']),
+      ),
+      reliability: _fraction(
+        _number(map?['reliability']),
+      ),
+      positiveContributors: List.unmodifiable(
+        _asList(
+          map?['positive_contributors'],
+        )
+            .map(
+              (item) => HealthContributor.fromJson(
+                _asMap(item) ?? const {},
+              ),
+            )
+            .toList(),
+      ),
+      negativeContributors: List.unmodifiable(
+        _asList(
+          map?['negative_contributors'],
+        )
+            .map(
+              (item) => HealthContributor.fromJson(
+                _asMap(item) ?? const {},
+              ),
+            )
+            .toList(),
+      ),
+    );
+  }
+}
+
+class HealthContributor {
+  const HealthContributor({
+    required this.ruleName,
+    required this.feature,
+    required this.featureValue,
+    required this.effectiveWeight,
+    required this.confidence,
+    required this.mechanism,
+    required this.pathway,
+  });
+
+  final String ruleName;
+  final String feature;
+  final String? featureValue;
+  final double effectiveWeight;
+  final double confidence;
+  final String? mechanism;
+  final String? pathway;
+
+  factory HealthContributor.fromJson(
+    Map<String, dynamic> json,
+  ) {
+    final rawFeatureValue = json['feature_value'];
+
+    return HealthContributor(
+      ruleName: _firstText(
+            json,
+            const [
+              'rule_name',
+              'display_name',
+              'rule_id',
+            ],
+          ) ??
+          'Nutrition factor',
+      feature: _firstText(
+            json,
+            const ['feature'],
+          ) ??
+          'Unknown feature',
+      featureValue: rawFeatureValue == null
+          ? null
+          : rawFeatureValue.toString(),
+      effectiveWeight: _number(
+        json['effective_weight'],
+      ),
+      confidence: _fraction(
+        _number(json['confidence']),
+      ),
+      mechanism: _firstText(
+        json,
+        const ['mechanism'],
+      ),
+      pathway: _firstText(
+        json,
+        const ['pathway'],
+      ),
     );
   }
 }
