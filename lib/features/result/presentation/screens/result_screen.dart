@@ -757,3 +757,177 @@ class _NutrientDetailItem {
   final String unit;
   final bool available;
 }
+
+class _ScoreMetricChip extends StatelessWidget {
+  const _ScoreMetricChip({
+    required this.label,
+    required this.value,
+  });
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 12,
+        vertical: 8,
+      ),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: theme.colorScheme.outlineVariant,
+        ),
+      ),
+      child: Text(
+        '$label: $value',
+        style: theme.textTheme.labelLarge?.copyWith(
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+class _HealthContributorSection
+    extends StatelessWidget {
+  const _HealthContributorSection({
+    required this.title,
+    required this.emptyText,
+    required this.contributors,
+    required this.positive,
+  });
+
+  final String title;
+  final String emptyText;
+  final List<HealthContributor> contributors;
+  final bool positive;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          title,
+          style: theme.textTheme.titleMedium?.copyWith(
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 10),
+        if (contributors.isEmpty)
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color:
+                  theme.colorScheme.surfaceContainerLow,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Text(emptyText),
+          )
+        else
+          ...contributors.map(
+            (contributor) =>
+                _HealthContributorTile(
+              contributor: contributor,
+              positive: positive,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _HealthContributorTile
+    extends StatelessWidget {
+  const _HealthContributorTile({
+    required this.contributor,
+    required this.positive,
+  });
+
+  final HealthContributor contributor;
+  final bool positive;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: theme.colorScheme.outlineVariant,
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            positive
+                ? Icons.add_circle_outline_rounded
+                : Icons.remove_circle_outline_rounded,
+            color: positive
+                ? theme.colorScheme.primary
+                : theme.colorScheme.error,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.start,
+              children: [
+                Text(
+                  contributor.ruleName,
+                  style:
+                      theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _titleCase(
+                    contributor.feature,
+                  ),
+                  style: theme.textTheme.bodyMedium,
+                ),
+                if (contributor.mechanism != null &&
+                    contributor
+                        .mechanism!
+                        .isNotEmpty) ...[
+                  const SizedBox(height: 5),
+                  Text(
+                    contributor.mechanism!,
+                    style:
+                        theme.textTheme.bodySmall?.copyWith(
+                      color: theme
+                          .colorScheme
+                          .onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            contributor.effectiveWeight
+                .toStringAsFixed(2),
+            style:
+                theme.textTheme.labelLarge?.copyWith(
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
