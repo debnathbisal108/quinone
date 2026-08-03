@@ -306,6 +306,68 @@ class ResultScreen extends StatelessWidget {
                                     target: macro.target,
                                     icon: macro.icon,
                                     onTap: () {
+                                    if (macro.nutrientKey == 'fat_g') {
+                                      _showNutrientDetails(
+                                        context,
+                                        title: 'Fat',
+                                        nutrientKey: 'fat_g',
+                                        amount: result.fat,
+                                        unit: 'g',
+                                        relatedValues: [
+                                          _NutrientDetailItem(
+                                            label: 'Total fat',
+                                            value: result.fat,
+                                            unit: 'g',
+                                            available: true,
+                                          ),
+                                          _NutrientDetailItem(
+                                            label: 'Saturated fat',
+                                            value: result.saturatedFat ?? 0,
+                                            unit: 'g',
+                                            available: result.saturatedFat != null,
+                                          ),
+                                          _NutrientDetailItem(
+                                            label: 'Monounsaturated fat',
+                                            value: result.monounsaturatedFat ?? 0,
+                                            unit: 'g',
+                                            available: result.monounsaturatedFat != null,
+                                          ),
+                                          _NutrientDetailItem(
+                                            label: 'Polyunsaturated fat',
+                                            value: result.polyunsaturatedFat ?? 0,
+                                            unit: 'g',
+                                            available: result.polyunsaturatedFat != null,
+                                          ),
+                                          _NutrientDetailItem(
+                                            label: 'Trans fat',
+                                            value: result.transFat ?? 0,
+                                            unit: 'g',
+                                            available: result.transFat != null,
+                                          ),
+                                          _NutrientDetailItem(
+                                            label: 'Omega-3',
+                                            value: result.omega3 ?? 0,
+                                            unit: 'g',
+                                            available: result.omega3 != null,
+                                          ),
+                                          _NutrientDetailItem(
+                                            label: 'Omega-6',
+                                            value: result.omega6 ?? 0,
+                                            unit: 'g',
+                                            available: result.omega6 != null,
+                                          ),
+                                          _NutrientDetailItem(
+                                            label: 'Cholesterol',
+                                            value: result.cholesterol ?? 0,
+                                            unit: 'mg',
+                                            available: result.cholesterol != null,
+                                          ),
+                                        ],
+                                      );
+                                    
+                                      return;
+                                    }
+                                      
                                     if (macro.nutrientKey == 'carbohydrate_g') {
                                       _showNutrientDetails(
                                         context,
