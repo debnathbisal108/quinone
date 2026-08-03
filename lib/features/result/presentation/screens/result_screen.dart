@@ -200,6 +200,96 @@ class ResultScreen extends StatelessWidget {
     );
   }
 
+  void _showHealthScoreDetails(
+    BuildContext context,
+    HealthScore score,
+  ) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (sheetContext) {
+        final theme = Theme.of(sheetContext);
+  
+        return DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.72,
+          minChildSize: 0.45,
+          maxChildSize: 0.92,
+          builder: (context, scrollController) {
+            return ListView(
+              controller: scrollController,
+              padding: const EdgeInsets.fromLTRB(
+                20,
+                4,
+                20,
+                30,
+              ),
+              children: [
+                Text(
+                  score.label,
+                  style:
+                      theme.textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '${score.score.toStringAsFixed(0)} / 100',
+                  style:
+                      theme.textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _ScoreMetricChip(
+                      label: 'Confidence',
+                      value:
+                          '${(score.confidence * 100).round()}%',
+                    ),
+                    _ScoreMetricChip(
+                      label: 'Coverage',
+                      value:
+                          '${(score.coverage * 100).round()}%',
+                    ),
+                    _ScoreMetricChip(
+                      label: 'Reliability',
+                      value:
+                          '${(score.reliability * 100).round()}%',
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                _HealthContributorSection(
+                  title: 'Positive contributors',
+                  emptyText:
+                      'No positive contributor was identified.',
+                  contributors:
+                      score.positiveContributors,
+                  positive: true,
+                ),
+                const SizedBox(height: 22),
+                _HealthContributorSection(
+                  title: 'Negative contributors',
+                  emptyText:
+                      'No negative contributor was identified.',
+                  contributors:
+                      score.negativeContributors,
+                  positive: false,
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+  
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -427,7 +517,14 @@ class ResultScreen extends StatelessWidget {
                         ...result.healthScores.map(
                           (score) => Padding(
                             padding: const EdgeInsets.only(bottom: 10),
-                            child: HealthScoreCard(item: score),
+                            // child: HealthScoreCard(item: score),
+                            child: HealthScoreCard(
+                              item: score,
+                                onTap: () => _showHealthScoreDetails(
+                                  context,
+                                  score,
+                                ),
+                              ),
                           ),
                         ),
                       ],
