@@ -31,6 +31,8 @@ logger.setLevel(
     )
 )
 
+logger.propagate = False
+
 
 # =========================================================================
 # CONFIG
@@ -1254,6 +1256,17 @@ def _walk_food(
         food,
         by_domain,
     )
+
+    # A DECOMPOSE parent whose nutrients were aggregated from components
+    # already represents the complete dish. Walking its ingredients and
+    # spices again would count the same nutritional exposure twice and
+    # artificially increase coverage/reliability.
+    if (
+        food.get("analysis_route") == "DECOMPOSE"
+        and food.get("nutrient_status")
+        == "aggregated_from_components"
+    ):
+        return
 
     for ingredient in (
         food.get("ingredients")
