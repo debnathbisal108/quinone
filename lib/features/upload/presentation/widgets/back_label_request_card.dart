@@ -72,7 +72,8 @@ class BackLabelRequestCard extends ConsumerWidget {
       return;
     }
 
-    final profilePayload = ref.read(profileProvider).profile;
+    final profilePayload =
+        ref.read(profileProvider).backendPayload;
 
     await ref.read(uploadProvider.notifier).uploadBackLabel(
           imagePath: imagePath,
