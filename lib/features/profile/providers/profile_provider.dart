@@ -21,6 +21,8 @@ class ProfileState {
   final bool isSaving;
   final String? error;
 
+  bool get hasProfile => !profile.isEmpty;
+
   Map<String, dynamic>? get backendPayload {
     if (profile.isEmpty) return null;
     final payload = profile.toBackendJson();
@@ -183,4 +185,14 @@ class ProfileNotifier extends StateNotifier<ProfileState> {
     values.contains(value) ? values.remove(value) : values.add(value);
     update(state.profile.copyWith(allergies: values));
   }
+
+  // Compatibility aliases used by the existing onboarding profile screen.
+  void setHeightCm(double? value) => setHeight(value);
+  void setWeightKg(double? value) => setWeight(value);
+  void setLactationStageMonths(double? value) =>
+      setLactationMonths(value);
+  void setActivityLevel(String? value) => setActivity(value);
+  void setDietType(String? value) => setDiet(value);
+  void setSmokingStatus(String? value) => setSmoking(value);
+  void toggleChronicCondition(String value) => toggleCondition(value);
 }
