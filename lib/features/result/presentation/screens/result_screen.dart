@@ -211,7 +211,7 @@ class ResultScreen extends StatelessWidget {
       useSafeArea: true,
       builder: (sheetContext) {
         final theme = Theme.of(sheetContext);
-  
+
         return DraggableScrollableSheet(
           expand: false,
           initialChildSize: 0.72,
@@ -289,7 +289,7 @@ class ResultScreen extends StatelessWidget {
       },
     );
   }
-  
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -454,10 +454,10 @@ class ResultScreen extends StatelessWidget {
                                           ),
                                         ],
                                       );
-                                    
+
                                       return;
                                     }
-                                      
+
                                     if (macro.nutrientKey == 'carbohydrate_g') {
                                       _showNutrientDetails(
                                         context,
@@ -492,10 +492,10 @@ class ResultScreen extends StatelessWidget {
                                           ),
                                         ],
                                       );
-                                  
+
                                       return;
                                     }
-                                  
+
                                     _showNutrientDetails(
                                       context,
                                       title: macro.label,
