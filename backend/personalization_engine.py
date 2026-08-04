@@ -45,7 +45,7 @@ logger.setLevel(os.environ.get("NUTRICA_LOG_LEVEL", "INFO"))
 
 # _ROUND_DP = 2
 
-PERSONALIZATION_VERSION = "1.0"
+PERSONALIZATION_VERSION = "1.2.0"
 
 COMBINED_MULTIPLIER_BOUNDS = (
     0.3,
@@ -444,13 +444,22 @@ def normalize_user_profile(
 
         return cleaned or None
 
+    age_months = profile.get("age_months")
+    if (
+        isinstance(age_months, (int, float))
+        and not isinstance(age_months, bool)
+        and 0 <= float(age_months) < 1560
+    ):
+        normalized["age_months"] = int(round(float(age_months)))
+
     age = profile.get("age")
     if (
         isinstance(age, (int, float))
         and not isinstance(age, bool)
-        and 0 < float(age) < 130
+        and 0 <= float(age) < 130
     ):
         normalized["age"] = float(age)
+        normalized.setdefault("age_months", int(round(float(age) * 12.0)))
 
     for field_name in (
         "height_cm",
