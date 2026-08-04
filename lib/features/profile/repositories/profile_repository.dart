@@ -1,56 +1,61 @@
-import 'dart:convert';
-
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 
 import '../models/user_profile.dart';
 
 class ProfileRepository {
   ProfileRepository._();
 
-  static final ProfileRepository instance =
-      ProfileRepository._();
+  static const String _boxName = 'quinone_profile';
+  static const String _profileKey = 'personalization_profile_v2';
 
-  static const _storageKey = 'user_profile';
+  static Future<Box<dynamic>> _openBox() => Hive.openBox<dynamic>(_boxName);
 
-  Future<UserProfile?> loadProfile() async {
-    final prefs = await SharedPreferences.getInstance();
+  static Future<UserProfile?> getProfile() async {
+    final box = await _openBox();
+    final encoded = box.get(_profileKey);
 
-    final jsonString = prefs.getString(_storageKey);
-
-    if (jsonString == null || jsonString.isEmpty) {
-      return null;
+    if (encoded is String && encoded.trim().isNotEmpty) {
+      try {
+        return UserProfile.decode(encoded);
+      } catch (_) {
+        // Continue to legacy migration below.
+      }
     }
 
-    try {
-      final json =
-          jsonDecode(jsonString) as Map<String, dynamic>;
+    final legacyCompleted = box.get('profile_completed', defaultValue: false) == true;
+    if (!legacyCompleted) return null;
 
-      return UserProfile.fromJson(json);
-    } catch (_) {
-      return null;
-    }
+    final legacy = <String, dynamic>{
+      'age': box.get('age'),
+      'sex': box.get('sex'),
+      'height_cm': box.get('height_cm'),
+      'weight_kg': box.get('weight_kg'),
+      'activity_level': box.get('activity_level'),
+      'goal': box.get('goal'),
+      'diet_type': box.get('diet_type'),
+    }..removeWhere((_, value) => value == null);
+
+    if (legacy.isEmpty) return null;
+
+    final migrated = UserProfile.fromJson(legacy);
+    await saveProfile(migrated);
+    return migrated;
   }
 
-  Future<void> saveProfile(
-    UserProfile profile,
-  ) async {
-    final prefs = await SharedPreferences.getInstance();
-
-    await prefs.setString(
-      _storageKey,
-      jsonEncode(profile.toJson()),
-    );
+  static Future<void> saveProfile(UserProfile profile) async {
+    final box = await _openBox();
+    await box.put(_profileKey, profile.encode());
+    await box.put('profile_completed', !profile.isEmpty);
   }
 
-  Future<void> clearProfile() async {
-    final prefs = await SharedPreferences.getInstance();
-
-    await prefs.remove(_storageKey);
+  static Future<bool> hasCompletedProfile() async {
+    final profile = await getProfile();
+    return profile != null && !profile.isEmpty;
   }
 
-  Future<bool> hasProfile() async {
-    final prefs = await SharedPreferences.getInstance();
-
-    return prefs.containsKey(_storageKey);
+  static Future<void> clearProfile() async {
+    final box = await _openBox();
+    await box.delete(_profileKey);
+    await box.put('profile_completed', false);
   }
 }
