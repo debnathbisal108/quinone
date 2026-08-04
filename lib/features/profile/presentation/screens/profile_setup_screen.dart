@@ -1,714 +1,575 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:hive_flutter/hive_flutter.dart';
 
-class ProfileSetupScreen extends StatefulWidget {
+import '../../providers/profile_provider.dart';
+
+class ProfileSetupScreen extends ConsumerStatefulWidget {
   const ProfileSetupScreen({super.key});
 
   @override
-  State<ProfileSetupScreen> createState() =>
+  ConsumerState<ProfileSetupScreen> createState() =>
       _ProfileSetupScreenState();
 }
 
-class _ProfileSetupScreenState
-    extends State<ProfileSetupScreen> {
-  static const String _profileBoxName =
-      'quinone_profile';
-
-  final GlobalKey<FormState> _formKey =
-      GlobalKey<FormState>();
-
-  final TextEditingController _nameController =
-      TextEditingController();
-
-  final TextEditingController _ageController =
-      TextEditingController();
-
-  final TextEditingController _heightController =
-      TextEditingController();
-
-  final TextEditingController _weightController =
-      TextEditingController();
-
-  final TextEditingController
-      _healthConditionsController =
-      TextEditingController();
-
-  final TextEditingController _allergiesController =
-      TextEditingController();
-
-  final TextEditingController _dietaryPreferencesController =
-      TextEditingController();
-
-  String? _selectedSex;
-  String? _selectedActivityLevel;
-  String? _selectedGoal;
-
-  bool _isSaving = false;
-  bool _isLoading = true;
-
-  static const List<String> _sexOptions = [
-    'Male',
-    'Female',
-    'Other',
-    'Prefer not to say',
-  ];
-
-  static const List<String> _activityLevels = [
-    'Sedentary',
-    'Lightly active',
-    'Moderately active',
-    'Very active',
-    'Extremely active',
-  ];
-
-  static const List<String> _goalOptions = [
-    'Maintain weight',
-    'Lose weight',
-    'Gain weight',
-    'Improve nutrition',
-    'Manage a health condition',
-    'General wellness',
-  ];
-
-  @override
-  void initState() {
-    super.initState();
-    _loadProfile();
-  }
-
-  Future<Box<dynamic>> _openProfileBox() {
-    return Hive.openBox<dynamic>(_profileBoxName);
-  }
-
-  Future<void> _loadProfile() async {
-    try {
-      final box = await _openProfileBox();
-
-      if (!mounted) {
-        return;
-      }
-
-      _nameController.text =
-          box.get('name', defaultValue: '') as String;
-
-      final age = box.get('age');
-      final height = box.get('height_cm');
-      final weight = box.get('weight_kg');
-
-      _ageController.text =
-          age == null ? '' : age.toString();
-
-      _heightController.text =
-          height == null ? '' : height.toString();
-
-      _weightController.text =
-          weight == null ? '' : weight.toString();
-
-      _healthConditionsController.text =
-          box.get(
-            'health_conditions',
-            defaultValue: '',
-          ) as String;
-
-      _allergiesController.text =
-          box.get(
-            'allergies',
-            defaultValue: '',
-          ) as String;
-
-      _dietaryPreferencesController.text =
-          box.get(
-            'dietary_preferences',
-            defaultValue: '',
-          ) as String;
-
-      setState(() {
-        _selectedSex = box.get('sex') as String?;
-        _selectedActivityLevel =
-            box.get('activity_level') as String?;
-        _selectedGoal = box.get('goal') as String?;
-        _isLoading = false;
-      });
-    } catch (_) {
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _isLoading = false;
-      });
-
-      _showMessage(
-        'Your saved profile could not be loaded.',
-        isError: true,
-      );
-    }
-  }
-
-  Future<void> _saveProfile() async {
-    FocusManager.instance.primaryFocus?.unfocus();
-
-    if (!(_formKey.currentState?.validate() ?? false)) {
-      return;
-    }
-
-    setState(() {
-      _isSaving = true;
-    });
-
-    try {
-      final box = await _openProfileBox();
-
-      final age = _parseInteger(
-        _ageController.text,
-      );
-
-      final height = _parseDouble(
-        _heightController.text,
-      );
-
-      final weight = _parseDouble(
-        _weightController.text,
-      );
-
-      await box.putAll({
-        'name': _nameController.text.trim(),
-        'age': age,
-        'sex': _selectedSex,
-        'height_cm': height,
-        'weight_kg': weight,
-        'activity_level': _selectedActivityLevel,
-        'goal': _selectedGoal,
-        'health_conditions':
-            _healthConditionsController.text.trim(),
-        'allergies':
-            _allergiesController.text.trim(),
-        'dietary_preferences':
-            _dietaryPreferencesController.text.trim(),
-        'profile_completed': true,
-        'updated_at':
-            DateTime.now().toIso8601String(),
-      });
-
-      if (!mounted) {
-        return;
-      }
-
-      _showMessage('Profile saved.');
-
-      context.go('/upload');
-    } catch (_) {
-      if (!mounted) {
-        return;
-      }
-
-      _showMessage(
-        'Your profile could not be saved.',
-        isError: true,
-      );
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isSaving = false;
-        });
-      }
-    }
-  }
-
-  void _skipProfile() {
-    context.go('/upload');
-  }
-
-  int? _parseInteger(String value) {
-    final normalized = value.trim();
-
-    if (normalized.isEmpty) {
-      return null;
-    }
-
-    return int.tryParse(normalized);
-  }
-
-  double? _parseDouble(String value) {
-    final normalized = value
-        .trim()
-        .replaceAll(',', '.');
-
-    if (normalized.isEmpty) {
-      return null;
-    }
-
-    return double.tryParse(normalized);
-  }
-
-  String? _validateAge(String? value) {
-    if (value == null || value.trim().isEmpty) {
-      return null;
-    }
-
-    final age = int.tryParse(value.trim());
-
-    if (age == null) {
-      return 'Enter a valid age.';
-    }
-
-    if (age < 13 || age > 120) {
-      return 'Age must be between 13 and 120.';
-    }
-
-    return null;
-  }
-
-  String? _validateHeight(String? value) {
-    if (value == null || value.trim().isEmpty) {
-      return null;
-    }
-
-    final height = _parseDouble(value);
-
-    if (height == null) {
-      return 'Enter a valid height.';
-    }
-
-    if (height < 80 || height > 250) {
-      return 'Height must be between 80 and 250 cm.';
-    }
-
-    return null;
-  }
-
-  String? _validateWeight(String? value) {
-    if (value == null || value.trim().isEmpty) {
-      return null;
-    }
-
-    final weight = _parseDouble(value);
-
-    if (weight == null) {
-      return 'Enter a valid weight.';
-    }
-
-    if (weight < 20 || weight > 400) {
-      return 'Weight must be between 20 and 400 kg.';
-    }
-
-    return null;
-  }
-
-  void _showMessage(
-    String message, {
-    bool isError = false,
-  }) {
-    final colorScheme =
-        Theme.of(context).colorScheme;
-
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          backgroundColor: isError
-              ? colorScheme.error
-              : null,
-          content: Text(message),
-        ),
-      );
-  }
+class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final _age = TextEditingController();
+  final _height = TextEditingController();
+  final _weight = TextEditingController();
+  final _lactationMonths = TextEditingController();
+  bool _initialized = false;
 
   @override
   void dispose() {
-    _nameController.dispose();
-    _ageController.dispose();
-    _heightController.dispose();
-    _weightController.dispose();
-    _healthConditionsController.dispose();
-    _allergiesController.dispose();
-    _dietaryPreferencesController.dispose();
+    _age.dispose();
+    _height.dispose();
+    _weight.dispose();
+    _lactationMonths.dispose();
     super.dispose();
+  }
+
+  void _initialize(ProfileState state) {
+    if (_initialized || state.isLoading) return;
+    final profile = state.profile;
+    _age.text = profile.ageUnit == 'months'
+        ? profile.ageMonths?.toString() ?? ''
+        : profile.age?.toString() ?? '';
+    _height.text = _format(profile.heightCm);
+    _weight.text = _format(profile.weightKg);
+    _lactationMonths.text = _format(profile.lactationStageMonths);
+    _initialized = true;
+  }
+
+  String _format(double? value) {
+    if (value == null) return '';
+    return value == value.roundToDouble()
+        ? value.round().toString()
+        : value.toStringAsFixed(1);
+  }
+
+  int? _int(String value) => int.tryParse(value.trim());
+  double? _double(String value) => double.tryParse(value.trim());
+
+  String? _validateAge(String? value, String unit) {
+    final parsed = int.tryParse(value?.trim() ?? '');
+    if (value == null || value.trim().isEmpty) return null;
+    if (parsed == null || parsed < 0) return 'Enter a valid age.';
+    if (unit == 'months' && parsed > 35) {
+      return 'Use years for ages above 35 months.';
+    }
+    if (unit == 'years' && parsed > 129) return 'Enter an age below 130.';
+    return null;
+  }
+
+  String? _validatePositive(String? value, String label) {
+    if (value == null || value.trim().isEmpty) return null;
+    final parsed = double.tryParse(value.trim());
+    if (parsed == null || parsed <= 0) return 'Enter a valid $label.';
+    return null;
+  }
+
+  Future<void> _save() async {
+    FocusScope.of(context).unfocus();
+    if (!(_formKey.currentState?.validate() ?? false)) return;
+
+    final state = ref.read(profileProvider);
+    final profile = state.profile;
+
+    if (profile.pregnant && profile.trimester == null) {
+      _message('Select the pregnancy trimester.');
+      return;
+    }
+    if (profile.lactating && profile.lactationStageMonths == null) {
+      _message('Enter the number of months postpartum.');
+      return;
+    }
+    if (profile.hasCkd && profile.ckdStage == null) {
+      _message('Select the CKD stage or Unknown.');
+      return;
+    }
+
+    final saved = await ref.read(profileProvider.notifier).saveProfile();
+    if (!mounted) return;
+    if (saved) {
+      _message('Personalization profile saved.');
+      context.go('/upload');
+    }
+  }
+
+  void _message(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return const Scaffold(
-        body: SafeArea(
-          child: Center(
-            child: CircularProgressIndicator(),
-          ),
-        ),
-      );
-    }
+    final state = ref.watch(profileProvider);
+    _initialize(state);
+    final profile = state.profile;
+    final notifier = ref.read(profileProvider.notifier);
 
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
+    ref.listen<ProfileState>(profileProvider, (previous, next) {
+      if (next.error != null && next.error != previous?.error) {
+        _message(next.error!);
+        notifier.clearError();
+      }
+    });
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Your profile'),
-        actions: [
-          TextButton(
-            onPressed:
-                _isSaving ? null : _skipProfile,
-            child: const Text('Skip'),
-          ),
-          const SizedBox(width: 8),
-        ],
-      ),
-      body: SafeArea(
-        child: Form(
-          key: _formKey,
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(
-              20,
-              12,
-              20,
-              32,
-            ),
-            children: [
-              Text(
-                'Personalise your nutrition insights',
-                style:
-                    theme.textTheme.headlineSmall,
-              ),
-              const SizedBox(height: 10),
-              Text(
-                'All fields are optional. Quinone can still analyse meals without personal information.',
-                style:
-                    theme.textTheme.bodyLarge?.copyWith(
-                  color:
-                      colorScheme.onSurfaceVariant,
-                ),
-              ),
-              const SizedBox(height: 28),
-
-              _SectionHeader(
-                icon: Icons.person_outline_rounded,
-                title: 'Basic information',
-              ),
-              const SizedBox(height: 14),
-
-              TextFormField(
-                controller: _nameController,
-                textCapitalization:
-                    TextCapitalization.words,
-                textInputAction:
-                    TextInputAction.next,
-                decoration: const InputDecoration(
-                  labelText: 'Name',
-                  hintText: 'Optional',
-                  prefixIcon:
-                      Icon(Icons.badge_outlined),
-                ),
-              ),
-              const SizedBox(height: 14),
-
-              Row(
-                crossAxisAlignment:
-                    CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: TextFormField(
-                      controller: _ageController,
-                      keyboardType:
-                          TextInputType.number,
-                      textInputAction:
-                          TextInputAction.next,
-                      validator: _validateAge,
-                      decoration:
-                          const InputDecoration(
-                        labelText: 'Age',
-                        hintText: 'Years',
-                        prefixIcon:
-                            Icon(Icons.cake_outlined),
-                      ),
+      appBar: AppBar(title: const Text('Personalization')),
+      body: state.isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : SafeArea(
+              child: Form(
+                key: _formKey,
+                child: ListView(
+                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 36),
+                  children: [
+                    Text(
+                      'Personalize your results',
+                      style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child:
-                        DropdownButtonFormField<
-                            String>(
-                      value: _selectedSex,
-                      isExpanded: true,
-                      decoration:
-                          const InputDecoration(
-                        labelText: 'Sex',
-                      ),
-                      items: _sexOptions
-                          .map(
-                            (option) =>
-                                DropdownMenuItem(
-                              value: option,
-                              child: Text(
-                                option,
-                                overflow:
-                                    TextOverflow.ellipsis,
+                    const SizedBox(height: 8),
+                    Text(
+                      'Everything is optional. Selected details personalize health scores and daily nutrient targets.',
+                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                            height: 1.4,
+                          ),
+                    ),
+                    const SizedBox(height: 20),
+                    _Section(
+                      title: 'Personal details',
+                      icon: Icons.person_outline_rounded,
+                      children: [
+                        SegmentedButton<String>(
+                          segments: const [
+                            ButtonSegment(value: 'years', label: Text('Years')),
+                            ButtonSegment(value: 'months', label: Text('Months')),
+                          ],
+                          selected: {profile.ageUnit},
+                          onSelectionChanged: (value) {
+                            notifier.setAgeUnit(value.first);
+                            _age.clear();
+                          },
+                        ),
+                        const SizedBox(height: 12),
+                        TextFormField(
+                          controller: _age,
+                          keyboardType: TextInputType.number,
+                          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                          decoration: InputDecoration(
+                            labelText: 'Age',
+                            suffixText: profile.ageUnit,
+                          ),
+                          validator: (value) => _validateAge(value, profile.ageUnit),
+                          onChanged: (value) => profile.ageUnit == 'months'
+                              ? notifier.setAgeMonths(_int(value))
+                              : notifier.setAge(_int(value)),
+                        ),
+                        const SizedBox(height: 16),
+                        _Choices(
+                          label: 'Sex used for nutrient recommendations',
+                          selected: profile.sex,
+                          options: const {'female': 'Female', 'male': 'Male'},
+                          onSelected: notifier.setSex,
+                        ),
+                        const SizedBox(height: 16),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextFormField(
+                                controller: _height,
+                                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                decoration: const InputDecoration(labelText: 'Height', suffixText: 'cm'),
+                                validator: (value) => _validatePositive(value, 'height'),
+                                onChanged: (value) => notifier.setHeight(_double(value)),
                               ),
                             ),
-                          )
-                          .toList(),
-                      onChanged: (value) {
-                        setState(() {
-                          _selectedSex = value;
-                        });
-                      },
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 14),
-
-              Row(
-                crossAxisAlignment:
-                    CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: TextFormField(
-                      controller:
-                          _heightController,
-                      keyboardType:
-                          const TextInputType
-                              .numberWithOptions(
-                        decimal: true,
-                      ),
-                      textInputAction:
-                          TextInputAction.next,
-                      validator: _validateHeight,
-                      decoration:
-                          const InputDecoration(
-                        labelText: 'Height',
-                        suffixText: 'cm',
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: TextFormField(
-                      controller:
-                          _weightController,
-                      keyboardType:
-                          const TextInputType
-                              .numberWithOptions(
-                        decimal: true,
-                      ),
-                      textInputAction:
-                          TextInputAction.next,
-                      validator: _validateWeight,
-                      decoration:
-                          const InputDecoration(
-                        labelText: 'Weight',
-                        suffixText: 'kg',
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 28),
-
-              _SectionHeader(
-                icon:
-                    Icons.directions_run_outlined,
-                title: 'Lifestyle and goal',
-              ),
-              const SizedBox(height: 14),
-
-              DropdownButtonFormField<String>(
-                value:
-                    _selectedActivityLevel,
-                isExpanded: true,
-                decoration: const InputDecoration(
-                  labelText: 'Activity level',
-                  prefixIcon:
-                      Icon(Icons.bolt_outlined),
-                ),
-                items: _activityLevels
-                    .map(
-                      (option) =>
-                          DropdownMenuItem(
-                        value: option,
-                        child: Text(option),
-                      ),
-                    )
-                    .toList(),
-                onChanged: (value) {
-                  setState(() {
-                    _selectedActivityLevel =
-                        value;
-                  });
-                },
-              ),
-              const SizedBox(height: 14),
-
-              DropdownButtonFormField<String>(
-                value: _selectedGoal,
-                isExpanded: true,
-                decoration: const InputDecoration(
-                  labelText: 'Primary goal',
-                  prefixIcon:
-                      Icon(Icons.flag_outlined),
-                ),
-                items: _goalOptions
-                    .map(
-                      (option) =>
-                          DropdownMenuItem(
-                        value: option,
-                        child: Text(
-                          option,
-                          overflow:
-                              TextOverflow.ellipsis,
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: TextFormField(
+                                controller: _weight,
+                                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                decoration: const InputDecoration(labelText: 'Weight', suffixText: 'kg'),
+                                validator: (value) => _validatePositive(value, 'weight'),
+                                onChanged: (value) => notifier.setWeight(_double(value)),
+                              ),
+                            ),
+                          ],
                         ),
-                      ),
-                    )
-                    .toList(),
-                onChanged: (value) {
-                  setState(() {
-                    _selectedGoal = value;
-                  });
-                },
-              ),
-              const SizedBox(height: 28),
-
-              _SectionHeader(
-                icon:
-                    Icons.health_and_safety_outlined,
-                title: 'Health preferences',
-              ),
-              const SizedBox(height: 14),
-
-              TextFormField(
-                controller:
-                    _healthConditionsController,
-                minLines: 2,
-                maxLines: 4,
-                textCapitalization:
-                    TextCapitalization.sentences,
-                decoration: const InputDecoration(
-                  labelText: 'Health conditions',
-                  hintText:
-                      'For example: diabetes, high blood pressure',
-                  alignLabelWithHint: true,
-                  prefixIcon:
-                      Icon(Icons.medical_information_outlined),
-                ),
-              ),
-              const SizedBox(height: 14),
-
-              TextFormField(
-                controller:
-                    _allergiesController,
-                minLines: 2,
-                maxLines: 4,
-                textCapitalization:
-                    TextCapitalization.sentences,
-                decoration: const InputDecoration(
-                  labelText: 'Food allergies',
-                  hintText:
-                      'For example: peanuts, dairy, shellfish',
-                  alignLabelWithHint: true,
-                  prefixIcon:
-                      Icon(Icons.warning_amber_rounded),
-                ),
-              ),
-              const SizedBox(height: 14),
-
-              TextFormField(
-                controller:
-                    _dietaryPreferencesController,
-                minLines: 2,
-                maxLines: 4,
-                textCapitalization:
-                    TextCapitalization.sentences,
-                decoration: const InputDecoration(
-                  labelText:
-                      'Dietary preferences',
-                  hintText:
-                      'For example: vegetarian, vegan, halal',
-                  alignLabelWithHint: true,
-                  prefixIcon:
-                      Icon(Icons.restaurant_outlined),
-                ),
-              ),
-              const SizedBox(height: 30),
-
-              FilledButton.icon(
-                onPressed:
-                    _isSaving ? null : _saveProfile,
-                icon: _isSaving
-                    ? const SizedBox.square(
-                        dimension: 20,
-                        child:
-                            CircularProgressIndicator(
-                          strokeWidth: 2,
+                      ],
+                    ),
+                    _Section(
+                      title: 'Lifestyle and goals',
+                      icon: Icons.directions_run_rounded,
+                      children: [
+                        _Choices(
+                          label: 'Activity level',
+                          selected: profile.activityLevel,
+                          options: const {
+                            'sedentary': 'Sedentary',
+                            'low_active': 'Lightly active',
+                            'active': 'Active',
+                            'very_active': 'Very active',
+                          },
+                          onSelected: notifier.setActivity,
                         ),
-                      )
-                    : const Icon(
-                        Icons.check_rounded,
+                        _Choices(
+                          label: 'Primary goal',
+                          selected: profile.goal,
+                          options: const {
+                            'general_health': 'General health',
+                            'weight_maintenance': 'Maintain weight',
+                            'fat_loss': 'Lose fat',
+                            'muscle_gain': 'Gain muscle',
+                          },
+                          onSelected: notifier.setGoal,
+                        ),
+                        _Choices(
+                          label: 'Diet type',
+                          selected: profile.dietType,
+                          options: const {
+                            'omnivore': 'No restriction',
+                            'vegetarian': 'Vegetarian',
+                            'vegan': 'Vegan',
+                          },
+                          onSelected: notifier.setDiet,
+                        ),
+                        _Choices(
+                          label: 'Special diet pattern',
+                          selected: profile.dietPattern,
+                          options: const {
+                            'low_carb': 'Low carbohydrate',
+                            'ketogenic': 'Ketogenic',
+                          },
+                          onSelected: notifier.setDietPattern,
+                        ),
+                        _Choices(
+                          label: 'Smoking',
+                          selected: profile.smokingStatus,
+                          options: const {
+                            'non_smoker': 'Non-smoker',
+                            'former_smoker': 'Former smoker',
+                            'smoker': 'Current smoker',
+                          },
+                          onSelected: notifier.setSmoking,
+                        ),
+                      ],
+                    ),
+                    _Section(
+                      title: 'Training and appetite',
+                      icon: Icons.fitness_center_rounded,
+                      children: [
+                        _Toggle('Resistance training', profile.resistanceTraining, notifier.setResistanceTraining),
+                        _Toggle('Endurance training', profile.enduranceTraining, notifier.setEnduranceTraining),
+                        _Toggle('Frailty or reduced physical resilience', profile.frailty, notifier.setFrailty),
+                        _Toggle('Low appetite', profile.lowAppetite, notifier.setLowAppetite),
+                      ],
+                    ),
+                    _Section(
+                      title: 'Health conditions',
+                      icon: Icons.health_and_safety_outlined,
+                      children: [
+                        _MultiChoices(
+                          selected: profile.chronicConditions,
+                          options: _conditions,
+                          onToggle: notifier.toggleCondition,
+                        ),
+                        _Choices(
+                          label: 'Blood-pressure status',
+                          selected: profile.bloodPressureStatus,
+                          options: const {
+                            'normal': 'Normal',
+                            'elevated': 'Elevated',
+                            'hypertension': 'Hypertension',
+                          },
+                          onSelected: notifier.setBloodPressureStatus,
+                        ),
+                        _Choices(
+                          label: 'Glycemic status',
+                          selected: profile.glycemicStatus,
+                          options: const {
+                            'normal': 'Normal',
+                            'prediabetes': 'Prediabetes',
+                            'type_2_diabetes': 'Type 2 diabetes',
+                          },
+                          onSelected: notifier.setGlycemicStatus,
+                        ),
+                        if (profile.hasCkd) ...[
+                          _Choices(
+                            label: 'CKD stage',
+                            selected: profile.ckdStage,
+                            allowClear: false,
+                            options: const {
+                              'unknown': 'Unknown',
+                              'g1': 'G1',
+                              'g2': 'G2',
+                              'g3a': 'G3a',
+                              'g3b': 'G3b',
+                              'g4': 'G4',
+                              'g5': 'G5',
+                            },
+                            onSelected: notifier.setCkdStage,
+                          ),
+                          _Choices(
+                            label: 'Dialysis',
+                            selected: profile.dialysisModality,
+                            options: const {
+                              'none': 'None',
+                              'hemodialysis': 'Hemodialysis',
+                              'peritoneal_dialysis': 'Peritoneal dialysis',
+                            },
+                            onSelected: notifier.setDialysisModality,
+                          ),
+                        ],
+                      ],
+                    ),
+                    if (profile.sex == 'female')
+                      _Section(
+                        title: 'Pregnancy and lactation',
+                        icon: Icons.child_friendly_rounded,
+                        children: [
+                          _Toggle('Pregnant', profile.pregnant, notifier.setPregnant),
+                          if (profile.pregnant)
+                            _Choices(
+                              label: 'Trimester',
+                              selected: profile.trimester?.toString(),
+                              allowClear: false,
+                              options: const {'1': 'First', '2': 'Second', '3': 'Third'},
+                              onSelected: (value) => notifier.setTrimester(int.tryParse(value ?? '')),
+                            ),
+                          _Toggle('Lactating', profile.lactating, notifier.setLactating),
+                          if (profile.lactating)
+                            TextFormField(
+                              controller: _lactationMonths,
+                              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                              decoration: const InputDecoration(
+                                labelText: 'Months postpartum',
+                                suffixText: 'months',
+                              ),
+                              validator: (value) => _validatePositive(value, 'postpartum duration'),
+                              onChanged: (value) => notifier.setLactationMonths(_double(value)),
+                            ),
+                        ],
                       ),
-                label: Text(
-                  _isSaving
-                      ? 'Saving profile...'
-                      : 'Save and continue',
+                    _Section(
+                      title: 'Medications',
+                      icon: Icons.medication_outlined,
+                      children: [
+                        _MultiChoices(
+                          selected: profile.medications,
+                          options: _medications,
+                          onToggle: notifier.toggleMedication,
+                        ),
+                      ],
+                    ),
+                    _Section(
+                      title: 'Allergies',
+                      icon: Icons.warning_amber_rounded,
+                      children: [
+                        _MultiChoices(
+                          selected: profile.allergies,
+                          options: _allergies,
+                          onToggle: notifier.toggleAllergy,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      height: 54,
+                      child: FilledButton.icon(
+                        onPressed: state.isSaving ? null : _save,
+                        icon: state.isSaving
+                            ? const SizedBox.square(
+                                dimension: 20,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.check_rounded),
+                        label: Text(state.isSaving ? 'Saving…' : 'Save and continue'),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: state.isSaving ? null : () => context.go('/upload'),
+                      child: const Text('Skip for now'),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(height: 10),
+            ),
+    );
+  }
+}
 
-              TextButton(
-                onPressed:
-                    _isSaving ? null : _skipProfile,
-                child: const Text(
-                  'Continue without saving',
+class _Section extends StatelessWidget {
+  const _Section({required this.title, required this.icon, required this.children});
+  final String title;
+  final IconData icon;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 16),
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(children: [
+              Icon(icon, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  title,
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
                 ),
               ),
+            ]),
+            const SizedBox(height: 18),
+            for (var index = 0; index < children.length; index++) ...[
+              children[index],
+              if (index < children.length - 1) const SizedBox(height: 16),
             ],
-          ),
+          ],
         ),
       ),
     );
   }
 }
 
-class _SectionHeader extends StatelessWidget {
-  final IconData icon;
-  final String title;
-
-  const _SectionHeader({
-    required this.icon,
-    required this.title,
+class _Choices extends StatelessWidget {
+  const _Choices({
+    required this.label,
+    required this.selected,
+    required this.options,
+    required this.onSelected,
+    this.allowClear = true,
   });
+
+  final String label;
+  final String? selected;
+  final Map<String, String> options;
+  final ValueChanged<String?> onSelected;
+  final bool allowClear;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-
-    return Row(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Container(
-          width: 40,
-          height: 40,
-          decoration: BoxDecoration(
-            color: colorScheme.primaryContainer,
-            borderRadius:
-                BorderRadius.circular(12),
-          ),
-          child: Icon(
-            icon,
-            size: 21,
-            color:
-                colorScheme.onPrimaryContainer,
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Text(
-            title,
-            style:
-                theme.textTheme.titleLarge?.copyWith(
-              fontWeight: FontWeight.w700,
-            ),
-          ),
+        Text(label, style: const TextStyle(fontWeight: FontWeight.w700)),
+        const SizedBox(height: 10),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: options.entries.map((entry) {
+            final active = selected == entry.key;
+            return ChoiceChip(
+              label: Text(entry.value),
+              selected: active,
+              onSelected: (enabled) {
+                if (enabled) {
+                  onSelected(entry.key);
+                } else if (allowClear) {
+                  onSelected(null);
+                }
+              },
+            );
+          }).toList(),
         ),
       ],
     );
   }
 }
+
+class _MultiChoices extends StatelessWidget {
+  const _MultiChoices({
+    required this.selected,
+    required this.options,
+    required this.onToggle,
+  });
+  final Set<String> selected;
+  final Map<String, String> options;
+  final ValueChanged<String> onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: options.entries
+          .map(
+            (entry) => FilterChip(
+              label: Text(entry.value),
+              selected: selected.contains(entry.key),
+              onSelected: (_) => onToggle(entry.key),
+            ),
+          )
+          .toList(),
+    );
+  }
+}
+
+class _Toggle extends StatelessWidget {
+  const _Toggle(this.title, this.value, this.onChanged);
+  final String title;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return SwitchListTile.adaptive(
+      contentPadding: EdgeInsets.zero,
+      title: Text(title, style: const TextStyle(fontWeight: FontWeight.w700)),
+      value: value,
+      onChanged: onChanged,
+    );
+  }
+}
+
+const _conditions = <String, String>{
+  'prediabetes': 'Prediabetes',
+  'type_2_diabetes': 'Type 2 diabetes',
+  'hypertension': 'Hypertension',
+  'chronic_kidney_disease': 'Chronic kidney disease',
+  'heart_failure': 'Heart failure',
+  'dyslipidemia': 'High cholesterol',
+  'fatty_liver': 'Fatty liver',
+  'ibs': 'IBS',
+  'ibd': 'IBD',
+  'osteoarthritis': 'Osteoarthritis',
+  'rheumatoid_arthritis': 'Rheumatoid arthritis',
+  'osteoporosis': 'Osteoporosis or osteopenia',
+  'iron_deficiency': 'Iron deficiency',
+  'thyroid_disease': 'Thyroid disease',
+};
+
+const _medications = <String, String>{
+  'metformin': 'Metformin',
+  'warfarin': 'Warfarin',
+  'ppi': 'Proton pump inhibitor',
+  'loop_diuretic': 'Loop diuretic',
+  'thiazide_diuretic': 'Thiazide diuretic',
+  'raas_inhibitor': 'ACE inhibitor or ARB',
+  'potassium_sparing_diuretic': 'Potassium-sparing diuretic',
+};
+
+const _allergies = <String, String>{
+  'milk': 'Milk',
+  'egg': 'Egg',
+  'peanut': 'Peanut',
+  'tree_nuts': 'Tree nuts',
+  'soy': 'Soy',
+  'wheat': 'Wheat',
+  'fish': 'Fish',
+  'shellfish': 'Shellfish',
+  'sesame': 'Sesame',
+};
