@@ -1034,11 +1034,11 @@ if __name__ == "__main__":
         }
     }
 
-    example_user_profile = {
-        "age": 68,
-        "chronic_conditions": ["hypertension"],
-        "resistance_training": True,
-    }
+    # example_user_profile = {
+    #     "age": 68,
+    #     "chronic_conditions": ["hypertension"],
+    #     "resistance_training": True,
+    # }
 
-    personalized = attach_personalization_sync(SAMPLE_SCORED_MEAL, example_user_profile)
-    print(json.dumps(personalized["meal"]["personalization"], indent=2))
+    # personalized = attach_personalization_sync(SAMPLE_SCORED_MEAL, example_user_profile)
+    # print(json.dumps(personalized["meal"]["personalization"], indent=2))
