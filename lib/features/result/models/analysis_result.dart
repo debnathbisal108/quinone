@@ -26,6 +26,8 @@ class AnalysisResult {
     required this.healthScores,
     required this.micronutrients,
     required this.foods,
+    required this.nutrientTargets,
+    required this.nutrientRiskFlags,
     required this.usedAuthoritativeNutritionTotals,
   });
 
@@ -48,6 +50,8 @@ class AnalysisResult {
   final List<HealthScore> healthScores;
   final List<Micronutrient> micronutrients;
   final List<FoodSummary> foods;
+  final Map<String, PersonalizedNutrientTarget> nutrientTargets;
+  final List<NutrientRiskFlag> nutrientRiskFlags;
 
   /// False only for legacy responses that contain no meal-level totals and
   /// therefore require a deduplicated food-level fallback.
@@ -125,6 +129,30 @@ class AnalysisResult {
 
     final personalization =
         _asMap(meal['personalization']) ?? _asMap(root['personalization']);
+
+    final rawTargets = _asMap(
+          personalization?['nutrient_targets'],
+        ) ??
+        const <String, dynamic>{};
+
+    final nutrientTargets = <String, PersonalizedNutrientTarget>{};
+    for (final entry in rawTargets.entries) {
+      final map = _asMap(entry.value);
+      if (map == null) continue;
+      nutrientTargets[entry.key] = PersonalizedNutrientTarget.fromJson(
+        entry.key,
+        map,
+      );
+    }
+
+    final nutrientRiskFlags = _asList(
+      personalization?['nutrient_risk_flags'],
+    )
+        .map(_asMap)
+        .whereType<Map<String, dynamic>>()
+        .map(NutrientRiskFlag.fromJson)
+        .toList(growable: false);
+
     final personalizedScores = _asMap(
       personalization?['personalized_domain_scores'],
     );
@@ -243,6 +271,8 @@ class AnalysisResult {
       healthScores: List.unmodifiable(scores),
       micronutrients: List.unmodifiable(micronutrients),
       foods: List.unmodifiable(foods),
+      nutrientTargets: Map.unmodifiable(nutrientTargets),
+      nutrientRiskFlags: List.unmodifiable(nutrientRiskFlags),
       usedAuthoritativeNutritionTotals: usedAuthoritativeTotals,
     );
   }
@@ -253,6 +283,89 @@ class AnalysisResult {
       if (nested != null && nested.isNotEmpty) return nested;
     }
     return json;
+  }
+}
+
+class PersonalizedNutrientTarget {
+  const PersonalizedNutrientTarget({
+    required this.key,
+    required this.name,
+    required this.targetType,
+    required this.unit,
+    required this.status,
+    required this.baselineValue,
+    required this.resolvedValue,
+    required this.rangeLow,
+    required this.rangeHigh,
+    required this.upperLimit,
+    required this.requiredInputs,
+    required this.warnings,
+    required this.overrideChain,
+  });
+
+  final String key;
+  final String name;
+  final String? targetType;
+  final String unit;
+  final String status;
+  final double? baselineValue;
+  final double? resolvedValue;
+  final double? rangeLow;
+  final double? rangeHigh;
+  final double? upperLimit;
+  final List<String> requiredInputs;
+  final List<String> warnings;
+  final List<String> overrideChain;
+
+  bool get isResolved =>
+      status == 'resolved' || status == 'resolved_range';
+
+  bool get isRange => rangeLow != null && rangeHigh != null;
+
+  factory PersonalizedNutrientTarget.fromJson(
+    String key,
+    Map<String, dynamic> json,
+  ) {
+    return PersonalizedNutrientTarget(
+      key: key,
+      name: json['nutrient_name']?.toString().trim().isNotEmpty == true
+          ? json['nutrient_name'].toString().trim()
+          : _titleCase(key),
+      targetType: json['target_type']?.toString(),
+      unit: json['resolved_unit']?.toString() ?? '',
+      status: json['status']?.toString() ?? 'unresolved',
+      baselineValue: _nullableNumber(json['baseline_value']),
+      resolvedValue: _nullableNumber(json['resolved_value']),
+      rangeLow: _nullableNumber(json['range_low']),
+      rangeHigh: _nullableNumber(json['range_high']),
+      upperLimit: _nullableNumber(json['upper_limit']),
+      requiredInputs: _stringList(json['required_inputs']),
+      warnings: _stringList(json['warnings']),
+      overrideChain: _stringList(json['override_chain']),
+    );
+  }
+}
+
+class NutrientRiskFlag {
+  const NutrientRiskFlag({
+    required this.id,
+    required this.type,
+    required this.message,
+    required this.affectedNutrients,
+  });
+
+  final String id;
+  final String type;
+  final String? message;
+  final List<String> affectedNutrients;
+
+  factory NutrientRiskFlag.fromJson(Map<String, dynamic> json) {
+    return NutrientRiskFlag(
+      id: json['id']?.toString() ?? 'nutrient_risk',
+      type: json['type']?.toString() ?? 'risk_flag',
+      message: json['message']?.toString(),
+      affectedNutrients: _stringList(json['affected_nutrients']),
+    );
   }
 }
 
@@ -701,6 +814,14 @@ Map<String, double> _doubleMap(Map<String, dynamic>? map) {
     if (value != null) result[entry.key] = value;
   }
   return result;
+}
+
+List<String> _stringList(dynamic value) {
+  if (value is! Iterable) return const <String>[];
+  return value
+      .map((item) => item.toString().trim())
+      .where((item) => item.isNotEmpty)
+      .toList(growable: false);
 }
 
 Map<String, dynamic>? _asMap(dynamic value) {
