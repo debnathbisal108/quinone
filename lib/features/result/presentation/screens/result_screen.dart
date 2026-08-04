@@ -580,6 +580,34 @@ class ResultScreen extends StatelessWidget {
                           ),
                         ),
                       ],
+                      if (result.nutrientTargets.isNotEmpty) ...[
+                        const SizedBox(height: 32),
+                        const _SectionTitle('Personalized daily targets'),
+                        const SizedBox(height: 14),
+                        ...result.nutrientTargets.values
+                            .where((target) =>
+                                target.isResolved ||
+                                target.status == 'requires_clinical_input')
+                            .map(
+                              (target) => Padding(
+                                padding: const EdgeInsets.only(bottom: 10),
+                                child: _PersonalizedTargetCard(
+                                  target: target,
+                                ),
+                              ),
+                            ),
+                      ],
+                      if (result.nutrientRiskFlags.isNotEmpty) ...[
+                        const SizedBox(height: 22),
+                        const _SectionTitle('Personalization notes'),
+                        const SizedBox(height: 12),
+                        ...result.nutrientRiskFlags.map(
+                          (flag) => Padding(
+                            padding: const EdgeInsets.only(bottom: 10),
+                            child: _RiskFlagCard(flag: flag),
+                          ),
+                        ),
+                      ],
                       if (result.foods.isNotEmpty) ...[
                         const SizedBox(height: 32),
                         const _SectionTitle('Detected foods'),
@@ -723,6 +751,121 @@ class _CaloriesCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class _PersonalizedTargetCard extends StatelessWidget {
+  const _PersonalizedTargetCard({required this.target});
+
+  final PersonalizedNutrientTarget target;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    String valueText;
+    if (target.status == 'requires_clinical_input') {
+      valueText = 'Clinical input required';
+    } else if (target.isRange) {
+      valueText = '${_formatTarget(target.rangeLow!)}–${_formatTarget(target.rangeHigh!)} ${target.unit}';
+    } else if (target.resolvedValue != null) {
+      valueText = '${_formatTarget(target.resolvedValue!)} ${target.unit}';
+    } else {
+      valueText = 'Not resolved';
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            target.status == 'requires_clinical_input'
+                ? Icons.medical_information_outlined
+                : Icons.track_changes_rounded,
+            color: theme.colorScheme.primary,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  target.name,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  valueText,
+                  style: theme.textTheme.bodyLarge?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                if (target.targetType != null) ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    target.targetType!,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RiskFlagCard extends StatelessWidget {
+  const _RiskFlagCard({required this.flag});
+
+  final NutrientRiskFlag flag;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.tertiaryContainer,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            Icons.info_outline_rounded,
+            color: theme.colorScheme.onTertiaryContainer,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              flag.message ?? flag.id.replaceAll('_', ' '),
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onTertiaryContainer,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _formatTarget(double value) {
+  if (value == value.roundToDouble()) return value.round().toString();
+  if (value.abs() >= 10) return value.toStringAsFixed(1);
+  return value.toStringAsFixed(2);
 }
 
 class _SectionTitle extends StatelessWidget {
