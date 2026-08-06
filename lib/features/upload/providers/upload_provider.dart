@@ -5,6 +5,7 @@ import '../models/upload_image.dart';
 import '../models/upload_request.dart';
 import '../models/upload_response.dart';
 import '../models/analysis_job_progress.dart';
+import '../../history/providers/analysis_history_provider.dart';
 
 final uploadRepositoryProvider = Provider<UploadRepository>((ref) {
   return UploadRepository();
@@ -14,15 +15,19 @@ final uploadProvider =
     StateNotifierProvider<UploadNotifier, UploadState>((ref) {
   return UploadNotifier(
     repository: ref.watch(uploadRepositoryProvider),
+    historySaver: ref.read(analysisHistoryProvider.notifier).saveResult,
   );
 });
 
 class UploadNotifier extends StateNotifier<UploadState> {
   final UploadRepository _repository;
+  final Future<void> Function(Map<String, dynamic>) _historySaver;
 
   UploadNotifier({
     required UploadRepository repository,
+    required Future<void> Function(Map<String, dynamic>) historySaver,
   })  : _repository = repository,
+        _historySaver = historySaver,
         super(const UploadState());
 
   // -------------------------------------------------------
@@ -183,6 +188,10 @@ class UploadNotifier extends StateNotifier<UploadState> {
       final responseData =
           _normalizeResponseData(response.data);
 
+      if (responseData != null && _isCompletedResult(responseData)) {
+        await _historySaver(responseData);
+      }
+
       state = state.copyWith(
         isUploading: false,
         uploadProgress: 1,
@@ -271,6 +280,10 @@ class UploadNotifier extends StateNotifier<UploadState> {
 
       final responseData =
           _normalizeResponseData(response.data);
+
+      if (responseData != null && _isCompletedResult(responseData)) {
+        await _historySaver(responseData);
+      }
 
       state = state.copyWith(
         isUploading: false,
@@ -486,6 +499,22 @@ class UploadNotifier extends StateNotifier<UploadState> {
     return null;
   }
 
+  bool _isCompletedResult(Map<String, dynamic> data) {
+    final status = data['status']?.toString().trim().toLowerCase();
+    if (status == 'waiting_for_back_label' || status == 'no_food_detected') {
+      return false;
+    }
+    const completed = {
+      'completed',
+      'complete',
+      'success',
+      'finished',
+      'analysis_complete',
+    };
+    return status == null || completed.contains(status) ||
+        data.containsKey('meal') || data.containsKey('final_result');
+  }
+
   String _readableError(Object error) {
     final message = error.toString().trim();
 
@@ -563,13 +592,13 @@ class UploadState {
 
   bool get isWaitingForBackLabel {
     final Object? rawData = response?.data;
-  
+
     if (rawData is! Map) {
       return false;
     }
-  
+
     final data = Map<String, dynamic>.from(rawData);
-  
+
     return data['status']?.toString() ==
         'waiting_for_back_label';
   }
