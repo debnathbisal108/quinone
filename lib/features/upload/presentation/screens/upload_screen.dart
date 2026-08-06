@@ -474,6 +474,8 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
                 const SizedBox(height: 24),
                 UploadProgressCard(
                   progress: uploadState.uploadProgress,
+                  message: uploadState.progressMessage,
+                  stage: uploadState.progressStage,
                   onCancel: _cancelUpload,
                 ),
               ],
