@@ -1,10 +1,10 @@
-import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../repositories/upload_repository.dart';
 import '../models/upload_image.dart';
 import '../models/upload_request.dart';
 import '../models/upload_response.dart';
+import '../models/analysis_job_progress.dart';
 
 final uploadRepositoryProvider = Provider<UploadRepository>((ref) {
   return UploadRepository();
@@ -19,7 +19,6 @@ final uploadProvider =
 
 class UploadNotifier extends StateNotifier<UploadState> {
   final UploadRepository _repository;
-  Timer? _progressTimer;
 
   UploadNotifier({
     required UploadRepository repository,
@@ -160,6 +159,7 @@ class UploadNotifier extends StateNotifier<UploadState> {
       isUploading: true,
       uploadProgress: 0.02,
       progressMessage: 'Preparing images…',
+      progressStage: 'preparing',
       clearError: true,
       clearResponse: true,
       clearAnalysisId: true,
@@ -174,17 +174,15 @@ class UploadNotifier extends StateNotifier<UploadState> {
         userProfile: userProfile,
       );
 
-      _startProcessingProgress();
-
       final response = await _repository.uploadImages(
         request: request,
         onSendProgress: _handleProgress,
+        onAnalysisProgress: _handleAnalysisProgress,
       );
 
       final responseData =
           _normalizeResponseData(response.data);
 
-      _stopProcessingProgress();
       state = state.copyWith(
         isUploading: false,
         uploadProgress: 1,
@@ -194,7 +192,6 @@ class UploadNotifier extends StateNotifier<UploadState> {
         foodId: _extractFoodId(responseData),
       );
     } catch (error) {
-      _stopProcessingProgress();
       state = state.copyWith(
         isUploading: false,
         uploadProgress: 0,
@@ -253,6 +250,7 @@ class UploadNotifier extends StateNotifier<UploadState> {
       isUploading: true,
       uploadProgress: 0.02,
       progressMessage: 'Uploading nutrition label…',
+      progressStage: 'uploading_label',
       clearError: true,
       clearResponse: true,
     );
@@ -265,17 +263,15 @@ class UploadNotifier extends StateNotifier<UploadState> {
         foodId: resolvedFoodId,
       );
 
-      _startProcessingProgress();
-
       final response = await _repository.uploadImages(
         request: request,
         onSendProgress: _handleProgress,
+        onAnalysisProgress: _handleAnalysisProgress,
       );
 
       final responseData =
           _normalizeResponseData(response.data);
 
-      _stopProcessingProgress();
       state = state.copyWith(
         isUploading: false,
         uploadProgress: 1,
@@ -289,7 +285,6 @@ class UploadNotifier extends StateNotifier<UploadState> {
                 resolvedFoodId,
       );
     } catch (error) {
-      _stopProcessingProgress();
       state = state.copyWith(
         isUploading: false,
         uploadProgress: 0,
@@ -309,8 +304,6 @@ class UploadNotifier extends StateNotifier<UploadState> {
     }
 
     _repository.cancelUpload();
-    _stopProcessingProgress();
-
     state = state.copyWith(
       isUploading: false,
       uploadProgress: 0,
@@ -351,27 +344,13 @@ class UploadNotifier extends StateNotifier<UploadState> {
   // Internal helpers
   // -------------------------------------------------------
 
-  void _startProcessingProgress() {
-    _progressTimer?.cancel();
-    _progressTimer = Timer.periodic(const Duration(milliseconds: 900), (_) {
-      if (!mounted || !state.isUploading) return;
-      final current = state.uploadProgress;
-      if (current >= 0.92) return;
-      final next = current < 0.22 ? 0.22 : (current + (0.92 - current) * 0.12);
-      final message = next < 0.38
-          ? 'Identifying foods and portions…'
-          : next < 0.58
-              ? 'Calculating nutrients…'
-              : next < 0.76
-                  ? 'Scoring health domains…'
-                  : 'Preparing your insights…';
-      state = state.copyWith(uploadProgress: next, progressMessage: message);
-    });
-  }
-
-  void _stopProcessingProgress() {
-    _progressTimer?.cancel();
-    _progressTimer = null;
+  void _handleAnalysisProgress(AnalysisJobProgress progress) {
+    if (!mounted || !state.isUploading) return;
+    state = state.copyWith(
+      uploadProgress: progress.progress,
+      progressMessage: progress.message,
+      progressStage: progress.stage,
+    );
   }
 
   void _handleProgress(
@@ -383,10 +362,11 @@ class UploadNotifier extends StateNotifier<UploadState> {
     }
 
     final uploadFraction = (sentBytes / totalBytes).clamp(0.0, 1.0);
-    final progress = 0.02 + (uploadFraction * 0.18);
+    final progress = 0.01 + (uploadFraction * 0.07);
     state = state.copyWith(
       uploadProgress: progress,
       progressMessage: uploadFraction < 1 ? 'Uploading images…' : 'Upload complete. Starting analysis…',
+      progressStage: uploadFraction < 1 ? 'uploading' : 'upload_complete',
     );
   }
 
@@ -528,6 +508,7 @@ class UploadState {
   final String? analysisId;
   final String? foodId;
   final String progressMessage;
+  final String progressStage;
 
   const UploadState({
     this.images = const [],
@@ -538,6 +519,7 @@ class UploadState {
     this.analysisId,
     this.foodId,
     this.progressMessage = 'Preparing analysis…',
+    this.progressStage = 'preparing',
   });
 
   UploadState copyWith({
@@ -549,6 +531,7 @@ class UploadState {
     String? analysisId,
     String? foodId,
     String? progressMessage,
+    String? progressStage,
     bool clearResponse = false,
     bool clearError = false,
     bool clearAnalysisId = false,
@@ -572,6 +555,7 @@ class UploadState {
           ? null
           : foodId ?? this.foodId,
       progressMessage: progressMessage ?? this.progressMessage,
+      progressStage: progressStage ?? this.progressStage,
     );
   }
 
