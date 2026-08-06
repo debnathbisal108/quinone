@@ -297,28 +297,28 @@ class ResultScreen extends StatelessWidget {
       _MacroItem(
         label: 'Protein',
         value: result.protein,
-        target: 50,
+        target: result.targetValueFor('protein_g', fallback: 50),
         nutrientKey: 'protein_g',
         icon: Icons.fitness_center_rounded,
       ),
       _MacroItem(
         label: 'Carbohydrates',
         value: result.carbohydrates,
-        target: 275,
+        target: result.targetValueFor('carbohydrate_g', fallback: 275),
         nutrientKey: 'carbohydrate_g',
         icon: Icons.grain_rounded,
       ),
       _MacroItem(
         label: 'Fat',
         value: result.fat,
-        target: 78,
+        target: result.targetValueFor('fat_g', fallback: 78),
         nutrientKey: 'fat_g',
         icon: Icons.water_drop_outlined,
       ),
       _MacroItem(
         label: 'Fiber',
         value: result.fiber,
-        target: 28,
+        target: result.targetValueFor('fiber_g', fallback: 28),
         nutrientKey: 'fiber_g',
         icon: Icons.eco_outlined,
       ),
@@ -573,7 +573,7 @@ class ResultScreen extends StatelessWidget {
                         ),
                         const SizedBox(height: 10),
                         Text(
-                          'Tap a nutrient to see which foods contributed to it. Percentages use general daily values.',
+                          'Tap a nutrient to see which foods contributed to it. Percentages use personalized targets when available, otherwise general daily values.',
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: theme.colorScheme.onSurfaceVariant,
                             height: 1.4,
