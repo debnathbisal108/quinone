@@ -15,6 +15,18 @@ class ApiConfig {
   static const String backLabelEndpoint =
       "/analyze/back-label";
 
+  static const String analyzeStartEndpoint =
+      "/analyze/start";
+
+  static const String backLabelStartEndpoint =
+      "/analyze/back-label/start";
+
+  static String analysisJobEndpoint(String jobId) =>
+      "/analyze/jobs/$jobId";
+
+  static String cancelAnalysisJobEndpoint(String jobId) =>
+      "/analyze/jobs/$jobId/cancel";
+
   /// Health check
   static const String healthEndpoint = "/health";
 
