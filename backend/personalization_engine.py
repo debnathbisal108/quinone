@@ -56,6 +56,42 @@ _ROUND_DP = 2
 
 
 # =========================================================================
+# NUTRITION IMMUTABILITY GUARD
+# =========================================================================
+
+def _nutrition_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Capture fields that personalization is never allowed to change."""
+    meal = payload.get("meal")
+    if not isinstance(meal, dict):
+        return {}
+
+    return copy.deepcopy({
+        "foods": meal.get("foods"),
+        "nutrition": meal.get("nutrition"),
+        "nutrition_totals": meal.get("nutrition_totals"),
+        "total_nutrition": meal.get("total_nutrition"),
+        "nutrition_summary": meal.get("nutrition_summary"),
+        "estimated_visible_food_weight_g": meal.get(
+            "estimated_visible_food_weight_g"
+        ),
+    })
+
+
+def _assert_nutrition_unchanged(
+    before: Dict[str, Any],
+    payload: Dict[str, Any],
+    *,
+    stage: str,
+) -> None:
+    after = _nutrition_snapshot(payload)
+    if before != after:
+        raise RuntimeError(
+            f"{stage} attempted to modify detected foods or nutrition. "
+            "Personalization may only add data under meal.personalization."
+        )
+
+
+# =========================================================================
 # DATA STRUCTURES
 # =========================================================================
 
@@ -857,6 +893,7 @@ def process_meal(meal_json: Dict[str, Any], user_profile: Optional[Dict[str, Any
     if not isinstance(meal_json, dict) or "meal" not in meal_json:
         raise ValueError("Input must be a dict with a top-level 'meal' key")
 
+    nutrition_before = _nutrition_snapshot(meal_json)
     result = copy.deepcopy(meal_json)
     # user_profile = user_profile or {}
     user_profile = normalize_user_profile(
@@ -896,6 +933,11 @@ def process_meal(meal_json: Dict[str, Any], user_profile: Optional[Dict[str, Any
         "summary": summary,
     }
 
+    _assert_nutrition_unchanged(
+        nutrition_before,
+        result,
+        stage="Health-score personalization",
+    )
     return result
 
 
