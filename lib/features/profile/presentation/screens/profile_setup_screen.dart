@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../../core/preferences/app_preferences_repository.dart';
+
 import '../../providers/profile_provider.dart';
 
 class ProfileSetupScreen extends ConsumerStatefulWidget {
@@ -93,8 +95,10 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
     final saved = await ref.read(profileProvider.notifier).saveProfile();
     if (!mounted) return;
     if (saved) {
+      await AppPreferencesRepository.completeOnboarding();
+      if (!mounted) return;
       _message('Personalization profile saved.');
-      context.go('/upload');
+      context.go('/app');
     }
   }
 
@@ -395,7 +399,13 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
                       ),
                     ),
                     TextButton(
-                      onPressed: state.isSaving ? null : () => context.go('/upload'),
+                      onPressed: state.isSaving
+                          ? null
+                          : () async {
+                              await AppPreferencesRepository.completeOnboarding();
+                              if (!context.mounted) return;
+                              context.go('/app');
+                            },
                       child: const Text('Skip for now'),
                     ),
                   ],
