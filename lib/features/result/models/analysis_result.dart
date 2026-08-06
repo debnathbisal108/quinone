@@ -72,6 +72,26 @@ class AnalysisResult {
     return totalWeight == 0 ? 0 : weightedTotal / totalWeight;
   }
 
+  /// Returns the personalized target used by progress indicators. Exact
+  /// resolved values take priority. For a resolved range, the lower bound is
+  /// used as the minimum daily reference. General values are only fallbacks.
+  double targetValueFor(
+    String nutrientKey, {
+    required double fallback,
+  }) {
+    final target = nutrientTargets[nutrientKey];
+    final exact = target?.resolvedValue;
+    if (exact != null && exact > 0) return exact;
+
+    final minimum = target?.rangeLow;
+    if (minimum != null && minimum > 0) return minimum;
+
+    final maximum = target?.rangeHigh;
+    if (maximum != null && maximum > 0) return maximum;
+
+    return fallback;
+  }
+
   /// Returns a deduplicated food-level breakdown for the requested nutrient.
   /// These amounts explain the backend total; they do not replace it.
   List<NutrientContribution> contributionsFor(String key) {
@@ -107,9 +127,13 @@ class AnalysisResult {
     final root = _unwrapResult(json);
     final meal = _asMap(root['meal']) ?? root;
 
-    final foods = _asList(meal['foods'])
+    final rawFoods = _asList(meal['foods'])
         .map((item) => FoodSummary.fromJson(_asMap(item) ?? const {}))
         .toList(growable: false);
+
+    // Keep authoritative meal totals untouched, but group repeated food names
+    // for display and contribution details (for example, Banana ×2).
+    final foods = _groupFoodsForDisplay(rawFoods);
 
     final authoritativeNutrition = _findAuthoritativeNutrition(root, meal);
     final usedAuthoritativeTotals = authoritativeNutrition != null;
@@ -558,6 +582,7 @@ class FoodSummary {
     required this.macronutrients,
     required this.vitamins,
     required this.minerals,
+    this.count = 1,
   });
 
   final String? id;
@@ -568,6 +593,7 @@ class FoodSummary {
   final Map<String, double> macronutrients;
   final Map<String, double> vitamins;
   final Map<String, double> minerals;
+  final int count;
 
   String get identity {
     final normalizedId = id?.trim();
@@ -630,6 +656,30 @@ class FoodSummary {
       minerals: Map.unmodifiable(
         _doubleMap(_asMap(features['minerals'])),
       ),
+      count: 1,
+    );
+  }
+
+  FoodSummary combine(FoodSummary other) {
+    final combinedCount = count + other.count;
+    final baseName = name.replaceFirst(RegExp(r'\s×\d+$'), '');
+
+    return FoodSummary(
+      id: id,
+      name: '$baseName ×$combinedCount',
+      weightGrams: weightGrams + other.weightGrams,
+      calories: calories + other.calories,
+      protein: protein + other.protein,
+      macronutrients: Map.unmodifiable(
+        _sumDoubleMaps(macronutrients, other.macronutrients),
+      ),
+      vitamins: Map.unmodifiable(
+        _sumDoubleMaps(vitamins, other.vitamins),
+      ),
+      minerals: Map.unmodifiable(
+        _sumDoubleMaps(minerals, other.minerals),
+      ),
+      count: combinedCount,
     );
   }
 }
@@ -669,6 +719,42 @@ const _definitions = <String, _NutrientDefinition>{
   'manganese_mg': _NutrientDefinition('Manganese', 2.3, 'mg'),
   'selenium_ug': _NutrientDefinition('Selenium', 55, 'µg'),
 };
+
+
+List<FoodSummary> _groupFoodsForDisplay(List<FoodSummary> foods) {
+  final grouped = <String, FoodSummary>{};
+
+  for (final food in foods) {
+    final normalizedName = food.name
+        .replaceFirst(RegExp(r'\s×\d+$'), '')
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), ' ');
+
+    // The name is intentionally the display grouping key. Meal-level totals
+    // remain authoritative and are never rebuilt from this grouped list when
+    // the backend provides totals.
+    final existing = grouped[normalizedName];
+    grouped[normalizedName] = existing == null ? food : existing.combine(food);
+  }
+
+  return List<FoodSummary>.unmodifiable(grouped.values);
+}
+
+Map<String, double> _sumDoubleMaps(
+  Map<String, double> first,
+  Map<String, double> second,
+) {
+  final result = <String, double>{...first};
+  for (final entry in second.entries) {
+    result.update(
+      entry.key,
+      (value) => value + entry.value,
+      ifAbsent: () => entry.value,
+    );
+  }
+  return result;
+}
 
 
 Map<String, dynamic> _aggregateFoodNutrition(List<FoodSummary> foods) {
