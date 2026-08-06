@@ -6,12 +6,14 @@ import 'core/preferences/app_preferences_repository.dart';
 import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
 import 'core/theme/theme_mode_provider.dart';
+import 'features/history/repositories/analysis_history_repository.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await Hive.initFlutter();
   await AppPreferencesRepository.initialize();
+  await AnalysisHistoryRepository.initialize();
 
   runApp(
     const ProviderScope(
