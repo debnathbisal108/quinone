@@ -4,6 +4,7 @@ import '../../../core/api/dio_client.dart';
 import '../models/upload_request.dart';
 import '../models/upload_response.dart';
 import '../services/upload_service.dart';
+import '../models/analysis_job_progress.dart';
 
 class UploadRepository {
   UploadRepository({
@@ -20,6 +21,7 @@ class UploadRepository {
   Future<UploadResponse> uploadImages({
     required UploadRequest request,
     void Function(int sent, int total)? onSendProgress,
+    void Function(AnalysisJobProgress progress)? onAnalysisProgress,
   }) async {
     _cancelCurrentRequest();
 
@@ -31,6 +33,7 @@ class UploadRepository {
         request: request,
         cancelToken: cancelToken,
         onSendProgress: onSendProgress,
+        onAnalysisProgress: onAnalysisProgress,
       );
     } on DioException catch (error) {
       throw _mapDioException(error);
