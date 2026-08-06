@@ -25,6 +25,42 @@ from nutrient_target_data import (
     validate_target_registry,
 )
 
+# =========================================================================
+# NUTRITION IMMUTABILITY GUARD
+# =========================================================================
+
+def _nutrition_snapshot(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Capture fields that personalization is never allowed to change."""
+    meal = payload.get("meal")
+    if not isinstance(meal, dict):
+        return {}
+
+    return copy.deepcopy({
+        "foods": meal.get("foods"),
+        "nutrition": meal.get("nutrition"),
+        "nutrition_totals": meal.get("nutrition_totals"),
+        "total_nutrition": meal.get("total_nutrition"),
+        "nutrition_summary": meal.get("nutrition_summary"),
+        "estimated_visible_food_weight_g": meal.get(
+            "estimated_visible_food_weight_g"
+        ),
+    })
+
+
+def _assert_nutrition_unchanged(
+    before: Dict[str, Any],
+    payload: Dict[str, Any],
+    *,
+    stage: str,
+) -> None:
+    after = _nutrition_snapshot(payload)
+    if before != after:
+        raise RuntimeError(
+            f"{stage} attempted to modify detected foods or nutrition. "
+            "Personalization may only add data under meal.personalization."
+        )
+
+
 TARGET_ENGINE_VERSION = "2.0.0"
 SUPPORTED_SEXES = {"male", "female"}
 SUPPORTED_ACTIVITY_LEVELS = {"sedentary", "low_active", "active", "very_active"}
@@ -70,6 +106,7 @@ def attach_nutrient_targets(
     if not isinstance(meal_json, dict):
         raise ValueError("Meal JSON must be a dictionary.")
 
+    nutrition_before = _nutrition_snapshot(meal_json)
     result = copy.deepcopy(meal_json)
     meal = result.get("meal")
     if not isinstance(meal, dict):
@@ -90,6 +127,11 @@ def attach_nutrient_targets(
     personalization["nutrient_target_schema_version"] = resolved["schema_version"]
     personalization["nutrient_target_data_version"] = resolved["target_data_version"]
     personalization["profile_applied"] = resolved["profile_applied"]
+    _assert_nutrition_unchanged(
+        nutrition_before,
+        result,
+        stage="Nutrient-target attachment",
+    )
     return result
 
 
