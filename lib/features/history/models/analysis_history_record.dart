@@ -185,7 +185,10 @@ Map<String, double> _extractNumericSection(
   }
 
   merge(source);
-  for (final key in sectionKeys) merge(_asMap(source[key]));
+  // for (final key in sectionKeys) merge(_asMap(source[key]));
+  for (final key in sectionKeys) {
+    merge(_asMap(source[key]));
+  }
   return result;
 }
 
