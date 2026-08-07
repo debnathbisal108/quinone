@@ -290,6 +290,19 @@ class ResultScreen extends StatelessWidget {
     );
   }
 
+  double _resolvedMacroTarget(
+    String nutrientKey,
+    double fallback,
+  ) {
+    final target = result.nutrientTargets[nutrientKey];
+    if (target == null || !target.isResolved) return fallback;
+
+    return target.resolvedValue ??
+        target.baselineValue ??
+        target.rangeLow ??
+        fallback;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -297,28 +310,28 @@ class ResultScreen extends StatelessWidget {
       _MacroItem(
         label: 'Protein',
         value: result.protein,
-        target: result.targetValueFor('protein_g', fallback: 50),
+        target: _resolvedMacroTarget('protein_g', 50),
         nutrientKey: 'protein_g',
         icon: Icons.fitness_center_rounded,
       ),
       _MacroItem(
         label: 'Carbohydrates',
         value: result.carbohydrates,
-        target: result.targetValueFor('carbohydrate_g', fallback: 275),
+        target: _resolvedMacroTarget('carbohydrate_g', 275),
         nutrientKey: 'carbohydrate_g',
         icon: Icons.grain_rounded,
       ),
       _MacroItem(
         label: 'Fat',
         value: result.fat,
-        target: result.targetValueFor('fat_g', fallback: 78),
+        target: _resolvedMacroTarget('fat_g', 78),
         nutrientKey: 'fat_g',
         icon: Icons.water_drop_outlined,
       ),
       _MacroItem(
         label: 'Fiber',
         value: result.fiber,
-        target: result.targetValueFor('fiber_g', fallback: 28),
+        target: _resolvedMacroTarget('fiber_g', 28),
         nutrientKey: 'fiber_g',
         icon: Icons.eco_outlined,
       ),
@@ -372,6 +385,17 @@ class ResultScreen extends StatelessWidget {
                       ],
                       const SizedBox(height: 24),
                       _OverviewCard(result: result),
+                      if (result.foods.isNotEmpty) ...[
+                        const SizedBox(height: 28),
+                        const _SectionTitle('Detected foods'),
+                        const SizedBox(height: 14),
+                        ...result.foods.map(
+                          (food) => Padding(
+                            padding: const EdgeInsets.only(bottom: 10),
+                            child: FoodCard(food: food),
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 28),
                       const _SectionTitle('Macronutrients'),
                       const SizedBox(height: 14),
@@ -573,7 +597,7 @@ class ResultScreen extends StatelessWidget {
                         ),
                         const SizedBox(height: 10),
                         Text(
-                          'Tap a nutrient to see which foods contributed to it. Percentages use personalized targets when available, otherwise general daily values.',
+                          'Tap a nutrient to see which foods contributed to it. Percentages use general daily values.',
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: theme.colorScheme.onSurfaceVariant,
                             height: 1.4,
@@ -605,17 +629,6 @@ class ResultScreen extends StatelessWidget {
                           (flag) => Padding(
                             padding: const EdgeInsets.only(bottom: 10),
                             child: _RiskFlagCard(flag: flag),
-                          ),
-                        ),
-                      ],
-                      if (result.foods.isNotEmpty) ...[
-                        const SizedBox(height: 32),
-                        const _SectionTitle('Detected foods'),
-                        const SizedBox(height: 14),
-                        ...result.foods.map(
-                          (food) => Padding(
-                            padding: const EdgeInsets.only(bottom: 10),
-                            child: FoodCard(food: food),
                           ),
                         ),
                       ],
@@ -810,7 +823,7 @@ class _PersonalizedTargetCard extends StatelessWidget {
                 if (target.targetType != null) ...[
                   const SizedBox(height: 3),
                   Text(
-                    target.targetType!,
+                    _displayTargetType(target.targetType!),
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
@@ -963,6 +976,28 @@ class _HealthContributorSection
   final List<HealthContributor> contributors;
   final bool positive;
 
+  List<HealthContributor> get _uniqueContributors {
+    final unique = <String, HealthContributor>{};
+
+    for (final contributor in contributors) {
+      final key = [
+        contributor.ruleName.trim().toLowerCase(),
+        contributor.feature.trim().toLowerCase(),
+        (contributor.mechanism ?? '').trim().toLowerCase(),
+        positive ? 'positive' : 'negative',
+      ].join('|');
+
+      final existing = unique[key];
+      if (existing == null ||
+          contributor.effectiveWeight.abs() >
+              existing.effectiveWeight.abs()) {
+        unique[key] = contributor;
+      }
+    }
+
+    return unique.values.toList(growable: false);
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -977,7 +1012,7 @@ class _HealthContributorSection
           ),
         ),
         const SizedBox(height: 10),
-        if (contributors.isEmpty)
+        if (_uniqueContributors.isEmpty)
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
@@ -988,7 +1023,7 @@ class _HealthContributorSection
             child: Text(emptyText),
           )
         else
-          ...contributors.map(
+          ..._uniqueContributors.map(
             (contributor) =>
                 _HealthContributorTile(
               contributor: contributor,
@@ -1074,16 +1109,105 @@ class _HealthContributorTile
             ),
           ),
           const SizedBox(width: 10),
-          Text(
-            contributor.effectiveWeight
-                .toStringAsFixed(2),
-            style:
-                theme.textTheme.labelLarge?.copyWith(
-              fontWeight: FontWeight.w800,
+          _ImpactBadge(
+            label: _impactLabel(
+              contributor.effectiveWeight,
+              positive: positive,
             ),
+            positive: positive,
           ),
         ],
       ),
     );
   }
 }
+
+String _displayTargetType(String rawValue) {
+  final normalized = rawValue.trim().toLowerCase();
+
+  const exactLabels = <String, String>{
+    'rda': 'Recommended Dietary Allowance',
+    'ai': 'Adequate Intake',
+    'eer': 'Estimated Energy Requirement',
+    'amdr': 'Acceptable Macronutrient Distribution Range',
+    'clinical_target_range': 'Clinical target range',
+    'clinical_goal_range': 'Clinical goal range',
+    'clinical_goal': 'Clinical goal',
+    'maximum': 'Recommended maximum',
+    'minimum': 'Recommended minimum',
+  };
+
+  final exact = exactLabels[normalized];
+  if (exact != null) return exact;
+
+  return normalized
+      .replaceAll('_', ' ')
+      .split(RegExp(r'\s+'))
+      .where((word) => word.isNotEmpty)
+      .map(
+        (word) =>
+            '${word[0].toUpperCase()}${word.substring(1).toLowerCase()}',
+      )
+      .join(' ');
+}
+
+String _impactLabel(
+  double effectiveWeight, {
+  required bool positive,
+}) {
+  final magnitude = effectiveWeight.abs();
+
+  String strength;
+  if (magnitude >= 0.75) {
+    strength = 'Very strong';
+  } else if (magnitude >= 0.45) {
+    strength = 'Strong';
+  } else if (magnitude >= 0.20) {
+    strength = 'Moderate';
+  } else {
+    strength = 'Small';
+  }
+
+  return '$strength ${positive ? 'benefit' : 'concern'}';
+}
+
+class _ImpactBadge extends StatelessWidget {
+  const _ImpactBadge({
+    required this.label,
+    required this.positive,
+  });
+
+  final String label;
+  final bool positive;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final foreground = positive
+        ? theme.colorScheme.primary
+        : theme.colorScheme.error;
+    final background = foreground.withAlpha(31);
+
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 96),
+      padding: const EdgeInsets.symmetric(
+        horizontal: 9,
+        vertical: 6,
+      ),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        textAlign: TextAlign.center,
+        style: theme.textTheme.labelSmall?.copyWith(
+          color: foreground,
+          fontWeight: FontWeight.w800,
+          height: 1.15,
+        ),
+      ),
+    );
+  }
+}
+
