@@ -28,6 +28,7 @@ class AnalysisResult {
     required this.foods,
     required this.nutrientTargets,
     required this.nutrientRiskFlags,
+    required this.personalizationApplied,
     required this.usedAuthoritativeNutritionTotals,
   });
 
@@ -52,6 +53,25 @@ class AnalysisResult {
   final List<FoodSummary> foods;
   final Map<String, PersonalizedNutrientTarget> nutrientTargets;
   final List<NutrientRiskFlag> nutrientRiskFlags;
+  final bool personalizationApplied;
+
+  /// A display-only de-duplicated food list. It never changes authoritative
+  /// meal totals. Enrichment pipelines can carry both the visible portion and
+  /// a database reference row for the same food; the best portion row wins.
+  List<FoodSummary> get displayFoods {
+    final bestByName = <String, FoodSummary>{};
+
+    for (final food in foods) {
+      final key = _normalizedDisplayFoodName(food.name);
+      final existing = bestByName[key];
+      if (existing == null ||
+          _foodDisplayQuality(food) > _foodDisplayQuality(existing)) {
+        bestByName[key] = food;
+      }
+    }
+
+    return List.unmodifiable(bestByName.values);
+  }
 
   /// False only for legacy responses that contain no meal-level totals and
   /// therefore require a deduplicated food-level fallback.
@@ -81,7 +101,7 @@ class AnalysisResult {
       final amount = food.nutrients[key] ?? 0;
       if (amount <= 0) continue;
 
-      final identity = food.identity;
+      final identity = _normalizedDisplayFoodName(food.name);
       final existing = totalsByFood[identity];
       if (existing == null) {
         totalsByFood[identity] = NutrientContribution(
@@ -273,6 +293,7 @@ class AnalysisResult {
       foods: List.unmodifiable(foods),
       nutrientTargets: Map.unmodifiable(nutrientTargets),
       nutrientRiskFlags: List.unmodifiable(nutrientRiskFlags),
+      personalizationApplied: personalization?['profile_applied'] == true,
       usedAuthoritativeNutritionTotals: usedAuthoritativeTotals,
     );
   }
@@ -634,6 +655,51 @@ class FoodSummary {
   }
 }
 
+double _foodDisplayQuality(FoodSummary food) {
+  // A row with an actual portion weight is much more likely to be the visible
+  // food than a USDA/reference row containing only per-100-g nutrition.
+  if (food.weightGrams > 0) {
+    return 1000000 + food.weightGrams * 100 + food.calories;
+  }
+  return food.calories * 10 + food.protein;
+}
+
+String _normalizedDisplayFoodName(String value) {
+  var normalized = value
+      .trim()
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9\s]'), ' ')
+      .replaceAll(RegExp(r'\s+'), ' ');
+
+  const removableWords = <String>{
+    'slice',
+    'slices',
+    'sliced',
+    'piece',
+    'pieces',
+    'chopped',
+    'diced',
+    'slivered',
+  };
+
+  final tokens = normalized
+      .split(' ')
+      .where((token) => token.isNotEmpty && !removableWords.contains(token))
+      .toList();
+  normalized = tokens.join(' ');
+
+  // Keep this conservative: only normalize the plural forms that commonly
+  // appear as duplicate vision/database labels.
+  const aliases = <String, String>{
+    'bananas': 'banana',
+    'blueberry': 'blueberries',
+    'chia seed': 'chia seeds',
+    'rolled oat': 'rolled oats',
+    'almond': 'almonds',
+  };
+  return aliases[normalized] ?? normalized;
+}
+
 class _NutrientDefinition {
   const _NutrientDefinition(this.label, this.dailyValue, this.unit);
 
@@ -675,13 +741,11 @@ Map<String, dynamic> _aggregateFoodNutrition(List<FoodSummary> foods) {
   final uniqueFoods = <String, FoodSummary>{};
 
   for (final food in foods) {
-    final existing = uniqueFoods[food.identity];
+    final key = _normalizedDisplayFoodName(food.name);
+    final existing = uniqueFoods[key];
     if (existing == null ||
-        food.macronutrients.length + food.vitamins.length + food.minerals.length >
-            existing.macronutrients.length +
-                existing.vitamins.length +
-                existing.minerals.length) {
-      uniqueFoods[food.identity] = food;
+        _foodDisplayQuality(food) > _foodDisplayQuality(existing)) {
+      uniqueFoods[key] = food;
     }
   }
 
