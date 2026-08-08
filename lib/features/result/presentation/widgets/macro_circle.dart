@@ -19,23 +19,24 @@ class MacroCircle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final percentage = target <= 0 ? 0.0 : value / target;
-    final isOverTarget = percentage > 1;
-    final progressColor = isOverTarget
+    final ratio = target <= 0 ? 0.0 : value / target;
+    final percent = ratio * 100;
+    final over = ratio > 1;
+    final color = over
         ? theme.colorScheme.error
         : theme.colorScheme.primary;
 
     return Material(
       color: theme.colorScheme.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(20),
+      borderRadius: BorderRadius.circular(22),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(22),
         child: Container(
-          constraints: const BoxConstraints(minHeight: 205),
-          padding: const EdgeInsets.fromLTRB(12, 16, 12, 14),
+          constraints: const BoxConstraints(minHeight: 220),
+          padding: const EdgeInsets.fromLTRB(14, 18, 14, 16),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(20),
+            borderRadius: BorderRadius.circular(22),
             border: Border.all(
               color: theme.colorScheme.outlineVariant,
             ),
@@ -44,65 +45,36 @@ class MacroCircle extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               SizedBox.square(
-                dimension: 96,
+                dimension: 92,
                 child: Stack(
                   alignment: Alignment.center,
                   children: [
                     CircularProgressIndicator(
                       value: 1,
-                      strokeWidth: 8,
-                      color: theme
-                          .colorScheme
-                          .surfaceContainerHighest,
+                      strokeWidth: 9,
+                      color: theme.colorScheme.surfaceContainerHighest,
                     ),
                     CircularProgressIndicator(
-                      value: percentage.clamp(0, 1),
-                      strokeWidth: 8,
+                      value: ratio.clamp(0.0, 1.0).toDouble(),
+                      strokeWidth: 9,
                       strokeCap: StrokeCap.round,
-                      color: progressColor,
+                      color: color,
                     ),
-                    if (isOverTarget)
-                      SizedBox.square(
-                        dimension: 76,
-                        child: CircularProgressIndicator(
-                          value: (percentage - 1).clamp(0, 1),
-                          strokeWidth: 4,
-                          strokeCap: StrokeCap.round,
-                          color: theme.colorScheme.tertiary,
-                        ),
-                      ),
                     Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
                           icon,
                           size: 17,
-                          color: theme.colorScheme.onSurfaceVariant,
+                          color: color,
                         ),
                         const SizedBox(height: 3),
-                        FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.baseline,
-                            textBaseline: TextBaseline.alphabetic,
-                            children: [
-                              Text(
-                                _formatNumber(value),
-                                style: theme.textTheme.titleLarge?.copyWith(
-                                  fontWeight: FontWeight.w900,
-                                  height: 1,
-                                ),
-                              ),
-                              const SizedBox(width: 2),
-                              Text(
-                                'g',
-                                style: theme.textTheme.labelMedium?.copyWith(
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ],
+                        Text(
+                          '${percent.round()}%',
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w900,
+                            color: color,
+                            height: 1,
                           ),
                         ),
                       ],
@@ -110,35 +82,37 @@ class MacroCircle extends StatelessWidget {
                   ],
                 ),
               ),
-              const SizedBox(height: 9),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 4,
-                ),
-                decoration: BoxDecoration(
-                  color: progressColor.withAlpha(31),
-                  borderRadius: BorderRadius.circular(999),
-                ),
+              const SizedBox(height: 13),
+              FittedBox(
+                fit: BoxFit.scaleDown,
                 child: Text(
-                  '${(percentage * 100).round()}% of target',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: progressColor,
-                    fontWeight: FontWeight.w800,
+                  '${_formatNumber(value)} g',
+                  style: theme.textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.w900,
+                    height: 1,
                   ),
                 ),
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 5),
+              Text(
+                target > 0
+                    ? 'Target ${_formatNumber(target)} g'
+                    : 'No target available',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
               Text(
                 label,
                 textAlign: TextAlign.center,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.labelLarge?.copyWith(
+                style: theme.textTheme.titleSmall?.copyWith(
                   fontWeight: FontWeight.w800,
-                  height: 1.15,
                 ),
               ),
             ],
