@@ -1,244 +1,159 @@
 import 'package:flutter/material.dart';
-import '../../models/analysis_result.dart';
 
-// import 'package:flutter/material.dart';
-// import 'package:quinone/features/result/models/analysis_result.dart';
+import '../../models/analysis_result.dart';
 
 class MicronutrientBar extends StatelessWidget {
   const MicronutrientBar({
     super.key,
     required this.nutrient,
     required this.onTap,
+    this.targetOverride,
   });
 
   final Micronutrient nutrient;
   final VoidCallback onTap;
+  final double? targetOverride;
+
+  double get _target {
+    final override = targetOverride;
+    if (override != null && override > 0) return override;
+    return nutrient.dailyValue;
+  }
+
+  double get _percent =>
+      _target <= 0 ? 0 : nutrient.amount / _target * 100;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final percentage = nutrient.percentDailyValue;
-    final isOverDailyValue = percentage > 100;
-    final progress = (percentage / 100).clamp(0.0, 1.0);
+    final percent = _percent;
+    final over = percent > 100;
+    final valueColor = over
+        ? theme.colorScheme.error
+        : theme.colorScheme.primary;
 
     return Material(
       color: theme.colorScheme.surfaceContainerLow,
-      borderRadius: BorderRadius.circular(16),
+      borderRadius: BorderRadius.circular(18),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(18),
         child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.fromLTRB(14, 13, 10, 13),
+          padding: const EdgeInsets.fromLTRB(16, 15, 16, 15),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: theme.colorScheme.outlineVariant),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: theme.colorScheme.outlineVariant,
+            ),
           ),
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final compact = constraints.maxWidth < 320;
-
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
                 children: [
-                  if (compact)
-                    _CompactHeader(
-                      nutrient: nutrient,
-                      isOverDailyValue: isOverDailyValue,
-                    )
-                  else
-                    _WideHeader(
-                      nutrient: nutrient,
-                      isOverDailyValue: isOverDailyValue,
-                    ),
-                  const SizedBox(height: 11),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(99),
-                    child: SizedBox(
-                      height: 9,
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          ColoredBox(
-                            color: theme.colorScheme.surfaceContainerHighest,
-                          ),
-                          Align(
-                            alignment: Alignment.centerLeft,
-                            child: FractionallySizedBox(
-                              widthFactor: progress,
-                              child: ColoredBox(
-                                color: isOverDailyValue
-                                    ? theme.colorScheme.error
-                                    : theme.colorScheme.primary,
-                              ),
-                            ),
-                          ),
-                          if (isOverDailyValue)
-                            Align(
-                              alignment: Alignment.centerRight,
-                              child: FractionallySizedBox(
-                                widthFactor: 0.08,
-                                child: ColoredBox(
-                                  color: theme.colorScheme.tertiary,
-                                ),
-                              ),
-                            ),
-                        ],
+                  Expanded(
+                    child: Text(
+                      nutrient.label,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
                       ),
                     ),
                   ),
+                  Icon(
+                    Icons.chevron_right_rounded,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
                 ],
-              );
-            },
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '${_number(nutrient.amount)} ${nutrient.unit}',
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '${percent.round()}%',
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      color: valueColor,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              _MicronutrientProgress(
+                percent: percent,
+                safeColor: theme.colorScheme.primary,
+                excessColor: theme.colorScheme.error,
+                trackColor: theme.colorScheme.surfaceContainerHighest,
+              ),
+            ],
           ),
         ),
       ),
     );
   }
-}
 
-class _WideHeader extends StatelessWidget {
-  const _WideHeader({
-    required this.nutrient,
-    required this.isOverDailyValue,
-  });
-
-  final Micronutrient nutrient;
-  final bool isOverDailyValue;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        Expanded(
-          child: Text(
-            nutrient.label,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.titleSmall?.copyWith(
-              fontWeight: FontWeight.w700,
-              height: 1.2,
-            ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        ConstrainedBox(
-          constraints: const BoxConstraints(minWidth: 78),
-          child: Text(
-            _formatAmount(nutrient),
-            maxLines: 1,
-            overflow: TextOverflow.fade,
-            softWrap: false,
-            textAlign: TextAlign.right,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        SizedBox(
-          width: 48,
-          child: Text(
-            '${nutrient.percentDailyValue.round()}%',
-            maxLines: 1,
-            textAlign: TextAlign.right,
-            style: theme.textTheme.labelLarge?.copyWith(
-              color: isOverDailyValue
-                  ? theme.colorScheme.error
-                  : theme.colorScheme.primary,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-        ),
-        const SizedBox(width: 2),
-        Icon(
-          Icons.chevron_right_rounded,
-          size: 22,
-          color: theme.colorScheme.onSurfaceVariant,
-        ),
-      ],
-    );
+  static String _number(double value) {
+    if (value >= 100) return value.toStringAsFixed(0);
+    if (value >= 10) return value.toStringAsFixed(1);
+    return value.toStringAsFixed(2);
   }
 }
 
-class _CompactHeader extends StatelessWidget {
-  const _CompactHeader({
-    required this.nutrient,
-    required this.isOverDailyValue,
+class _MicronutrientProgress extends StatelessWidget {
+  const _MicronutrientProgress({
+    required this.percent,
+    required this.safeColor,
+    required this.excessColor,
+    required this.trackColor,
   });
 
-  final Micronutrient nutrient;
-  final bool isOverDailyValue;
+  final double percent;
+  final Color safeColor;
+  final Color excessColor;
+  final Color trackColor;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final clamped = percent < 0 ? 0.0 : percent;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                nutrient.label,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.titleSmall?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  height: 1.2,
-                ),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(999),
+      child: SizedBox(
+        height: 9,
+        child: clamped <= 100
+            ? Stack(
+                fit: StackFit.expand,
+                children: [
+                  ColoredBox(color: trackColor),
+                  FractionallySizedBox(
+                    alignment: Alignment.centerLeft,
+                    widthFactor: (clamped / 100).clamp(0.0, 1.0).toDouble(),
+                    child: ColoredBox(color: safeColor),
+                  ),
+                ],
+              )
+            : Row(
+                children: [
+                  // For values over 100%, the green part always represents
+                  // exactly the first 100%. Only the red excess grows.
+                  Expanded(
+                    flex: 100,
+                    child: ColoredBox(color: safeColor),
+                  ),
+                  Expanded(
+                    flex: (clamped - 100).round().clamp(1, 900).toInt(),
+                    child: ColoredBox(color: excessColor),
+                  ),
+                ],
               ),
-            ),
-            const SizedBox(width: 8),
-            Icon(
-              Icons.chevron_right_rounded,
-              size: 22,
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ],
-        ),
-        const SizedBox(height: 6),
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                _formatAmount(nutrient),
-                maxLines: 1,
-                overflow: TextOverflow.fade,
-                softWrap: false,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Text(
-              '${nutrient.percentDailyValue.round()}%',
-              style: theme.textTheme.labelLarge?.copyWith(
-                color: isOverDailyValue
-                    ? theme.colorScheme.error
-                    : theme.colorScheme.primary,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ],
-        ),
-      ],
+      ),
     );
   }
-}
-
-String _formatAmount(Micronutrient nutrient) {
-  final amount = nutrient.amount;
-  final formatted = amount >= 100
-      ? amount.round().toString()
-      : amount >= 10
-          ? amount.toStringAsFixed(1)
-          : amount.toStringAsFixed(2);
-  final unit = nutrient.unit.trim();
-  return unit.isEmpty ? formatted : '$formatted $unit';
 }
