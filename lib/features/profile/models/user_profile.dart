@@ -2,6 +2,7 @@ import 'dart:convert';
 
 class UserProfile {
   const UserProfile({
+    this.displayName,
     this.age,
     this.ageMonths,
     this.ageUnit = 'years',
@@ -30,6 +31,7 @@ class UserProfile {
     this.allergies = const <String>{},
   });
 
+  final String? displayName;
   final int? age;
   final int? ageMonths;
   final String ageUnit;
@@ -63,31 +65,37 @@ class UserProfile {
       chronicConditions.contains('chronic_kidney_disease') ||
       (ckdStage != null && ckdStage != 'none');
 
+  bool get hasPersonalizationData =>
+      !(age == null &&
+          ageMonths == null &&
+          sex == null &&
+          heightCm == null &&
+          weightKg == null &&
+          activityLevel == null &&
+          goal == null &&
+          dietType == null &&
+          dietPattern == null &&
+          smokingStatus == null &&
+          bloodPressureStatus == null &&
+          glycemicStatus == null &&
+          !pregnant &&
+          !lactating &&
+          !frailty &&
+          !lowAppetite &&
+          !resistanceTraining &&
+          !enduranceTraining &&
+          chronicConditions.isEmpty &&
+          medications.isEmpty &&
+          allergies.isEmpty);
+
   bool get isEmpty =>
-      age == null &&
-      ageMonths == null &&
-      sex == null &&
-      heightCm == null &&
-      weightKg == null &&
-      activityLevel == null &&
-      goal == null &&
-      dietType == null &&
-      dietPattern == null &&
-      smokingStatus == null &&
-      bloodPressureStatus == null &&
-      glycemicStatus == null &&
-      !pregnant &&
-      !lactating &&
-      !frailty &&
-      !lowAppetite &&
-      !resistanceTraining &&
-      !enduranceTraining &&
-      chronicConditions.isEmpty &&
-      medications.isEmpty &&
-      allergies.isEmpty;
+      (displayName == null || displayName!.trim().isEmpty) &&
+      !hasPersonalizationData;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
         ...toBackendJson(),
+        if (displayName != null && displayName!.trim().isNotEmpty)
+          'display_name': displayName!.trim(),
         'age_unit': ageUnit,
         'pregnant': pregnant,
         'lactating': lactating,
@@ -155,6 +163,7 @@ class UserProfile {
 
   factory UserProfile.fromJson(Map<String, dynamic> json) {
     return UserProfile(
+      displayName: _text(json['display_name'] ?? json['name']),
       age: _int(json['age']),
       ageMonths: _int(json['age_months']),
       ageUnit: json['age_unit']?.toString() ??
@@ -186,6 +195,7 @@ class UserProfile {
   }
 
   UserProfile copyWith({
+    Object? displayName = _unset,
     Object? age = _unset,
     Object? ageMonths = _unset,
     String? ageUnit,
@@ -214,6 +224,9 @@ class UserProfile {
     Set<String>? allergies,
   }) {
     return UserProfile(
+      displayName: identical(displayName, _unset)
+          ? this.displayName
+          : displayName as String?,
       age: identical(age, _unset) ? this.age : age as int?,
       ageMonths: identical(ageMonths, _unset) ? this.ageMonths : ageMonths as int?,
       ageUnit: ageUnit ?? this.ageUnit,
@@ -289,3 +302,4 @@ class UserProfile {
     return output;
   }
 }
+
