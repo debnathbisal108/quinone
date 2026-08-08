@@ -17,6 +17,7 @@ class ProfileSetupScreen extends ConsumerStatefulWidget {
 
 class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
   final _formKey = GlobalKey<FormState>();
+  final _name = TextEditingController();
   final _age = TextEditingController();
   final _height = TextEditingController();
   final _weight = TextEditingController();
@@ -25,6 +26,7 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
 
   @override
   void dispose() {
+    _name.dispose();
     _age.dispose();
     _height.dispose();
     _weight.dispose();
@@ -35,6 +37,7 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
   void _initialize(ProfileState state) {
     if (_initialized || state.isLoading) return;
     final profile = state.profile;
+    _name.text = profile.displayName ?? '';
     _age.text = profile.ageUnit == 'months'
         ? profile.ageMonths?.toString() ?? ''
         : profile.age?.toString() ?? '';
@@ -53,6 +56,14 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
 
   int? _int(String value) => int.tryParse(value.trim());
   double? _double(String value) => double.tryParse(value.trim());
+
+  String? _validateName(String? value) {
+    final name = value?.trim() ?? '';
+    if (name.isEmpty) return 'Enter your name.';
+    if (name.length < 2) return 'Enter at least 2 characters.';
+    if (name.length > 40) return 'Keep your name under 40 characters.';
+    return null;
+  }
 
   String? _validateAge(String? value, String unit) {
     final parsed = int.tryParse(value?.trim() ?? '');
@@ -140,7 +151,7 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'Everything is optional. Selected details personalize health scores and daily nutrient targets.',
+                      'Your name is required for the app experience. All health and lifestyle details below are optional and only personalize scores and nutrient targets.',
                       style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                             color: Theme.of(context).colorScheme.onSurfaceVariant,
                             height: 1.4,
@@ -151,6 +162,19 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
                       title: 'Personal details',
                       icon: Icons.person_outline_rounded,
                       children: [
+                        TextFormField(
+                          controller: _name,
+                          textCapitalization: TextCapitalization.words,
+                          textInputAction: TextInputAction.next,
+                          decoration: const InputDecoration(
+                            labelText: 'Your name',
+                            hintText: 'What should Quinone call you?',
+                            prefixIcon: Icon(Icons.badge_outlined),
+                          ),
+                          validator: _validateName,
+                          onChanged: notifier.setDisplayName,
+                        ),
+                        const SizedBox(height: 16),
                         SegmentedButton<String>(
                           segments: const [
                             ButtonSegment(value: 'years', label: Text('Years')),
@@ -402,11 +426,19 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
                       onPressed: state.isSaving
                           ? null
                           : () async {
+                              FocusScope.of(context).unfocus();
+                              if (!(_formKey.currentState?.validate() ?? false)) {
+                                return;
+                              }
+                              final saved = await ref
+                                  .read(profileProvider.notifier)
+                                  .saveProfile();
+                              if (!context.mounted || !saved) return;
                               await AppPreferencesRepository.completeOnboarding();
                               if (!context.mounted) return;
                               context.go('/app');
                             },
-                      child: const Text('Skip for now'),
+                      child: const Text('Continue without personalization'),
                     ),
                   ],
                 ),
