@@ -24,7 +24,6 @@ class ProfileState {
   bool get hasProfile => !profile.isEmpty;
 
   Map<String, dynamic>? get backendPayload {
-    if (profile.isEmpty) return null;
     final payload = profile.toBackendJson();
     return payload.isEmpty ? null : payload;
   }
@@ -68,11 +67,7 @@ class ProfileNotifier extends StateNotifier<ProfileState> {
   Future<bool> saveProfile() async {
     state = state.copyWith(isSaving: true, clearError: true);
     try {
-      if (state.profile.isEmpty) {
-        await ProfileRepository.clearProfile();
-      } else {
-        await ProfileRepository.saveProfile(state.profile);
-      }
+      await ProfileRepository.saveProfile(state.profile);
       state = state.copyWith(isSaving: false, clearError: true);
       return true;
     } catch (_) {
@@ -90,6 +85,8 @@ class ProfileNotifier extends StateNotifier<ProfileState> {
   }
 
   void clearError() => state = state.copyWith(clearError: true);
+  void setDisplayName(String? value) =>
+      update(state.profile.copyWith(displayName: value));
   void update(UserProfile profile) =>
       state = state.copyWith(profile: profile, clearError: true);
 
@@ -186,11 +183,11 @@ class ProfileNotifier extends StateNotifier<ProfileState> {
     update(state.profile.copyWith(allergies: values));
   }
 
-  // Compatibility aliases used by the existing onboarding profile screen.
+
+  // Compatibility aliases used by older profile/onboarding screens.
   void setHeightCm(double? value) => setHeight(value);
   void setWeightKg(double? value) => setWeight(value);
-  void setLactationStageMonths(double? value) =>
-      setLactationMonths(value);
+  void setLactationStageMonths(double? value) => setLactationMonths(value);
   void setActivityLevel(String? value) => setActivity(value);
   void setDietType(String? value) => setDiet(value);
   void setSmokingStatus(String? value) => setSmoking(value);
