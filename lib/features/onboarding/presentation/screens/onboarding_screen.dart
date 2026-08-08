@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../../core/preferences/app_preferences_repository.dart';
+import '../../../profile/models/user_profile.dart';
+import '../../../profile/repositories/profile_repository.dart';
 
 class OnboardingScreen extends StatefulWidget {
   const OnboardingScreen({super.key});
@@ -12,14 +14,16 @@ class OnboardingScreen extends StatefulWidget {
 
 class _OnboardingScreenState extends State<OnboardingScreen> {
   final PageController _pageController = PageController();
+  final TextEditingController _nameController = TextEditingController();
   int _currentPage = 0;
+  String? _nameError;
 
   static const List<_OnboardingPageData> _pages = [
     _OnboardingPageData(
-      icon: Icons.camera_alt_outlined,
-      title: 'Understand every meal',
+      icon: Icons.person_outline_rounded,
+      title: 'Welcome to Quinone',
       description:
-          'Upload one or more food images and let Quinone identify foods, estimate portions, and analyse the complete meal.',
+          'First, tell us what to call you. This name stays on your device and is not used for nutrition calculations.',
     ),
     _OnboardingPageData(
       icon: Icons.analytics_outlined,
@@ -38,26 +42,42 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   bool get _isLastPage => _currentPage == _pages.length - 1;
 
   Future<void> _finish({required bool openProfile}) async {
+    if (!await _saveNameIfNeeded()) return;
     await AppPreferencesRepository.completeOnboarding();
     if (!mounted) return;
     context.go(openProfile ? '/profile' : '/app');
   }
 
-  void _nextPage() {
+  Future<void> _nextPage() async {
+    if (_currentPage == 0 && !await _saveNameIfNeeded()) return;
+
     if (_isLastPage) {
-      _finish(openProfile: false);
+      await _finish(openProfile: false);
       return;
     }
 
-    _pageController.nextPage(
+    await _pageController.nextPage(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeOutCubic,
     );
   }
 
+  Future<bool> _saveNameIfNeeded() async {
+    final name = _nameController.text.trim();
+    if (name.length < 2) {
+      setState(() => _nameError = 'Enter at least 2 characters.');
+      return false;
+    }
+    final existing = await ProfileRepository.getProfile() ?? const UserProfile();
+    await ProfileRepository.saveProfile(existing.copyWith(displayName: name));
+    if (mounted) setState(() => _nameError = null);
+    return true;
+  }
+
   @override
   void dispose() {
     _pageController.dispose();
+    _nameController.dispose();
     super.dispose();
   }
 
@@ -74,10 +94,12 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               alignment: Alignment.centerRight,
               child: Padding(
                 padding: const EdgeInsets.only(top: 8, right: 12),
-                child: TextButton(
-                  onPressed: () => _finish(openProfile: false),
-                  child: const Text('Skip'),
-                ),
+                child: _currentPage == 0
+                    ? const SizedBox(height: 48)
+                    : TextButton(
+                        onPressed: () => _finish(openProfile: false),
+                        child: const Text('Skip'),
+                      ),
               ),
             ),
             Expanded(
@@ -122,6 +144,27 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                             height: 1.45,
                           ),
                         ),
+                        if (index == 0) ...[
+                          const SizedBox(height: 26),
+                          TextField(
+                            controller: _nameController,
+                            autofocus: true,
+                            textCapitalization: TextCapitalization.words,
+                            textInputAction: TextInputAction.done,
+                            decoration: InputDecoration(
+                              labelText: 'Your name',
+                              hintText: 'What should Quinone call you?',
+                              errorText: _nameError,
+                              prefixIcon: const Icon(Icons.badge_outlined),
+                            ),
+                            onChanged: (_) {
+                              if (_nameError != null) {
+                                setState(() => _nameError = null);
+                              }
+                            },
+                            onSubmitted: (_) => _nextPage(),
+                          ),
+                        ],
                       ],
                     ),
                   );
