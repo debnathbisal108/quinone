@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import '../../result/models/analysis_result.dart';
+
 class AnalysisHistoryRecord {
   const AnalysisHistoryRecord({
     required this.analysisId,
@@ -25,78 +27,102 @@ class AnalysisHistoryRecord {
   final List<String> detectedFoods;
   final Map<String, dynamic> rawResult;
 
+  double get protein => _firstNumber(
+        macronutrients,
+        const ['protein_g', 'protein'],
+      );
+
+  double get carbohydrates => _firstNumber(
+        macronutrients,
+        const [
+          'carbohydrate_g',
+          'carbohydrates_g',
+          'carbs_g',
+          'carbs',
+        ],
+      );
+
+  double get fat => _firstNumber(
+        macronutrients,
+        const ['fat_g', 'total_fat_g', 'fat'],
+      );
+
+  double get fiber => _firstNumber(
+        macronutrients,
+        const ['fiber_g', 'fibre_g', 'dietary_fiber_g'],
+      );
+
   factory AnalysisHistoryRecord.fromAnalysisJson(
     Map<String, dynamic> json, {
     DateTime? createdAt,
+    String? analysisId,
   }) {
-    final root = _unwrap(json);
-    final meal = _asMap(root['meal']) ?? root;
-    final nutrition = _findNutrition(root, meal);
-    final macros = _extractNumericSection(
-      nutrition,
-      const ['macronutrients', 'macros', 'totals', 'total'],
-    );
+    // IMPORTANT: use the exact same parser as ResultScreen. This prevents
+    // History/Insights from showing zero while the opened report is correct.
+    final parsed = AnalysisResult.fromJson(json);
 
-    final personalization =
-        _asMap(meal['personalization']) ?? _asMap(root['personalization']);
-    final targetMap = _asMap(personalization?['nutrient_targets']);
-    final targets = <String, double>{};
-    for (final entry in (targetMap ?? const <String, dynamic>{}).entries) {
-      final target = _asMap(entry.value);
-      final value = _numberOrNull(
-        target?['resolved_value'] ??
-            target?['value'] ??
-            target?['range_low'] ??
-            target?['baseline_value'],
-      );
-      if (value != null && value > 0) targets[entry.key] = value;
-    }
-
-    final scoreSource =
-        _asMap(personalization?['personalized_domain_scores']) ??
-            _asMap(meal['health_domain_scores']) ??
-            _asMap(root['health_domain_scores']) ??
-            _asMap(root['health_scores']) ??
-            const <String, dynamic>{};
-    final scores = <String, double>{};
-    for (final entry in scoreSource.entries) {
-      final map = _asMap(entry.value);
-      final score = _numberOrNull(map?['score'] ?? entry.value);
-      if (score != null) scores[entry.key] = score;
-    }
-
-    final micros = <String, double>{
-      ..._extractNumericSection(nutrition, const ['vitamins']),
-      ..._extractNumericSection(nutrition, const ['minerals']),
+    final macros = <String, double>{
+      'energy_kcal': parsed.calories,
+      'protein_g': parsed.protein,
+      'carbohydrate_g': parsed.carbohydrates,
+      'fat_g': parsed.fat,
+      'fiber_g': parsed.fiber,
+      if (parsed.saturatedFat != null)
+        'saturated_fat_g': parsed.saturatedFat!,
+      if (parsed.monounsaturatedFat != null)
+        'monounsaturated_fat_g': parsed.monounsaturatedFat!,
+      if (parsed.polyunsaturatedFat != null)
+        'polyunsaturated_fat_g': parsed.polyunsaturatedFat!,
+      if (parsed.transFat != null) 'trans_fat_g': parsed.transFat!,
+      if (parsed.omega3 != null) 'omega_3_g': parsed.omega3!,
+      if (parsed.omega6 != null) 'omega_6_g': parsed.omega6!,
+      if (parsed.cholesterol != null)
+        'cholesterol_mg': parsed.cholesterol!,
+      if (parsed.sugars != null) 'sugars_g': parsed.sugars!,
+      if (parsed.addedSugars != null)
+        'added_sugars_g': parsed.addedSugars!,
     };
 
-    final foods = <String>[];
-    for (final item in _asList(meal['foods'])) {
-      final food = _asMap(item);
-      final name = _firstText(food ?? const {}, const [
-        'display_name',
-        'name',
-        'canonical_name',
-      ]);
-      if (name != null && !foods.contains(name)) foods.add(name);
+    final micros = <String, double>{
+      for (final nutrient in parsed.micronutrients)
+        nutrient.key: nutrient.amount,
+    };
+
+    final scores = <String, double>{
+      for (final score in parsed.healthScores) score.key: score.score,
+    };
+
+    final targets = <String, double>{};
+    if (parsed.personalizationApplied) {
+      for (final entry in parsed.nutrientTargets.entries) {
+        final target = entry.value;
+        final value = target.resolvedValue ??
+            target.baselineValue ??
+            target.rangeLow;
+        if (value != null && value > 0) {
+          targets[entry.key] = value;
+        }
+      }
     }
 
-    final id = _firstText(json, const ['analysis_id']) ??
-        _firstText(root, const ['analysis_id']) ??
+    final foods = <String>[];
+    final seen = <String>{};
+    for (final food in parsed.displayFoods) {
+      final key = food.name.trim().toLowerCase();
+      if (key.isEmpty || !seen.add(key)) continue;
+      foods.add(food.name);
+    }
+
+    final id = analysisId ??
+        _firstText(json, const ['analysis_id']) ??
+        _firstText(_unwrap(json), const ['analysis_id']) ??
         'local_${DateTime.now().microsecondsSinceEpoch}';
 
     return AnalysisHistoryRecord(
       analysisId: id,
       createdAt: createdAt ?? DateTime.now(),
-      mealName: _firstText(
-            meal,
-            const ['meal_name', 'name', 'title', 'meal_type'],
-          ) ??
-          'Meal analysis',
-      calories: _firstNumber(
-        macros,
-        const ['energy_kcal', 'calories', 'calories_kcal'],
-      ),
+      mealName: parsed.mealName,
+      calories: parsed.calories,
       macronutrients: Map.unmodifiable(macros),
       micronutrients: Map.unmodifiable(micros),
       healthScores: Map.unmodifiable(scores),
@@ -123,9 +149,33 @@ class AnalysisHistoryRecord {
     Map<String, dynamic> raw = const {};
     final encoded = json['raw_result_json'];
     if (encoded is String && encoded.isNotEmpty) {
-      final decoded = jsonDecode(encoded);
-      if (decoded is Map) raw = Map<String, dynamic>.from(decoded);
+      try {
+        final decoded = jsonDecode(encoded);
+        if (decoded is Map) {
+          raw = Map<String, dynamic>.from(decoded);
+        }
+      } catch (_) {
+        raw = const {};
+      }
     }
+
+    // Migrate old locally saved records that were written with the broken
+    // History parser. The complete raw response was preserved, so we can
+    // reconstruct the correct calories/macros without deleting history.
+    if (raw.isNotEmpty) {
+      try {
+        return AnalysisHistoryRecord.fromAnalysisJson(
+          raw,
+          createdAt: DateTime.tryParse(
+            json['created_at']?.toString() ?? '',
+          ),
+          analysisId: json['analysis_id']?.toString(),
+        );
+      } catch (_) {
+        // Fall through to the stored fields if one legacy raw row is damaged.
+      }
+    }
+
     return AnalysisHistoryRecord(
       analysisId: json['analysis_id']?.toString() ?? '',
       createdAt: DateTime.tryParse(json['created_at']?.toString() ?? '') ??
@@ -152,46 +202,6 @@ Map<String, dynamic> _unwrap(Map<String, dynamic> json) {
   return json;
 }
 
-Map<String, dynamic> _findNutrition(
-  Map<String, dynamic> root,
-  Map<String, dynamic> meal,
-) {
-  for (final value in [
-    meal['nutrition'],
-    meal['nutrition_totals'],
-    meal['total_nutrition'],
-    meal['nutrition_summary'],
-    root['nutrition'],
-    root['nutrition_totals'],
-    root['total_nutrition'],
-    root['nutrition_summary'],
-  ]) {
-    final map = _asMap(value);
-    if (map != null && map.isNotEmpty) return map;
-  }
-  return const {};
-}
-
-Map<String, double> _extractNumericSection(
-  Map<String, dynamic> source,
-  List<String> sectionKeys,
-) {
-  final result = <String, double>{};
-  void merge(Map<String, dynamic>? map) {
-    for (final entry in (map ?? const <String, dynamic>{}).entries) {
-      final value = _numberOrNull(entry.value);
-      if (value != null) result[entry.key] = value;
-    }
-  }
-
-  merge(source);
-  // for (final key in sectionKeys) merge(_asMap(source[key]));
-  for (final key in sectionKeys) {
-    merge(_asMap(source[key]));
-  }
-  return result;
-}
-
 Map<String, double> _doubleMap(Map<String, dynamic>? source) {
   final result = <String, double>{};
   for (final entry in (source ?? const <String, dynamic>{}).entries) {
@@ -211,7 +221,9 @@ List<dynamic> _asList(dynamic value) => value is List ? value : const [];
 
 double? _numberOrNull(dynamic value) {
   if (value == null || value is bool) return null;
-  final parsed = value is num ? value.toDouble() : double.tryParse(value.toString());
+  final parsed = value is num
+      ? value.toDouble()
+      : double.tryParse(value.toString());
   return parsed?.isFinite == true ? parsed : null;
 }
 
