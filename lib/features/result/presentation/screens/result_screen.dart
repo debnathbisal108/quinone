@@ -294,6 +294,7 @@ class ResultScreen extends StatelessWidget {
     String nutrientKey,
     double fallback,
   ) {
+    if (!result.personalizationApplied) return fallback;
     final target = result.nutrientTargets[nutrientKey];
     if (target == null || !target.isResolved) return fallback;
 
@@ -301,6 +302,15 @@ class ResultScreen extends StatelessWidget {
         target.baselineValue ??
         target.rangeLow ??
         fallback;
+  }
+
+  double? _personalizedTargetValue(String nutrientKey) {
+    if (!result.personalizationApplied) return null;
+    final target = result.nutrientTargets[nutrientKey];
+    if (target == null || !target.isResolved) return null;
+    return target.resolvedValue ??
+        target.baselineValue ??
+        target.rangeLow;
   }
 
   @override
@@ -385,11 +395,11 @@ class ResultScreen extends StatelessWidget {
                       ],
                       const SizedBox(height: 24),
                       _OverviewCard(result: result),
-                      if (result.foods.isNotEmpty) ...[
+                      if (result.displayFoods.isNotEmpty) ...[
                         const SizedBox(height: 28),
                         const _SectionTitle('Detected foods'),
                         const SizedBox(height: 14),
-                        ...result.foods.map(
+                        ...result.displayFoods.map(
                           (food) => Padding(
                             padding: const EdgeInsets.only(bottom: 10),
                             child: FoodCard(food: food),
@@ -556,25 +566,22 @@ class ResultScreen extends StatelessWidget {
                         const SizedBox(height: 32),
                         const _SectionTitle('Micronutrients'),
                         const SizedBox(height: 14),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 14,
-                            vertical: 8,
-                          ),
-                          decoration: BoxDecoration(
-                            color: theme.colorScheme.surfaceContainerLow,
-                            borderRadius: BorderRadius.circular(22),
-                            border: Border.all(
-                              color: theme.colorScheme.outlineVariant,
-                            ),
-                          ),
-                          child: Column(
-                            children: [
-                              for (var index = 0;
-                                  index < result.micronutrients.length;
-                                  index++) ...[
-                                MicronutrientBar(
+                        Column(
+                          children: [
+                            for (var index = 0;
+                                index < result.micronutrients.length;
+                                index++)
+                              Padding(
+                                padding: EdgeInsets.only(
+                                  bottom: index < result.micronutrients.length - 1
+                                      ? 10
+                                      : 0,
+                                ),
+                                child: MicronutrientBar(
                                   nutrient: result.micronutrients[index],
+                                  targetOverride: _personalizedTargetValue(
+                                    result.micronutrients[index].key,
+                                  ),
                                   onTap: () {
                                     final nutrient = result.micronutrients[index];
                                     _showNutrientDetails(
@@ -586,25 +593,22 @@ class ResultScreen extends StatelessWidget {
                                     );
                                   },
                                 ),
-                                if (index < result.micronutrients.length - 1)
-                                  Divider(
-                                    height: 1,
-                                    color: theme.colorScheme.outlineVariant,
-                                  ),
-                              ],
-                            ],
-                          ),
+                              ),
+                          ],
                         ),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 12),
                         Text(
-                          'Tap a nutrient to see which foods contributed to it. Percentages use general daily values.',
+                          result.personalizationApplied
+                              ? 'Tap a nutrient to see food contributors. Percentages use your personalized daily target when available.'
+                              : 'Tap a nutrient to see food contributors. Percentages use general daily reference values.',
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: theme.colorScheme.onSurfaceVariant,
                             height: 1.4,
                           ),
                         ),
                       ],
-                      if (result.nutrientTargets.isNotEmpty) ...[
+                      if (result.personalizationApplied &&
+                          result.nutrientTargets.isNotEmpty) ...[
                         const SizedBox(height: 32),
                         const _SectionTitle('Personalized daily targets'),
                         const SizedBox(height: 14),
@@ -621,7 +625,8 @@ class ResultScreen extends StatelessWidget {
                               ),
                             ),
                       ],
-                      if (result.nutrientRiskFlags.isNotEmpty) ...[
+                      if (result.personalizationApplied &&
+                          result.nutrientRiskFlags.isNotEmpty) ...[
                         const SizedBox(height: 22),
                         const _SectionTitle('Personalization notes'),
                         const SizedBox(height: 12),
