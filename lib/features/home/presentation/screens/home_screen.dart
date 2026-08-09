@@ -73,7 +73,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             sliver: SliverList(
               delegate: SliverChildListDelegate(
                 [
-                  _AnalyzeCard(onTap: () => context.push('/upload')),
+                  _AnalyzeCard(
+                    onPhotoTap: () => context.push('/upload'),
+                    onRecipeTap: () => context.push('/recipe'),
+                  ),
                   const SizedBox(height: 30),
                   Text(
                     "Today's Summary",
@@ -235,71 +238,78 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 }
 
 class _AnalyzeCard extends StatelessWidget {
-  const _AnalyzeCard({required this.onTap});
-  final VoidCallback onTap;
+  const _AnalyzeCard({
+    required this.onPhotoTap,
+    required this.onRecipeTap,
+  });
+
+  final VoidCallback onPhotoTap;
+  final VoidCallback onRecipeTap;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Hero(
-      tag: 'analyze_food',
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(28),
-          onTap: onTap,
-          child: Ink(
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(28),
+        gradient: LinearGradient(
+          colors: [Colors.teal.shade700, Colors.green.shade500],
+        ),
+      ),
+      padding: const EdgeInsets.all(26),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(28),
-              gradient: LinearGradient(
-                colors: [Colors.teal.shade700, Colors.green.shade500],
-              ),
+              color: Colors.white24,
+              borderRadius: BorderRadius.circular(18),
             ),
-            child: Padding(
-              padding: const EdgeInsets.all(26),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      color: Colors.white24,
-                      borderRadius: BorderRadius.circular(18),
-                    ),
-                    child: const Icon(
-                      Icons.restaurant_rounded,
-                      color: Colors.white,
-                      size: 34,
-                    ),
-                  ),
-                  const SizedBox(height: 26),
-                  Text(
-                    'Analyze Food',
-                    style: theme.textTheme.headlineMedium?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  const Text(
-                    'Capture your meal or upload multiple food images for complete nutritional analysis.',
-                    style: TextStyle(color: Colors.white70, fontSize: 15),
-                  ),
-                  const SizedBox(height: 26),
-                  FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: Colors.white,
-                      foregroundColor: Colors.teal.shade700,
-                    ),
-                    onPressed: onTap,
-                    icon: const Icon(Icons.camera_alt_rounded),
-                    label: const Text('Start'),
-                  ),
-                ],
-              ),
+            child: const Icon(Icons.restaurant_rounded, color: Colors.white, size: 34),
+          ),
+          const SizedBox(height: 24),
+          Text(
+            'Analyze Food',
+            style: theme.textTheme.headlineMedium?.copyWith(
+              color: Colors.white,
+              fontWeight: FontWeight.w900,
             ),
           ),
-        ),
+          const SizedBox(height: 9),
+          const Text(
+            'Use a photo for speed, or build the exact recipe when ingredients are hidden.',
+            style: TextStyle(color: Colors.white70, fontSize: 15, height: 1.4),
+          ),
+          const SizedBox(height: 22),
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    foregroundColor: Colors.teal.shade800,
+                  ),
+                  onPressed: onPhotoTap,
+                  icon: const Icon(Icons.camera_alt_rounded),
+                  label: const Text('Photo'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    side: const BorderSide(color: Colors.white70),
+                  ),
+                  onPressed: onRecipeTap,
+                  icon: const Icon(Icons.soup_kitchen_outlined),
+                  label: const Text('Add recipe'),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
