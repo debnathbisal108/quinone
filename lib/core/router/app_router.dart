@@ -5,6 +5,7 @@ import '../preferences/app_preferences_repository.dart';
 import '../../features/navigation/presentation/screens/bottom_navigation_screen.dart';
 import '../../features/onboarding/presentation/screens/onboarding_screen.dart';
 import '../../features/profile/presentation/screens/profile_setup_screen.dart';
+import '../../features/recipe/presentation/screens/recipe_builder_screen.dart';
 import '../../features/result/models/analysis_result.dart';
 import '../../features/result/presentation/screens/result_screen.dart';
 import '../../features/upload/presentation/screens/upload_screen.dart';
@@ -27,6 +28,10 @@ class AppRouter {
       GoRoute(
         path: '/upload',
         builder: (context, state) => const UploadScreen(),
+      ),
+      GoRoute(
+        path: '/recipe',
+        builder: (context, state) => const RecipeBuilderScreen(),
       ),
       GoRoute(
         path: '/profile',
