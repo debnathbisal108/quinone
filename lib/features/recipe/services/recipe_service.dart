@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
@@ -86,10 +87,20 @@ class RecipeService {
     void Function(AnalysisJobProgress progress)? onProgress,
   }) async {
     try {
+      final payload = recipe.toBackendJson(profile: profile);
+
+      // Explicit JSON serialization prevents a shared Dio interceptor or
+      // default content type from turning this request into form data.
       final start = await _dio.post<dynamic>(
         _absoluteUrl(ApiConfig.recipeAnalyzeStartEndpoint),
-        data: recipe.toBackendJson(profile: profile),
-        options: Options(responseType: ResponseType.json),
+        data: jsonEncode(payload),
+        options: Options(
+          responseType: ResponseType.json,
+          contentType: Headers.jsonContentType,
+          headers: const {
+            'Accept': 'application/json',
+          },
+        ),
       );
 
       final startMap = _asMap(start.data);
