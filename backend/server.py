@@ -11,6 +11,8 @@ from pathlib import Path
 from threading import Lock, RLock
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -23,6 +25,7 @@ from feature_engineering import compute_features
 from health_domain_scoring import attach_domain_scores
 from food_resolver import resolve_meal
 from nutrient_profile import attach_nutrients
+from usda_recipe_service import search_usda_foods
 
 from personalization_engine import (
     attach_personalization,
@@ -91,6 +94,67 @@ def health() -> dict[str, str]:
         "status": "healthy",
     }
 
+
+
+class ManualRecipeIngredientRequest(BaseModel):
+    fdc_id: int
+    name: str
+    description: str
+    data_type: str | None = None
+    food_category: str | None = None
+    grams: float = Field(gt=0, le=100000)
+
+
+class ManualRecipeRequest(BaseModel):
+    recipe_name: str = "Manual recipe"
+    ingredients: list[ManualRecipeIngredientRequest]
+    servings_made: float = Field(default=1.0, gt=0, le=10000)
+    servings_eaten: float = Field(default=1.0, gt=0, le=10000)
+    profile: dict[str, Any] | None = None
+
+
+@app.get("/recipes/usda/search")
+async def recipe_usda_search(q: str) -> dict[str, Any]:
+    query = q.strip()
+    if len(query) < 2:
+        return {"query": query, "foods": []}
+    try:
+        foods = await search_usda_foods(query, limit=8)
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"USDA food search is temporarily unavailable: {error}",
+        ) from error
+    return {"query": query, "foods": foods}
+
+
+@app.post("/recipes/analyze/start")
+async def start_manual_recipe_job(request: ManualRecipeRequest) -> dict[str, Any]:
+    if not request.ingredients:
+        raise HTTPException(status_code=400, detail="Add at least one recipe ingredient.")
+    if request.servings_eaten > request.servings_made:
+        raise HTTPException(
+            status_code=400,
+            detail="Servings eaten cannot be greater than servings made.",
+        )
+
+    _cleanup_expired_jobs()
+    job_id = str(uuid.uuid4())
+    _set_job(
+        job_id,
+        status="queued",
+        stage="recipe_ready",
+        message="Recipe ingredients received. Nutrition analysis is starting…",
+        progress=0.10,
+    )
+    asyncio.create_task(_process_manual_recipe_job(job_id=job_id, request=request))
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "stage": "recipe_ready",
+        "message": "Recipe ingredients received. Nutrition analysis is starting…",
+        "progress": 0.10,
+    }
 
 
 # =========================================================================
@@ -454,6 +518,104 @@ async def _process_initial_job(
         )
     finally:
         shutil.rmtree(job_directory, ignore_errors=True)
+
+
+async def _process_manual_recipe_job(
+    *,
+    job_id: str,
+    request: ManualRecipeRequest,
+) -> None:
+    try:
+        _set_job(
+            job_id,
+            status="running",
+            stage="recipe_normalization",
+            message="Preparing your selected ingredients and portion…",
+            progress=0.18,
+        )
+        _raise_if_cancelled(job_id)
+        portion_fraction = request.servings_eaten / request.servings_made
+        foods: list[dict[str, Any]] = []
+        total_weight = 0.0
+
+        for index, ingredient in enumerate(request.ingredients, start=1):
+            grams = float(ingredient.grams) * portion_fraction
+            total_weight += grams
+            foods.append(
+                {
+                    "id": f"manual_{index:04d}",
+                    "name": ingredient.name.strip() or ingredient.description,
+                    "display_name": ingredient.name.strip() or ingredient.description,
+                    "canonical_name": ingredient.description,
+                    "category": ingredient.food_category or "Unknown",
+                    "food_source": "manual_recipe",
+                    "analysis_route": "DIRECT_USDA",
+                    "quantity": grams,
+                    "unit": "g",
+                    "estimated_weight_g": grams,
+                    "resolver": {
+                        "status": "resolved",
+                        "fdc_id": ingredient.fdc_id,
+                        "matched_description": ingredient.description,
+                        "data_type": ingredient.data_type,
+                        "confidence": 1.0,
+                        "source": "user_selected_usda",
+                    },
+                    "ingredients": [],
+                    "spices": [],
+                }
+            )
+
+        prepared = {
+            "status": "completed",
+            "input_method": "manual_recipe",
+            "meal": {
+                "meal_type": request.recipe_name.strip() or "Manual recipe",
+                "meal_name": request.recipe_name.strip() or "Manual recipe",
+                "estimated_visible_food_weight_g": round(total_weight, 3),
+                "recipe_servings_made": request.servings_made,
+                "recipe_servings_eaten": request.servings_eaten,
+                "foods": foods,
+            },
+        }
+
+        final_result = await run_manual_recipe_pipeline(
+            prepared,
+            profile=request.profile,
+            progress_callback=lambda stage, message, progress: _set_job(
+                job_id,
+                status="running",
+                stage=stage,
+                message=message,
+                progress=progress,
+            ),
+            cancellation_check=lambda: _raise_if_cancelled(job_id),
+        )
+        final_result["analysis_id"] = job_id
+        _set_job(
+            job_id,
+            status="completed",
+            stage="completed",
+            message="Your recipe report is ready.",
+            progress=1.0,
+            result=final_result,
+        )
+    except asyncio.CancelledError:
+        _set_job(
+            job_id,
+            status="cancelled",
+            stage="cancelled",
+            message="Recipe analysis cancelled.",
+            progress=0.0,
+        )
+    except Exception as error:
+        _set_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            message="The recipe analysis could not be completed.",
+            error=str(error),
+        )
 
 
 async def _process_back_label_job(
@@ -839,6 +1001,40 @@ async def run_nutrica_pipeline(
     )
 
     return final_result
+
+
+async def run_manual_recipe_pipeline(
+    prepared_result: dict[str, Any],
+    profile: dict[str, Any] | None = None,
+    progress_callback: Any | None = None,
+    cancellation_check: Any | None = None,
+) -> dict[str, Any]:
+    """Run the normal pipeline after USDA resolution has already been chosen by the user."""
+
+    def report(stage: str, message: str, progress: float) -> None:
+        if cancellation_check is not None:
+            cancellation_check()
+        if progress_callback is not None:
+            progress_callback(stage, message, progress)
+
+    report("nutrient_calculation", "Loading USDA nutrients for your ingredients…", 0.38)
+    nutrient_result = await attach_nutrients(prepared_result)
+
+    report("feature_engineering", "Measuring nutrient density and meal-quality features…", 0.58)
+    feature_result = await compute_features(nutrient_result)
+
+    report("evidence_mapping", "Linking recipe features to nutrition evidence…", 0.70)
+    evidence_result = await attach_evidence(feature_result)
+
+    report("health_scoring", "Calculating health-domain scores…", 0.82)
+    scored_result = await attach_domain_scores(evidence_result)
+
+    normalized_profile = normalize_user_profile(profile)
+    report("personalization", "Applying your health and lifestyle profile…", 0.92)
+    personalized_result = await attach_personalization(scored_result, normalized_profile)
+
+    report("nutrient_targets", "Resolving your personalized daily nutrient targets…", 0.98)
+    return attach_nutrient_targets(personalized_result, normalized_profile)
 
 
 def normalize_personalization_profile(
