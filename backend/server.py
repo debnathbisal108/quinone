@@ -114,6 +114,7 @@ class ManualRecipeRequest(BaseModel):
 
 
 @app.get("/recipes/usda/search")
+@app.get("/api/v1/recipes/usda/search", include_in_schema=False)
 async def recipe_usda_search(q: str) -> dict[str, Any]:
     query = q.strip()
     if len(query) < 2:
@@ -129,6 +130,7 @@ async def recipe_usda_search(q: str) -> dict[str, Any]:
 
 
 @app.post("/recipes/analyze/start")
+@app.post("/api/v1/recipes/analyze/start", include_in_schema=False)
 async def start_manual_recipe_job(request: ManualRecipeRequest) -> dict[str, Any]:
     if not request.ingredients:
         raise HTTPException(status_code=400, detail="Add at least one recipe ingredient.")
@@ -381,6 +383,7 @@ async def start_back_label_job(
 
 
 @app.get("/analyze/jobs/{job_id}")
+@app.get("/api/v1/analyze/jobs/{job_id}", include_in_schema=False)
 async def get_analysis_job(job_id: str) -> dict[str, Any]:
     job = _job_snapshot(job_id)
     if job is None:
@@ -404,6 +407,7 @@ async def get_analysis_job(job_id: str) -> dict[str, Any]:
 
 
 @app.post("/analyze/jobs/{job_id}/cancel")
+@app.post("/api/v1/analyze/jobs/{job_id}/cancel", include_in_schema=False)
 async def cancel_analysis_job(job_id: str) -> dict[str, Any]:
     with _jobs_lock:
         job = _analysis_jobs.get(job_id)
