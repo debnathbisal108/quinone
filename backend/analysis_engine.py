@@ -28,7 +28,7 @@ client = genai.Client(
 )
 
 # =============================================================================
-# MAIN VISION PROMPT
+# MAIN VISION PROMPT (unchanged)
 # =============================================================================
 prompt = """
 You are Nutrica's Food Vision Engine.
@@ -86,61 +86,34 @@ Rice and Lentils are two foods.
 
 Rice and Chicken Curry are two foods.
 
-A mixed dish should contain ONLY the mixed dish.
+CRITICAL MIXED-DISH RULE
 
-Do NOT include separately detected foods inside another food name.
+Do NOT return a prepared mixed-dish parent as a top-level food when its
+core components can be identified or reasonably inferred. The nutrition
+engine operates on the core foods, not on a duplicate parent dish.
 
-Correct
+For a bowl of oatmeal porridge with oats, milk, banana, blueberries, chia
+seeds and almonds, return the core foods only:
 
-Lentils
+Rolled Oats
+Milk
+Banana
+Blueberries
+Chia Seeds
+Almonds
 
-Rice
+Do NOT additionally return:
+Oatmeal Porridge
 
-Incorrect
+For lentil curry, return the core components such as the identified lentil
+variant, onion, tomato, cooking oil and other substantial ingredients.
+Do NOT additionally return Dal, Daal, Dhal, Lentil Curry or Dal Tadka as
+a second parent food.
 
-Lentils with Rice
+For chicken curry, return Chicken, Onion, Tomato, cooking fat/oil and other
+substantial core foods. Do NOT additionally return Chicken Curry.
 
-Correct
-
-Chicken Curry
-
-Rice
-
-Incorrect
-
-Chicken Curry with Rice
-
-==========================
-PHYSICAL-MASS DEDUPLICATION
-==========================
-
-A single physical mass of food must NEVER appear twice at different semantic levels.
-If a mixed dish is returned as a top-level food, ingredients physically inside that
-same mixed dish must NOT also be returned as separate top-level foods. They belong
-only in the mixed dish's ingredients/spices arrays.
-
-Example — one bowl of oatmeal porridge made from rolled oats:
-Correct: Oatmeal Porridge
-Incorrect: Oatmeal Porridge + Rolled Oats, when the oats are the grain already
-forming that same porridge.
-
-Before returning JSON, compare every top-level food against every DECOMPOSE food's
-ingredients and spices. If they describe the same physical edible mass in the same
-dish/container, keep the parent mixed dish and remove the duplicate top-level
-component.
-
-==========================
-USER-FACING FOOD NAMES
-==========================
-
-The top-level "name" field is displayed directly to users. Use globally
-understandable English food names, not regional-language names or transliterations.
-Cuisine may still be Indian, Thai, etc.
-
-Use "Lentil Curry", not "Dal", "Daal", or "Dhal".
-Use "Tempered Lentil Curry", not "Dal Tadka".
-Use "Vegetable Curry", not "Sabzi" when no more specific English name is known.
-Regional terms may appear inside possible_usda_queries only when useful for matching.
+Every gram of edible mass must belong to exactly one returned core food.
 
 ==========================
 FOOD ID
@@ -220,13 +193,11 @@ Do not use "piece" for rice, curries, vegetables, pasta, noodles, salads, or mix
 
 When using "piece", quantity must represent the number of visible pieces.
 
-For individual whole chilies (fresh or dried), ALWAYS use "piece" rather than grams.
-Do not convert one or a few visible chilies into a large gram weight. A gram quantity
-is appropriate only for a clearly visible bulk pile/container of chilies.
-
-For spices, seasonings, garnishes, drizzles, and toppings, use conservative trace
-quantities. Never confuse USDA's per-100-g nutrient reference basis with the amount
-actually visible in the image.
+For whole dried or fresh chilies, use piece when the individual chilies are
+visible. Never assign a large gram quantity to one or a few visible chilies.
+A garnish or spice must never be assigned a mass comparable to the main dish.
+If its mass cannot be estimated reliably, prefer piece or omit it rather than
+inventing a large gram value.
 
 Allowed units:
 
@@ -536,18 +507,13 @@ Naan
 
 DECOMPOSE
 
-Use for Homemade or Restaurant foods whose nutrition should be estimated from their ingredients.
+LEGACY / FALLBACK ONLY. Prefer returning the core ingredients directly as
+separate top-level DIRECT_USDA foods. Use DECOMPOSE only when the dish cannot
+be broken into meaningful core foods with reasonable confidence.
 
-Examples
-
-Chicken Curry
-Dal
-Aloo Sabzi
-Biryani
-Pasta
-Vegetable Stir Fry
-Pizza
-Burger
+If DECOMPOSE is used as a fallback, its parent object is an internal analysis
+container and must not be presented as an additional edible food alongside
+its ingredients.
 
 --------------------------
 
@@ -972,6 +938,15 @@ CANONICAL INGREDIENT NAMES
 Every ingredient and spice must be returned using internationally
 recognized English food names.
 
+Top-level food names must follow the same rule. Never use local, regional,
+or language-specific names for the user-facing name.
+
+Examples:
+Dal / Daal / Dhal -> Lentils or the specific lentil variant
+Toor dal -> Yellow split pigeon peas
+Moong dal -> Split mung beans
+Masoor dal -> Red lentils
+
 Never use local, regional, or language-specific names.
 
 Examples
@@ -1343,12 +1318,12 @@ Examples
 
 Correct
 
-name: Lentil Curry
+name: Dal (Lentil Curry)
 container: serving_bowl
 
 Correct
 
-name: Lentil Curry
+name: Dal (Lentil Curry)
 container: plate
 
 Incorrect
@@ -2828,334 +2803,175 @@ def namespace_food_ids(
 
 #     return result
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return default
-    return number if math.isfinite(number) else default
+def _normalize_core_food_name(value: Any) -> str:
+    name = str(value or "").strip()
+    if not name:
+        return "Detected food"
 
-
-def _source_image_index(food: dict[str, Any]) -> int | None:
-    raw_id = str(food.get("id") or "")
-    if not raw_id.startswith("image_"):
-        return None
-    try:
-        return int(raw_id.split("_", 2)[1])
-    except (IndexError, ValueError):
-        return None
-
-
-def _normalize_semantic_food_name(value: Any) -> str:
-    text = str(value or "").strip().lower().replace("&", " and ")
-    for token in ("sliced", "slice", "slices", "chopped", "diced", "slivered"):
-        text = text.replace(token, " ")
-    text = " ".join(
-        "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in text).split()
-    )
+    lowered = " ".join(name.lower().split())
     aliases = {
-        "dal": "lentil curry",
-        "daal": "lentil curry",
-        "dhal": "lentil curry",
-        "dal tadka": "tempered lentil curry",
-        "daal tadka": "tempered lentil curry",
-        "dhal tadka": "tempered lentil curry",
-        "rolled oat": "rolled oats",
-        "oat": "oats",
-        "banana slices": "banana",
-        "banana slice": "banana",
-        "blueberry": "blueberries",
-        "chia seed": "chia seeds",
-        "almond sliver": "almonds",
-        "almond slivers": "almonds",
+        "dal": "Lentils",
+        "daal": "Lentils",
+        "dhal": "Lentils",
+        "dal tadka": "Lentils",
+        "lentil curry": "Lentils",
+        "toor dal": "Yellow split pigeon peas",
+        "tuvar dal": "Yellow split pigeon peas",
+        "arhar dal": "Yellow split pigeon peas",
+        "moong dal": "Split mung beans",
+        "mung dal": "Split mung beans",
+        "masoor dal": "Red lentils",
+        "urad dal": "Black gram",
     }
-    return aliases.get(text, text)
+    return aliases.get(lowered, name)
 
 
-def _canonicalize_display_name(food: dict[str, Any]) -> None:
-    raw = str(food.get("name") or "").strip()
-    normalized = _normalize_semantic_food_name(raw)
-    exact = {
-        "lentil curry": "Lentil Curry",
-        "tempered lentil curry": "Tempered Lentil Curry",
+def _category_from_ingredient(value: Any) -> str:
+    mapping = {
+        "protein": "Meat",
+        "legume": "Legume",
+        "vegetable": "Vegetable",
+        "fruit": "Fruit",
+        "grain": "Grain",
+        "oil": "Condiment",
+        "dairy": "Dairy",
+        "spice": "Condiment",
+        "nut": "Nut",
+        "seed": "Seed",
+        "sweetener": "Condiment",
+        "flavoring": "Condiment",
+        "additive": "Condiment",
     }
-    if normalized in exact:
-        if raw and raw != exact[normalized]:
-            food.setdefault("vision_original_name", raw)
-        food["name"] = exact[normalized]
-        food.setdefault("canonical_name", exact[normalized])
-        return
-
-    raw_lower = raw.lower()
-    if any(term in raw_lower for term in ("dal", "daal", "dhal")):
-        replacement = (
-            "Tempered Lentil Curry"
-            if "tadka" in raw_lower or "tempered" in raw_lower
-            else "Lentil Curry"
-        )
-        food.setdefault("vision_original_name", raw)
-        food["name"] = replacement
-        food.setdefault("canonical_name", replacement)
-    elif "sabzi" in raw_lower:
-        food.setdefault("vision_original_name", raw)
-        food["name"] = raw_lower.replace("sabzi", "vegetable curry").strip().title()
+    return mapping.get(str(value or "").strip().lower(), "Unknown")
 
 
-def _food_confidence_quality(food: dict[str, Any]) -> float:
-    return (
-        0.55 * _safe_float(food.get("detection_confidence"), 0.5)
-        + 0.35 * _safe_float(food.get("quantity_confidence"), 0.5)
-        + 0.10 * _safe_float(food.get("preparation_confidence"), 0.5)
-    )
-
-
-def _same_container(a: dict[str, Any], b: dict[str, Any]) -> bool:
-    ca = str(a.get("container") or "unknown").strip().lower()
-    cb = str(b.get("container") or "unknown").strip().lower()
-    return ca == cb or "unknown" in {ca, cb}
-
-
-def _ingredient_semantic_names(food: dict[str, Any]) -> set[str]:
-    names: set[str] = set()
-    for section in ("ingredients", "spices"):
-        for item in food.get(section, []) or []:
-            if not isinstance(item, dict):
-                continue
-            for field in ("name", "canonical_name", "usda_food_description"):
-                value = item.get(field)
-                if value:
-                    names.add(_normalize_semantic_food_name(value))
-    return {name for name in names if name}
-
-
-def _is_parent_component_duplicate(
-    parent: dict[str, Any],
-    component: dict[str, Any],
-) -> bool:
-    if parent is component or parent.get("analysis_route") != "DECOMPOSE":
-        return False
-    if component.get("analysis_route") == "NUTRITION_LABEL":
-        return False
-    if component.get("belongs_to_food_id") is not None:
-        return False
-    if component.get("served_separately") is True:
-        return False
-    if not _same_container(parent, component):
-        return False
-
-    ingredient_names = _ingredient_semantic_names(parent)
-    component_names = {
-        _normalize_semantic_food_name(component.get("name")),
-        _normalize_semantic_food_name(component.get("canonical_name")),
-        _normalize_semantic_food_name(component.get("usda_food_description")),
-    }
-    component_names.discard("")
-
-    for candidate in component_names:
-        for ingredient in ingredient_names:
-            if candidate == ingredient:
-                return True
-            if len(candidate) >= 4 and len(ingredient) >= 4:
-                if similarity(candidate, ingredient) >= 0.88:
-                    return True
-
-    parent_name = _normalize_semantic_food_name(parent.get("name"))
-    if (
-        ("oatmeal" in parent_name or "oat porridge" in parent_name)
-        and any("oat" in name for name in component_names)
-    ):
-        return True
-    return False
-
-
-def _remove_attached_food_from_parent_recipe(
-    foods: list[dict[str, Any]],
-) -> None:
-    """
-    If Gemini returns a visible topping/garnish as its own top-level food, remove
-    the same ingredient/spice from the parent DECOMPOSE recipe so its mass and
-    nutrients are not counted twice.
-    """
-    by_id = {str(food.get("id") or ""): food for food in foods}
-    for child in foods:
-        parent_id = child.get("belongs_to_food_id")
-        if not isinstance(parent_id, str):
-            continue
-        parent = by_id.get(parent_id)
-        if not parent or parent.get("analysis_route") != "DECOMPOSE":
-            continue
-
-        child_names = {
-            _normalize_semantic_food_name(child.get("name")),
-            _normalize_semantic_food_name(child.get("canonical_name")),
-            _normalize_semantic_food_name(child.get("usda_food_description")),
-        }
-        child_names.discard("")
-
-        for section in ("ingredients", "spices"):
-            retained = []
-            for item in parent.get(section, []) or []:
-                if not isinstance(item, dict):
-                    retained.append(item)
-                    continue
-                item_names = {
-                    _normalize_semantic_food_name(item.get("name")),
-                    _normalize_semantic_food_name(item.get("canonical_name")),
-                    _normalize_semantic_food_name(item.get("usda_food_description")),
-                }
-                item_names.discard("")
-                duplicate = any(
-                    a == b or (len(a) >= 4 and len(b) >= 4 and similarity(a, b) >= 0.90)
-                    for a in child_names
-                    for b in item_names
-                )
-                if not duplicate:
-                    retained.append(item)
-            parent[section] = retained
-
-
-def _reconcile_parent_components(
-    foods: list[dict[str, Any]],
+def _promote_decomposed_food(
+    food: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    remove_ids: set[str] = set()
-    replacement_parent: dict[str, str] = {}
-    parents = [food for food in foods if food.get("analysis_route") == "DECOMPOSE"]
+    """
+    Convert a DECOMPOSE analysis container into the actual core food
+    entities used by the nutrition pipeline. The parent itself is not an
+    edible row and therefore never survives into meal.foods.
+    """
+    parent_id = str(food.get("id") or "")
+    parent_name = str(food.get("name") or "Mixed dish")
+    parent_quantity_confidence = float(food.get("quantity_confidence", 0) or 0)
+    parent_detection_confidence = float(food.get("detection_confidence", 0) or 0)
 
-    for parent in parents:
-        parent_id = str(parent.get("id") or "")
-        parent_image = _source_image_index(parent)
-        for component in foods:
-            component_id = str(component.get("id") or "")
-            if not component_id or component_id == parent_id:
-                continue
-            component_image = _source_image_index(component)
-            if (
-                parent_image is not None
-                and component_image is not None
-                and parent_image != component_image
-                and not _same_container(parent, component)
-            ):
-                continue
-            if _is_parent_component_duplicate(parent, component):
-                remove_ids.add(component_id)
-                replacement_parent[component_id] = parent_id
+    promoted: list[dict[str, Any]] = []
 
-    for food in foods:
-        belongs = food.get("belongs_to_food_id")
-        if isinstance(belongs, str) and belongs in replacement_parent:
-            food["belongs_to_food_id"] = replacement_parent[belongs]
-
-    return [food for food in foods if str(food.get("id") or "") not in remove_ids]
-
-
-def _same_cross_image_food(a: dict[str, Any], b: dict[str, Any]) -> bool:
-    ia = _source_image_index(a)
-    ib = _source_image_index(b)
-    if ia is None or ib is None or ia == ib:
-        return False
-    if a.get("belongs_to_food_id") is not None or b.get("belongs_to_food_id") is not None:
-        return False
-    if not _same_container(a, b):
-        return False
-
-    na = _normalize_semantic_food_name(a.get("name"))
-    nb = _normalize_semantic_food_name(b.get("name"))
-    if not na or not nb or (na != nb and similarity(na, nb) < 0.92):
-        return False
-
-    qa = _safe_float(a.get("quantity"))
-    qb = _safe_float(b.get("quantity"))
-    if str(a.get("unit") or "") != str(b.get("unit") or ""):
-        return False
-    if qa > 0 and qb > 0 and max(qa, qb) / max(min(qa, qb), 1e-9) > 1.8:
-        return False
-    return True
-
-
-def _reconcile_cross_image_duplicates(
-    foods: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    survivors: list[dict[str, Any]] = []
-    removed_to_survivor: dict[str, str] = {}
-
-    for food in foods:
-        duplicate_index = next(
-            (i for i, existing in enumerate(survivors) if _same_cross_image_food(existing, food)),
-            None,
-        )
-        if duplicate_index is None:
-            survivors.append(food)
+    for index, ingredient in enumerate(food.get("ingredients") or [], start=1):
+        if not isinstance(ingredient, dict):
             continue
-
-        existing = survivors[duplicate_index]
-        if _food_confidence_quality(food) > _food_confidence_quality(existing):
-            removed_to_survivor[str(existing.get("id") or "")] = str(food.get("id") or "")
-            survivors[duplicate_index] = food
-        else:
-            removed_to_survivor[str(food.get("id") or "")] = str(existing.get("id") or "")
-
-    for food in survivors:
-        belongs = food.get("belongs_to_food_id")
-        if isinstance(belongs, str) and belongs in removed_to_survivor:
-            food["belongs_to_food_id"] = removed_to_survivor[belongs]
-    return survivors
-
-
-def _sanitize_trace_quantities(food: dict[str, Any]) -> None:
-    parent_quantity = (
-        _safe_float(food.get("quantity"))
-        if str(food.get("unit") or "") == "g"
-        else 0.0
-    )
-
-    for spice in food.get("spices", []) or []:
-        if not isinstance(spice, dict):
-            continue
-        weight = _safe_float(spice.get("estimated_weight_g"))
+        weight = float(ingredient.get("estimated_weight_g", 0) or 0)
         if weight <= 0:
             continue
-        relative_cap = parent_quantity * 0.02 if parent_quantity > 0 else 5.0
-        cap = max(0.25, min(5.0, relative_cap if relative_cap > 0 else 5.0))
-        if weight > cap:
-            spice["vision_original_estimated_weight_g"] = weight
-            spice["estimated_weight_g"] = round(cap, 3)
-            spice["quantity_was_sanity_adjusted"] = True
-            spice["quantity_adjustment_reason"] = "trace_spice_plausibility_cap"
-            spice["confidence"] = min(_safe_float(spice.get("confidence"), 0.5), 0.45)
+        confidence = float(ingredient.get("confidence", 0) or 0)
+        raw_name = ingredient.get("canonical_name") or ingredient.get("name")
+        name = _normalize_core_food_name(raw_name)
 
-    name = _normalize_semantic_food_name(food.get("name"))
-    role = str(food.get("role") or "").lower()
-    unit = str(food.get("unit") or "")
-    quantity = _safe_float(food.get("quantity"))
-    chili_like = any(word in name for word in ("chili", "chilli", "chile"))
-    dried_like = "dried" in name or "dry" in name
-    trace_role = role in {"garnish", "condiment", "ingredient"} or food.get("belongs_to_food_id") is not None
+        promoted.append({
+            "id": f"{parent_id}_ingredient_{index:03d}",
+            "name": name,
+            "canonical_name": name,
+            "ingredient_type": None,
+            "canonical_variants": {"legume": None, "oil": None},
+            "container": food.get("container", "unknown"),
+            "category": _category_from_ingredient(ingredient.get("ingredient_category")),
+            "cuisine": food.get("cuisine", "Unknown"),
+            "food_source": "Generic",
+            "brand": None,
+            "role": "ingredient",
+            "served_separately": False,
+            "belongs_to_food_id": None,
+            "preparation": food.get("preparation", "Cooked"),
+            "preparation_confidence": food.get("preparation_confidence", 0.5),
+            "quantity": weight,
+            "quantity_confidence": min(
+                parent_quantity_confidence if parent_quantity_confidence > 0 else 1.0,
+                confidence if confidence > 0 else 1.0,
+            ),
+            "unit": "g",
+            "edible_fraction": 1.0,
+            "detection_confidence": min(
+                parent_detection_confidence if parent_detection_confidence > 0 else 1.0,
+                confidence if confidence > 0 else 1.0,
+            ),
+            "analysis_route": "DIRECT_USDA",
+            "requires_back_image": False,
+            "usda_food_description": ingredient.get("usda_food_description"),
+            "possible_usda_queries": list(ingredient.get("possible_usda_queries") or []),
+            "ingredients": [],
+            "spices": [],
+            "source_parent_food_id": parent_id or None,
+            "source_parent_food_name": parent_name,
+            "counts_toward_visible_weight": True,
+            "display_in_food_list": True,
+        })
 
-    if chili_like and dried_like and unit == "g" and quantity > 5 and trace_role:
-        food["vision_original_quantity"] = quantity
-        food["quantity"] = 5.0
-        food["quantity_was_sanity_adjusted"] = True
-        food["quantity_adjustment_reason"] = "dried_chili_trace_quantity_cap"
-        food["quantity_confidence"] = min(_safe_float(food.get("quantity_confidence"), 0.5), 0.35)
+    # Spices are promoted for nutrient resolution but kept out of the normal
+    # detected-food list. Their weights are trace additions and do not count
+    # toward the parent food's visible-mass budget.
+    for index, spice in enumerate(food.get("spices") or [], start=1):
+        if not isinstance(spice, dict):
+            continue
+        weight = float(spice.get("estimated_weight_g", 0) or 0)
+        if weight <= 0:
+            continue
+        confidence = float(spice.get("confidence", 0) or 0)
+        raw_name = spice.get("canonical_name") or spice.get("name")
+        name = _normalize_core_food_name(raw_name)
+        promoted.append({
+            "id": f"{parent_id}_spice_{index:03d}",
+            "name": name,
+            "canonical_name": name,
+            "ingredient_type": None,
+            "canonical_variants": {"legume": None, "oil": None},
+            "container": food.get("container", "unknown"),
+            "category": "Condiment",
+            "cuisine": food.get("cuisine", "Unknown"),
+            "food_source": "Generic",
+            "brand": None,
+            "role": "ingredient",
+            "served_separately": False,
+            "belongs_to_food_id": None,
+            "preparation": food.get("preparation", "Cooked"),
+            "preparation_confidence": food.get("preparation_confidence", 0.5),
+            "quantity": weight,
+            "quantity_confidence": confidence,
+            "unit": "g",
+            "edible_fraction": 1.0,
+            "detection_confidence": confidence,
+            "analysis_route": "DIRECT_USDA",
+            "requires_back_image": False,
+            "usda_food_description": spice.get("usda_food_description"),
+            "possible_usda_queries": list(spice.get("possible_usda_queries") or []),
+            "ingredients": [],
+            "spices": [],
+            "source_parent_food_id": parent_id or None,
+            "source_parent_food_name": parent_name,
+            "counts_toward_visible_weight": False,
+            "display_in_food_list": False,
+        })
+
+    return promoted
 
 
 def post_process(
     result: dict[str, Any],
 ) -> dict[str, Any]:
     """
-    Normalize the raw vision response before any USDA/nutrient work.
-
-    Critical invariant: one physical edible mass maps to one surviving top-level
-    food. Mixed-dish/component duplicates and duplicate views of the same food are
-    reconciled before visible weight and downstream nutrition are calculated.
+    Normalize the vision response and enforce the core-food contract:
+    DECOMPOSE parents are analysis containers only and are replaced by their
+    ingredient entities before downstream nutrition resolution.
     """
     if "meal" not in result or "foods" not in result["meal"]:
         return result
 
-    foods = [
-        food for food in result["meal"].get("foods", [])
-        if isinstance(food, dict)
-    ]
+    foods = result["meal"]["foods"]
+    if not isinstance(foods, list):
+        return result
+
     unit_map = {
         "gram": "g", "grams": "g", "g": "g",
         "milliliter": "ml", "milliliters": "ml", "ml": "ml",
@@ -3167,60 +2983,77 @@ def post_process(
     }
 
     for food in foods:
+        if not isinstance(food, dict):
+            continue
+        food["name"] = _normalize_core_food_name(food.get("name"))
         unit = str(food.get("unit", "g")).lower().strip()
         food["unit"] = unit_map.get(unit, unit)
-        _canonicalize_display_name(food)
 
         if food.get("analysis_route") == "NUTRITION_LABEL":
             food.setdefault("ingredients", [])
             food.setdefault("spices", [])
             continue
 
-        new_ingredients: list[dict[str, Any]] = []
-        for ingredient in food.get("ingredients", []) or []:
-            if isinstance(ingredient, dict):
-                new_ingredients.extend(split_entry_by_name(ingredient))
+        new_ingredients = []
+        for ingredient in food.get("ingredients", []):
+            new_ingredients.extend(split_entry_by_name(ingredient))
         food["ingredients"] = new_ingredients
 
-        new_spices: list[dict[str, Any]] = []
-        for spice in food.get("spices", []) or []:
-            if isinstance(spice, dict):
-                new_spices.extend(split_entry_by_name(spice))
+        new_spices = []
+        for spice in food.get("spices", []):
+            new_spices.extend(split_entry_by_name(spice))
         food["spices"] = new_spices
-        _sanitize_trace_quantities(food)
 
-    _remove_attached_food_from_parent_recipe(foods)
-    foods = _reconcile_parent_components(foods)
-    foods = _reconcile_cross_image_duplicates(foods)
-
-    id_mapping: dict[str, str] = {}
-    for index, food in enumerate(foods, start=1):
-        old_id = food.get("id")
-        new_id = f"food_{index:04d}"
-        if isinstance(old_id, str):
-            id_mapping[old_id] = new_id
-        food["id"] = new_id
-
+    # Track explicit child foods so they are not re-created from a parent's
+    # nested ingredient list as well.
+    explicit_child_keys: set[tuple[str, str]] = set()
     for food in foods:
+        if not isinstance(food, dict):
+            continue
         parent_id = food.get("belongs_to_food_id")
         if isinstance(parent_id, str):
-            food["belongs_to_food_id"] = id_mapping.get(parent_id)
+            explicit_child_keys.add((parent_id, _normalize_core_food_name(food.get("name")).lower()))
 
-    result["meal"]["foods"] = foods
-    result["meal"]["estimated_visible_food_weight_g"] = round(
-        sum(
-            _safe_float(food.get("quantity"))
-            for food in foods
-            if food.get("unit") == "g"
-        ),
-        3,
+    core_foods: list[dict[str, Any]] = []
+    for food in foods:
+        if not isinstance(food, dict):
+            continue
+        if food.get("analysis_route") != "DECOMPOSE":
+            food.setdefault("counts_toward_visible_weight", True)
+            food.setdefault("display_in_food_list", True)
+            core_foods.append(food)
+            continue
+
+        parent_id = str(food.get("id") or "")
+        for promoted in _promote_decomposed_food(food):
+            key = (parent_id, str(promoted.get("name") or "").lower())
+            if key in explicit_child_keys and promoted.get("display_in_food_list") is True:
+                continue
+            core_foods.append(promoted)
+
+    # Sequential IDs are assigned only after parents have been removed.
+    old_to_new: dict[str, str] = {}
+    for index, food in enumerate(core_foods, start=1):
+        old_id = str(food.get("id") or "")
+        new_id = f"food_{index:04d}"
+        if old_id:
+            old_to_new[old_id] = new_id
+        food["id"] = new_id
+
+    for food in core_foods:
+        parent_id = food.get("belongs_to_food_id")
+        if isinstance(parent_id, str):
+            food["belongs_to_food_id"] = old_to_new.get(parent_id)
+
+    result["meal"]["foods"] = core_foods
+    result["meal"]["estimated_visible_food_weight_g"] = sum(
+        float(food.get("quantity", 0) or 0)
+        for food in core_foods
+        if food.get("unit") == "g"
+        and food.get("counts_toward_visible_weight", True) is not False
     )
-    result["meal"]["vision_reconciliation"] = {
-        "physical_food_count": len(foods),
-        "deduplication_applied": True,
-        "quantity_sanity_checks_applied": True,
-    }
     return result
+
 
 # =============================================================================
 # MAIN FLOW – MULTIPLE FILES → SINGLE MERGED RESULT
