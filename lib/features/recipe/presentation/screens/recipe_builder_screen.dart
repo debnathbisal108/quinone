@@ -311,8 +311,44 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
               ),
             ),
             if (_searchError != null) ...[
-              const SizedBox(height: 8),
-              Text(_searchError!, style: TextStyle(color: scheme.error)),
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+                decoration: BoxDecoration(
+                  color: scheme.errorContainer,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.wifi_off_rounded,
+                      color: scheme.onErrorContainer,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        _searchError!,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: scheme.onErrorContainer,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: _searching
+                          ? null
+                          : () {
+                              final query = _searchController.text.trim();
+                              if (query.length >= 2) {
+                                _search(query);
+                              }
+                            },
+                      child: const Text('Retry'),
+                    ),
+                  ],
+                ),
+              ),
             ],
             if (_suggestions.isNotEmpty) ...[
               const SizedBox(height: 8),
@@ -450,7 +486,29 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
 
   String _format(double value) => value == value.roundToDouble() ? value.toStringAsFixed(0) : value.toStringAsFixed(1);
 
-  String _cleanError(Object error) => error.toString().replaceFirst(RegExp(r'^(Exception|StateError):\s*'), '');
+  String _cleanError(Object error) {
+    if (error is RecipeServiceException) {
+      return error.message;
+    }
+
+    // Never render networking/framework exception dumps directly to users.
+    final text = error
+        .toString()
+        .replaceFirst(RegExp(r'^(Exception|StateError):\s*'), '')
+        .trim();
+    final lower = text.toLowerCase();
+
+    if (lower.contains('dioexception') ||
+        lower.contains('status code') ||
+        lower.contains('http://') ||
+        lower.contains('https://')) {
+      return 'Couldn’t complete the request. Please try again.';
+    }
+
+    return text.isEmpty
+        ? 'Couldn’t complete the request. Please try again.'
+        : text;
+  }
 
   void _message(String message) {
     ScaffoldMessenger.of(context)
