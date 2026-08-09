@@ -2957,6 +2957,165 @@ def _promote_decomposed_food(
     return promoted
 
 
+
+def _identity_text(value: Any) -> str:
+    text = str(value or "").lower().strip()
+    if not text:
+        return ""
+
+    replacements = {
+        "porridge": "",
+        "cooked": "",
+        "boiled": "",
+        "steamed": "",
+        "roasted": "",
+        "baked": "",
+        "fried": "",
+        "raw": "",
+        "fresh": "",
+        "sliced": "",
+        "slice": "",
+        "chopped": "",
+        "diced": "",
+        "minced": "",
+        "whole": "",
+        "plain": "",
+    }
+    for token, replacement in replacements.items():
+        text = text.replace(token, replacement)
+
+    cleaned = []
+    for ch in text:
+        cleaned.append(ch if ch.isalnum() or ch.isspace() else " ")
+    words = [word for word in "".join(cleaned).split() if word]
+
+    # Tiny, deliberately conservative singularisation for food identity only.
+    singular_words = []
+    for word in words:
+        if word in {"oats", "lentils", "almonds", "peas", "beans"}:
+            singular_words.append(word)
+        elif word.endswith("ies") and len(word) > 4:
+            singular_words.append(word[:-3] + "y")
+        elif word.endswith("s") and not word.endswith("ss") and len(word) > 3:
+            singular_words.append(word[:-1])
+        else:
+            singular_words.append(word)
+
+    return " ".join(singular_words)
+
+
+def _canonical_food_identity(food: dict[str, Any]) -> str:
+    candidates = [
+        food.get("canonical_name"),
+        food.get("name"),
+        food.get("usda_food_description"),
+    ]
+    identities = [_identity_text(value) for value in candidates]
+    identities = [value for value in identities if value]
+    if not identities:
+        return ""
+
+    # Prefer the shortest useful identity; USDA descriptions often contain
+    # extra qualifiers while the canonical/name field carries the food core.
+    return min(identities, key=lambda value: (len(value.split()), len(value)))
+
+
+def _same_core_food(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    key_a = _canonical_food_identity(a)
+    key_b = _canonical_food_identity(b)
+    if not key_a or not key_b:
+        return False
+    if key_a == key_b:
+        return True
+
+    tokens_a = set(key_a.split())
+    tokens_b = set(key_b.split())
+    if not tokens_a or not tokens_b:
+        return False
+
+    # Preparation wording often makes one identity a strict superset of the
+    # other (e.g. "rolled oats" vs "oats rolled regular"). Only allow a
+    # token-overlap match when at least one side came from a decomposed parent,
+    # so independent foods are not collapsed aggressively.
+    if a.get("source_parent_food_id") or b.get("source_parent_food_id"):
+        overlap = len(tokens_a & tokens_b) / max(1, min(len(tokens_a), len(tokens_b)))
+        return overlap >= 0.8
+
+    return False
+
+
+def _prefer_food_candidate(a: dict[str, Any], b: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return (winner, discarded) for two estimates of one physical food."""
+    a_promoted = bool(a.get("source_parent_food_id"))
+    b_promoted = bool(b.get("source_parent_food_id"))
+
+    # A decomposed ingredient belongs to the parent dish's mass budget. When
+    # Gemini also emits the same ingredient independently, keep the promoted
+    # ingredient rather than summing two visual estimates of the same mass.
+    if a_promoted != b_promoted:
+        return (a, b) if a_promoted else (b, a)
+
+    def score(food: dict[str, Any]) -> tuple[float, float, float]:
+        return (
+            float(food.get("quantity_confidence", 0) or 0),
+            float(food.get("detection_confidence", 0) or 0),
+            -float(food.get("quantity", 0) or 0),
+        )
+
+    return (a, b) if score(a) >= score(b) else (b, a)
+
+
+def _reconcile_core_food_duplicates(
+    foods: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    reconciled: list[dict[str, Any]] = []
+    discarded_log: list[dict[str, Any]] = []
+
+    for candidate in foods:
+        duplicate_index = None
+        for index, existing in enumerate(reconciled):
+            if _same_core_food(existing, candidate):
+                # Hidden trace spices should only reconcile with other hidden
+                # trace spices, never with a visible core food card.
+                if bool(existing.get("display_in_food_list", True)) != bool(candidate.get("display_in_food_list", True)):
+                    continue
+                duplicate_index = index
+                break
+
+        if duplicate_index is None:
+            reconciled.append(candidate)
+            continue
+
+        existing = reconciled[duplicate_index]
+        winner, discarded = _prefer_food_candidate(existing, candidate)
+        reconciled[duplicate_index] = winner
+        discarded_log.append({
+            "reason": "duplicate_core_food_estimate",
+            "canonical_identity": _canonical_food_identity(winner),
+            "kept_name": winner.get("name"),
+            "kept_quantity": winner.get("quantity"),
+            "discarded_name": discarded.get("name"),
+            "discarded_quantity": discarded.get("quantity"),
+            "kept_source_parent_food_name": winner.get("source_parent_food_name"),
+            "discarded_source_parent_food_name": discarded.get("source_parent_food_name"),
+        })
+
+    return reconciled, discarded_log
+
+
+def _clean_display_core_name(food: dict[str, Any]) -> None:
+    # Keep preparation in the dedicated preparation field rather than creating
+    # duplicate-looking display names such as "Cooked Rolled Oats".
+    name = str(food.get("name") or "").strip()
+    lowered = name.lower()
+    for prefix in ("cooked ", "boiled ", "steamed "):
+        if lowered.startswith(prefix):
+            trimmed = name[len(prefix):].strip()
+            if trimmed:
+                food["name"] = trimmed
+                food["canonical_name"] = trimmed
+            break
+
 def post_process(
     result: dict[str, Any],
 ) -> dict[str, Any]:
@@ -3031,7 +3190,16 @@ def post_process(
                 continue
             core_foods.append(promoted)
 
-    # Sequential IDs are assigned only after parents have been removed.
+    # Reconcile alternate estimates of the same physical core food BEFORE
+    # USDA lookup. This is what prevents a decomposed "Cooked Rolled Oats"
+    # entry and a separate "Rolled Oats" detection from both surviving.
+    core_foods, reconciliation_log = _reconcile_core_food_duplicates(core_foods)
+
+    for food in core_foods:
+        _clean_display_core_name(food)
+
+    # Sequential IDs are assigned only after parents and duplicate estimates
+    # have been removed.
     old_to_new: dict[str, str] = {}
     for index, food in enumerate(core_foods, start=1):
         old_id = str(food.get("id") or "")
@@ -3046,6 +3214,11 @@ def post_process(
             food["belongs_to_food_id"] = old_to_new.get(parent_id)
 
     result["meal"]["foods"] = core_foods
+    if reconciliation_log:
+        result["meal"]["food_reconciliation"] = {
+            "discarded_duplicate_estimates": reconciliation_log,
+            "rule": "one_physical_core_food_one_final_entity",
+        }
     result["meal"]["estimated_visible_food_weight_g"] = sum(
         float(food.get("quantity", 0) or 0)
         for food in core_foods
