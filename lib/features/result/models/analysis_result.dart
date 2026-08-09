@@ -97,30 +97,120 @@ class AnalysisResult {
   List<NutrientContribution> contributionsFor(String key) {
     final totalsByFood = <String, NutrientContribution>{};
 
-    for (final food in foods) {
-      final amount = food.nutrients[key] ?? 0;
-      if (amount <= 0) continue;
+    final candidates = displayFoods;
 
-      final identity = _normalizedDisplayFoodName(food.name);
-      final existing = totalsByFood[identity];
-      if (existing == null) {
-        totalsByFood[identity] = NutrientContribution(
+    for (final food in candidates) {
+      final normalizedName = _normalizedDisplayFoodName(food.name);
+      final hasVisibleIngredientChildren = food.ingredientNames.any(
+        (ingredient) => candidates.any(
+          (other) =>
+              other != food &&
+              _normalizedDisplayFoodName(other.name) == ingredient,
+        ),
+      );
+
+      if (food.isComposite && hasVisibleIngredientChildren) {
+        continue;
+      }
+
+      final amount = food.nutrients[key] ?? 0;
+      if (amount <= 0 || !amount.isFinite) continue;
+
+      final existing = totalsByFood[normalizedName];
+      if (existing == null || amount > existing.amount) {
+        totalsByFood[normalizedName] = NutrientContribution(
           foodName: food.name,
           amount: amount,
-        );
-      } else {
-        // Exact duplicate entities can occur in enriched payloads. Keep the
-        // larger identical representation instead of adding it twice.
-        totalsByFood[identity] = NutrientContribution(
-          foodName: existing.foodName,
-          amount: math.max(existing.amount, amount),
         );
       }
     }
 
-    final result = totalsByFood.values.toList()
+    var result = totalsByFood.values.toList()
       ..sort((a, b) => b.amount.compareTo(a.amount));
-    return result;
+
+    final authoritativeTotal = _totalForNutrientKey(key);
+    if (authoritativeTotal != null &&
+        authoritativeTotal > 0 &&
+        result.isNotEmpty) {
+      final contributorSum = result.fold<double>(
+        0,
+        (sum, item) => sum + item.amount,
+      );
+
+      if (contributorSum > authoritativeTotal * 1.02) {
+        final scale = authoritativeTotal / contributorSum;
+        result = result
+            .map(
+              (item) => NutrientContribution(
+                foodName: item.foodName,
+                amount: item.amount * scale,
+              ),
+            )
+            .toList(growable: false);
+      }
+    }
+
+    return List.unmodifiable(result);
+  }
+
+  double? _totalForNutrientKey(String key) {
+    switch (key) {
+      case 'energy_kcal':
+      case 'calories':
+      case 'calories_kcal':
+        return calories;
+      case 'protein_g':
+      case 'protein':
+        return protein;
+      case 'carbohydrate_g':
+      case 'carbohydrates_g':
+      case 'carbs_g':
+      case 'carbs':
+        return carbohydrates;
+      case 'fat_g':
+      case 'total_fat_g':
+      case 'fat':
+        return fat;
+      case 'fiber_g':
+      case 'fibre_g':
+      case 'dietary_fiber_g':
+        return fiber;
+      case 'sugars_g':
+      case 'total_sugars_g':
+      case 'sugar_g':
+      case 'sugars':
+        return sugars;
+      case 'added_sugars_g':
+      case 'added_sugar_g':
+      case 'added_sugars':
+        return addedSugars;
+      case 'saturated_fat_g':
+      case 'total_saturated_fat_g':
+        return saturatedFat;
+      case 'monounsaturated_fat_g':
+      case 'total_monounsaturated_fat_g':
+        return monounsaturatedFat;
+      case 'polyunsaturated_fat_g':
+      case 'total_polyunsaturated_fat_g':
+        return polyunsaturatedFat;
+      case 'trans_fat_g':
+      case 'total_trans_fat_g':
+        return transFat;
+      case 'omega3_g':
+      case 'omega_3_g':
+        return omega3;
+      case 'omega6_g':
+      case 'omega_6_g':
+        return omega6;
+      case 'cholesterol_mg':
+      case 'cholesterol':
+        return cholesterol;
+      default:
+        for (final nutrient in micronutrients) {
+          if (nutrient.key == key) return nutrient.amount;
+        }
+        return null;
+    }
   }
 
   factory AnalysisResult.fromJson(Map<String, dynamic> json) {
@@ -579,6 +669,8 @@ class FoodSummary {
     required this.macronutrients,
     required this.vitamins,
     required this.minerals,
+    required this.ingredientNames,
+    required this.isComposite,
   });
 
   final String? id;
@@ -589,6 +681,8 @@ class FoodSummary {
   final Map<String, double> macronutrients;
   final Map<String, double> vitamins;
   final Map<String, double> minerals;
+  final Set<String> ingredientNames;
+  final bool isComposite;
 
   String get identity {
     final normalizedId = id?.trim();
@@ -604,28 +698,44 @@ class FoodSummary {
 
   factory FoodSummary.fromJson(Map<String, dynamic> json) {
     final features =
-    _asMap(json['features']) ?? const {};
+        _asMap(json['features']) ?? const <String, dynamic>{};
 
-    // final macros = <String, double>{
-    //   ..._doubleMap(
-    //     _asMap(json['nutrients']),
-    //   ),
-    //   ..._doubleMap(
-    //     _asMap(features['macronutrients']),
-    //   ),
-    // };
+    final weightGrams = _number(
+      json['estimated_weight_g'] ??
+          json['weight_g'] ??
+          _asMap(features['physical'])?['serving_size_g'],
+    );
 
-    final macros = <String, double>{
-      ..._doubleMap(
-        _asMap(json['nutrients']),
-      ),
-      ..._doubleMap(
-        _asMap(features['macronutrients']),
-      ),
-      ..._doubleMap(
-        _asMap(features['fat_profile']),
-      ),
+    final featureMacros = <String, double>{
+      ..._doubleMap(_asMap(features['macronutrients'])),
+      ..._doubleMap(_asMap(features['fat_profile'])),
     };
+
+    final rawNutrients = _doubleMap(_asMap(json['nutrients']));
+
+    final macros = _buildPortionMacronutrients(
+      featureMacros: featureMacros,
+      rawNutrients: rawNutrients,
+      weightGrams: weightGrams,
+    );
+
+    final rawIngredients = _asList(json['ingredients']);
+    final ingredientNames = <String>{};
+    for (final item in rawIngredients) {
+      final ingredient = _asMap(item);
+      if (ingredient == null) continue;
+      final ingredientName = _firstText(
+        ingredient,
+        const ['display_name', 'name', 'canonical_name'],
+      );
+      if (ingredientName == null || ingredientName.trim().isEmpty) continue;
+      ingredientNames.add(_normalizedDisplayFoodName(ingredientName));
+    }
+
+    final analysisRoute = _firstText(
+      json,
+      const ['analysis_route', 'route', 'resolution_route'],
+    )?.toUpperCase();
 
     return FoodSummary(
       id: _firstText(json, const ['id', 'food_id', 'entity_id']),
@@ -634,11 +744,7 @@ class FoodSummary {
             const ['display_name', 'name', 'canonical_name'],
           ) ??
           'Detected food',
-      weightGrams: _number(
-        json['estimated_weight_g'] ??
-            json['weight_g'] ??
-            _asMap(features['physical'])?['serving_size_g'],
-      ),
+      weightGrams: weightGrams,
       calories: _firstNumber(
         macros,
         const ['energy_kcal', 'calories', 'calories_kcal'],
@@ -651,8 +757,62 @@ class FoodSummary {
       minerals: Map.unmodifiable(
         _doubleMap(_asMap(features['minerals'])),
       ),
+      ingredientNames: Set.unmodifiable(ingredientNames),
+      isComposite: ingredientNames.isNotEmpty ||
+          analysisRoute == 'DECOMPOSE' ||
+          analysisRoute == 'COMPOSITE',
     );
   }
+}
+
+Map<String, double> _buildPortionMacronutrients({
+  required Map<String, double> featureMacros,
+  required Map<String, double> rawNutrients,
+  required double weightGrams,
+}) {
+  if (featureMacros.isEmpty) {
+    return Map<String, double>.from(rawNutrients);
+  }
+
+  final result = Map<String, double>.from(featureMacros);
+
+  double? featureEnergy;
+  for (final key in const ['energy_kcal', 'calories', 'calories_kcal']) {
+    final value = featureMacros[key];
+    if (value != null && value > 0) {
+      featureEnergy = value;
+      break;
+    }
+  }
+
+  double? rawEnergy;
+  for (final key in const ['energy_kcal', 'calories', 'calories_kcal']) {
+    final value = rawNutrients[key];
+    if (value != null && value > 0) {
+      rawEnergy = value;
+      break;
+    }
+  }
+
+  double? rawScale;
+  if (featureEnergy != null && rawEnergy != null && rawEnergy > 0) {
+    final ratio = featureEnergy / rawEnergy;
+    if (ratio.isFinite && ratio > 0 && ratio <= 1.5) {
+      rawScale = ratio;
+    }
+  }
+
+  rawScale ??= weightGrams > 0 && weightGrams <= 1500
+      ? weightGrams / 100.0
+      : null;
+
+  if (rawScale != null) {
+    for (final entry in rawNutrients.entries) {
+      result.putIfAbsent(entry.key, () => entry.value * rawScale!);
+    }
+  }
+
+  return result;
 }
 
 double _foodDisplayQuality(FoodSummary food) {
