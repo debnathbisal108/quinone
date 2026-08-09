@@ -32,6 +32,8 @@ class ResultScreen extends StatelessWidget {
     required double amount,
     required String unit,
     List<_NutrientDetailItem> relatedValues = const [],
+    String breakdownTitle = 'Breakdown',
+    String? breakdownNote,
   }) {
     final contributions = result.contributionsFor(nutrientKey);
 
@@ -69,11 +71,22 @@ class ResultScreen extends StatelessWidget {
                 if (relatedValues.isNotEmpty) ...[
                   const SizedBox(height: 20),
                   Text(
-                    'Breakdown',
+                    breakdownTitle,
                     style: theme.textTheme.titleMedium?.copyWith(
                       fontWeight: FontWeight.w800,
                     ),
                   ),
+                  if (breakdownNote != null &&
+                      breakdownNote.trim().isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      breakdownNote,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 10),
                   Container(
                     decoration: BoxDecoration(
@@ -437,13 +450,11 @@ class ResultScreen extends StatelessWidget {
                                         nutrientKey: 'fat_g',
                                         amount: result.fat,
                                         unit: 'g',
+                                        breakdownTitle: 'Known fat composition',
+                                        breakdownNote:
+                                            'USDA may not report every fatty-acid subtype for every food. '
+                                            'The known subtypes below therefore may not add up to total fat.',
                                         relatedValues: [
-                                          _NutrientDetailItem(
-                                            label: 'Total fat',
-                                            value: result.fat,
-                                            unit: 'g',
-                                            available: true,
-                                          ),
                                           _NutrientDetailItem(
                                             label: 'Saturated fat',
                                             value: result.saturatedFat ?? 0,
