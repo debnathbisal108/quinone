@@ -168,6 +168,18 @@ QUANTITY ESTIMATION
 
 Estimate the edible quantity for EVERY detected food.
 
+CRITICAL MASS-CONSISTENCY RULE:
+- For every DECOMPOSE food, the parent food quantity is the total visible mass
+  budget for its substantial ingredients.
+- Ingredient estimated_weight_g values must be derived from that parent mass
+  budget and estimated_percentage values.
+- Never independently assign an ingredient weight that contradicts its
+  percentage of the parent.
+- Tiny seasonings/garnishes such as curry leaves, dried chilies, turmeric,
+  cumin, mustard seeds, salt, and similar spices must never be estimated as
+  meal-sized 50-100 g portions. If visually countable, use "piece"; otherwise
+  use a small gram estimate and lower confidence when uncertain.
+
 Use visual reasoning based on:
 
 - container size
@@ -2860,10 +2872,47 @@ def _promote_decomposed_food(
 
     promoted: list[dict[str, Any]] = []
 
-    for index, ingredient in enumerate(food.get("ingredients") or [], start=1):
-        if not isinstance(ingredient, dict):
-            continue
-        weight = float(ingredient.get("estimated_weight_g", 0) or 0)
+    # The DECOMPOSE parent is the mass budget. Gemini also returns ingredient
+    # percentages, so do not trust an independently hallucinated
+    # estimated_weight_g when it conflicts with that budget.
+    ingredients = [
+        item
+        for item in (food.get("ingredients") or [])
+        if isinstance(item, dict)
+    ]
+    parent_quantity = float(food.get("quantity", 0) or 0)
+    parent_unit = str(food.get("unit") or "").lower().strip()
+    percentage_sum = sum(
+        max(0.0, float(item.get("estimated_percentage", 0) or 0))
+        for item in ingredients
+    )
+    use_parent_mass_budget = (
+        parent_unit == "g"
+        and parent_quantity > 0
+        and percentage_sum > 0
+    )
+
+    for index, ingredient in enumerate(ingredients, start=1):
+        reported_weight = float(ingredient.get("estimated_weight_g", 0) or 0)
+        percentage = max(
+            0.0,
+            float(ingredient.get("estimated_percentage", 0) or 0),
+        )
+
+        if use_parent_mass_budget and percentage > 0:
+            weight = parent_quantity * percentage / percentage_sum
+            if (
+                reported_weight <= 0
+                or abs(reported_weight - weight) / max(weight, 1.0) > 0.20
+            ):
+                ingredient["quantity_reconciliation"] = {
+                    "reported_estimated_weight_g": reported_weight,
+                    "reconciled_weight_g": round(weight, 4),
+                    "basis": "parent_mass_x_normalized_percentage",
+                }
+        else:
+            weight = reported_weight
+
         if weight <= 0:
             continue
         confidence = float(ingredient.get("confidence", 0) or 0)
@@ -3116,6 +3165,108 @@ def _clean_display_core_name(food: dict[str, Any]) -> None:
                 food["canonical_name"] = trimmed
             break
 
+
+_TRACE_FOOD_TOKENS = {
+    "turmeric",
+    "cumin",
+    "coriander",
+    "mustard seed",
+    "mustard seeds",
+    "black pepper",
+    "white pepper",
+    "chili powder",
+    "chilli powder",
+    "dried red chili",
+    "dried red chilli",
+    "red chili",
+    "red chilli",
+    "curry leaf",
+    "curry leaves",
+    "bay leaf",
+    "bay leaves",
+    "cardamom",
+    "clove",
+    "cloves",
+    "cinnamon",
+    "salt",
+}
+
+
+def _is_trace_food(food: dict[str, Any]) -> bool:
+    identity = _identity_text(
+        food.get("canonical_name")
+        or food.get("name")
+        or ""
+    )
+    category = str(food.get("category") or "").lower().strip()
+    role = str(food.get("role") or "").lower().strip()
+
+    if category in {"spice", "condiment"} and role in {
+        "ingredient", "garnish", "condiment",
+    }:
+        return True
+
+    return any(
+        token in identity
+        for token in _TRACE_FOOD_TOKENS
+    )
+
+
+def _sanitize_trace_food_quantities(
+    foods: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Defensive guard for visually tiny seasonings.
+
+    These items remain available to nutrient resolution, but they are not
+    presented as primary detected-food cards. A 100 g curry-leaf/chili
+    hallucination must never reach nutrition as a 100 g serving.
+    """
+    for food in foods:
+        if not isinstance(food, dict) or not _is_trace_food(food):
+            continue
+
+        food["display_in_food_list"] = False
+        food["counts_toward_visible_weight"] = False
+
+        unit = str(food.get("unit") or "").lower().strip()
+        quantity = float(food.get("quantity", 0) or 0)
+
+        # Trace seasonings measured in grams are bounded defensively. This is
+        # a plausibility guard, not a claim that every recipe uses this amount.
+        if unit == "g" and quantity > 5.0:
+            food["quantity_reconciliation"] = {
+                "reported_quantity": quantity,
+                "reported_unit": unit,
+                "reconciled_quantity": 5.0,
+                "reconciled_unit": "g",
+                "basis": "trace_seasoning_plausibility_guard",
+            }
+            food["quantity"] = 5.0
+            food["quantity_confidence"] = min(
+                float(food.get("quantity_confidence", 0) or 0),
+                0.35,
+            )
+
+        # Countable trace items should stay countable. We keep the count for
+        # display/debugging rather than pretending a piece count is grams.
+        if unit == "piece" and quantity > 12:
+            food["quantity_reconciliation"] = {
+                "reported_quantity": quantity,
+                "reported_unit": unit,
+                "reconciled_quantity": 12.0,
+                "reconciled_unit": "piece",
+                "basis": "trace_count_plausibility_guard",
+            }
+            food["quantity"] = 12.0
+            food["quantity_confidence"] = min(
+                float(food.get("quantity_confidence", 0) or 0),
+                0.35,
+            )
+
+    return foods
+
+
 def post_process(
     result: dict[str, Any],
 ) -> dict[str, Any]:
@@ -3194,6 +3345,7 @@ def post_process(
     # USDA lookup. This is what prevents a decomposed "Cooked Rolled Oats"
     # entry and a separate "Rolled Oats" detection from both surviving.
     core_foods, reconciliation_log = _reconcile_core_food_duplicates(core_foods)
+    core_foods = _sanitize_trace_food_quantities(core_foods)
 
     for food in core_foods:
         _clean_display_core_name(food)
