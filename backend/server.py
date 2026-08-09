@@ -11,9 +11,9 @@ from pathlib import Path
 from threading import Lock, RLock
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from analysis_engine import (
@@ -131,9 +131,32 @@ async def recipe_usda_search(q: str) -> dict[str, Any]:
 
 @app.post("/recipes/analyze/start")
 @app.post("/api/v1/recipes/analyze/start", include_in_schema=False)
-async def start_manual_recipe_job(request: ManualRecipeRequest) -> dict[str, Any]:
+async def start_manual_recipe_job(
+    payload: dict[str, Any] = Body(...),
+) -> dict[str, Any]:
+    # Validate inside the endpoint instead of letting FastAPI reject the
+    # request with a generic 422 before our code runs. This gives Flutter
+    # a concrete, user-readable error when a field is malformed.
+    try:
+        request = (
+            ManualRecipeRequest.model_validate(payload)
+            if hasattr(ManualRecipeRequest, "model_validate")
+            else ManualRecipeRequest.parse_obj(payload)
+        )
+    except ValidationError as error:
+        problems: list[str] = []
+        for item in error.errors():
+            location = ".".join(str(part) for part in item.get("loc", ()))
+            message = str(item.get("msg") or "Invalid value")
+            problems.append(f"{location}: {message}" if location else message)
+        detail = "; ".join(problems) or "The recipe request is invalid."
+        raise HTTPException(status_code=400, detail=detail) from error
+
     if not request.ingredients:
-        raise HTTPException(status_code=400, detail="Add at least one recipe ingredient.")
+        raise HTTPException(
+            status_code=400,
+            detail="Add at least one recipe ingredient.",
+        )
     if request.servings_eaten > request.servings_made:
         raise HTTPException(
             status_code=400,
