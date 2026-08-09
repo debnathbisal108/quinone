@@ -116,6 +116,67 @@ substantial core foods. Do NOT additionally return Chicken Curry.
 Every gram of edible mass must belong to exactly one returned core food.
 
 ==========================
+ONE PHYSICAL INGREDIENT = ONE FOOD OBJECT
+==========================
+
+This rule is mandatory and overrides naming/preparation differences.
+
+A physical ingredient must appear EXACTLY ONCE in meal.foods.
+Preparation state, cutting style, cooking state, moisture state, serving form,
+or USDA database wording must NEVER create a second food object.
+
+The `name` field must contain the CORE FOOD NAME ONLY.
+Put preparation information only in the `preparation` field.
+
+FORBIDDEN:
+- Rolled Oats (Cooked) + Rolled Oats (Dry)
+- Cooked Rolled Oats + Dry Rolled Oats
+- Rice (Cooked) + Rice (Dry)
+- Lentils (Cooked) + Lentils (Dry)
+- Banana + Sliced Banana when both refer to the same banana
+- Almonds + Sliced Almonds when both refer to the same almonds
+- Potato + Boiled Potato when both refer to the same potato
+
+CORRECT:
+- name: Rolled Oats
+  preparation: Cooked
+
+If a cooked food was prepared from a dry ingredient, DO NOT return both the
+cooked mass and the dry/raw-equivalent mass. Return only ONE physical food
+entity representing what is actually present in the photographed meal.
+The dry/raw-equivalent amount may be useful internally for recipe reasoning,
+but it must NEVER become another item in meal.foods.
+
+USDA matching also MUST NOT create a second detected food. Different USDA
+descriptions are alternative database candidates for the SAME physical food.
+
+Before returning JSON perform this mandatory duplicate audit:
+1. Remove preparation/state words mentally from every name, including:
+   cooked, dry, dried, raw, boiled, steamed, baked, fried, roasted, grilled,
+   simmered, soaked, sliced, chopped, diced, minced, crushed, ground.
+2. Remove parenthetical preparation labels such as (Cooked), (Dry), (Raw).
+3. Singularize trivial plural differences.
+4. Compare the remaining core food identities.
+5. If two entries resolve to the same physical ingredient, KEEP ONLY ONE.
+6. NEVER add their quantities together when they are alternate estimates of
+   the same physical mass. Choose the estimate that is consistent with the
+   parent dish mass/ingredient percentages and has higher confidence.
+
+Example — oatmeal bowl:
+CORRECT FINAL meal.foods:
+- Rolled Oats
+- Milk
+- Banana
+- Blueberries
+- Chia Seeds
+- Almonds
+
+INCORRECT FINAL meal.foods:
+- Rolled Oats (Cooked)
+- Rolled Oats (Dry)
+- Oatmeal Porridge
+
+==========================
 FOOD ID
 ==========================
 
@@ -3008,39 +3069,45 @@ def _promote_decomposed_food(
 
 
 def _identity_text(value: Any) -> str:
+    """Return a preparation-insensitive identity for ONE physical food."""
+    import re
+
     text = str(value or "").lower().strip()
     if not text:
         return ""
 
-    replacements = {
-        "porridge": "",
-        "cooked": "",
-        "boiled": "",
-        "steamed": "",
-        "roasted": "",
-        "baked": "",
-        "fried": "",
-        "raw": "",
-        "fresh": "",
-        "sliced": "",
-        "slice": "",
-        "chopped": "",
-        "diced": "",
-        "minced": "",
-        "whole": "",
-        "plain": "",
+    # Parenthetical preparation/state labels must not create a second food.
+    # Examples: "Rolled Oats (Cooked)" and "Rolled Oats (Dry)".
+    preparation_terms = {
+        "cooked", "dry", "dried", "raw", "boiled", "steamed",
+        "roasted", "baked", "fried", "grilled", "simmered",
+        "soaked", "fresh", "sliced", "slice", "chopped", "diced",
+        "minced", "crushed", "ground", "whole", "plain",
     }
-    for token, replacement in replacements.items():
-        text = text.replace(token, replacement)
 
-    cleaned = []
-    for ch in text:
-        cleaned.append(ch if ch.isalnum() or ch.isspace() else " ")
-    words = [word for word in "".join(cleaned).split() if word]
+    def clean_parenthetical(match: re.Match[str]) -> str:
+        content = match.group(1).lower()
+        words = set(re.findall(r"[a-z]+", content))
+        if words and words.issubset(preparation_terms):
+            return " "
+        return " " + content + " "
 
-    # Tiny, deliberately conservative singularisation for food identity only.
-    singular_words = []
-    for word in words:
+    text = re.sub(r"\(([^)]*)\)", clean_parenthetical, text)
+
+    # Remove preparation/state words as standalone tokens only; never use
+    # substring replacement (which can corrupt legitimate food names).
+    tokens = re.findall(r"[a-z0-9]+", text)
+    tokens = [token for token in tokens if token not in preparation_terms]
+
+    # Presentation words that do not change physical identity.
+    tokens = [
+        token for token in tokens
+        if token not in {"porridge", "serving", "pieces", "piece"}
+    ]
+
+    singular_words: list[str] = []
+    for word in tokens:
+        # Foods conventionally plural in English remain unchanged.
         if word in {"oats", "lentils", "almonds", "peas", "beans"}:
             singular_words.append(word)
         elif word.endswith("ies") and len(word) > 4:
@@ -3153,17 +3220,37 @@ def _reconcile_core_food_duplicates(
 
 
 def _clean_display_core_name(food: dict[str, Any]) -> None:
-    # Keep preparation in the dedicated preparation field rather than creating
-    # duplicate-looking display names such as "Cooked Rolled Oats".
+    """Keep preparation in metadata; display only the core food name."""
+    import re
+
     name = str(food.get("name") or "").strip()
-    lowered = name.lower()
-    for prefix in ("cooked ", "boiled ", "steamed "):
-        if lowered.startswith(prefix):
-            trimmed = name[len(prefix):].strip()
-            if trimmed:
-                food["name"] = trimmed
-                food["canonical_name"] = trimmed
-            break
+    if not name:
+        return
+
+    prep_words = (
+        "cooked", "dry", "dried", "raw", "boiled", "steamed",
+        "roasted", "baked", "fried", "grilled", "simmered", "soaked",
+    )
+
+    # Strip parenthetical preparation labels anywhere in the display name.
+    pattern = r"\s*\((?:" + "|".join(prep_words) + r")\)\s*"
+    name = re.sub(pattern, " ", name, flags=re.IGNORECASE).strip()
+
+    # Strip leading preparation labels such as "Cooked Rolled Oats".
+    prefix_pattern = r"^(?:" + "|".join(prep_words) + r")\s+"
+    name = re.sub(prefix_pattern, "", name, flags=re.IGNORECASE).strip()
+
+    # Strip trailing state labels such as "Rolled Oats Dry".
+    suffix_pattern = r"\s+(?:" + "|".join(prep_words) + r")$"
+    name = re.sub(suffix_pattern, "", name, flags=re.IGNORECASE).strip()
+
+    if name:
+        food["name"] = name
+        # Do not overwrite a more specific canonical_name unless it is itself
+        # only a preparation variant of the same identity.
+        canonical = str(food.get("canonical_name") or "").strip()
+        if not canonical or _identity_text(canonical) == _identity_text(name):
+            food["canonical_name"] = name
 
 
 _TRACE_FOOD_TOKENS = {
@@ -3345,6 +3432,16 @@ def post_process(
     # USDA lookup. This is what prevents a decomposed "Cooked Rolled Oats"
     # entry and a separate "Rolled Oats" detection from both surviving.
     core_foods, reconciliation_log = _reconcile_core_food_duplicates(core_foods)
+
+    # Second deterministic pass after display-name cleanup semantics. This is
+    # intentionally redundant with the first pass: Gemini must not be able to
+    # bypass one-physical-food-one-entity merely by writing preparation in
+    # parentheses or using Dry/Dried wording.
+    for food in core_foods:
+        _clean_display_core_name(food)
+    core_foods, second_log = _reconcile_core_food_duplicates(core_foods)
+    reconciliation_log.extend(second_log)
+
     core_foods = _sanitize_trace_food_quantities(core_foods)
 
     for food in core_foods:
