@@ -45,6 +45,7 @@ class ManualRecipe {
     required this.ingredients,
     this.servingsMade = 1,
     this.servingsEaten = 1,
+    this.source = 'manual',
   });
 
   final String id;
@@ -52,6 +53,7 @@ class ManualRecipe {
   final List<ManualRecipeIngredient> ingredients;
   final double servingsMade;
   final double servingsEaten;
+  final String source;
 
   double get portionFraction =>
       servingsMade <= 0 ? 1 : (servingsEaten / servingsMade).clamp(0.0, 1.0);
@@ -69,6 +71,7 @@ class ManualRecipe {
           : const [],
       servingsMade: (json['servings_made'] as num?)?.toDouble() ?? 1,
       servingsEaten: (json['servings_eaten'] as num?)?.toDouble() ?? 1,
+      source: json['source']?.toString() ?? 'manual',
     );
   }
 
@@ -78,6 +81,7 @@ class ManualRecipe {
         'ingredients': ingredients.map((item) => item.toJson()).toList(),
         'servings_made': servingsMade,
         'servings_eaten': servingsEaten,
+        'source': source,
       };
 
   Map<String, dynamic> toBackendJson({Map<String, dynamic>? profile}) => {
@@ -85,6 +89,7 @@ class ManualRecipe {
         'ingredients': ingredients.map((item) => item.toBackendJson()).toList(),
         'servings_made': servingsMade,
         'servings_eaten': servingsEaten,
+        'source': source,
         if (profile != null && profile.isNotEmpty) 'profile': profile,
       };
 }
