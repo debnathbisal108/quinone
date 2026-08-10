@@ -256,6 +256,7 @@ def _cleanup_expired_jobs() -> None:
                 "failed",
                 "cancelled",
                 "waiting_for_back_label",
+                "waiting_for_meal_confirmation",
                 "no_food_detected",
             }
         ]
@@ -423,6 +424,7 @@ async def get_analysis_job(job_id: str) -> dict[str, Any]:
     if job["status"] in {
         "completed",
         "waiting_for_back_label",
+        "waiting_for_meal_confirmation",
         "no_food_detected",
     }:
         response["result"] = job.get("result")
@@ -506,26 +508,27 @@ async def _process_initial_job(
         if status != "completed":
             raise ValueError(f"Unsupported analysis status: {status}")
 
-        final_result = await run_nutrica_pipeline(
-            analysis_result,
-            profile=profile_data,
-            progress_callback=lambda stage, message, progress: _set_job(
-                job_id,
-                status="running",
-                stage=stage,
-                message=message,
-                progress=progress,
-            ),
-            cancellation_check=lambda: _raise_if_cancelled(job_id),
-        )
-        final_result["analysis_id"] = job_id
         _set_job(
             job_id,
-            status="completed",
-            stage="completed",
-            message="Your meal report is ready.",
+            status="running",
+            stage="food_resolution",
+            message="Matching detected foods to nutrition database entries…",
+            progress=0.72,
+        )
+        resolved_result = await resolve_meal(analysis_result)
+        _raise_if_cancelled(job_id)
+
+        review_result = _resolved_meal_to_review_draft(
+            resolved_result,
+            analysis_id=job_id,
+        )
+        _set_job(
+            job_id,
+            status="waiting_for_meal_confirmation",
+            stage="meal_confirmation",
+            message="Review the detected foods and quantities before final analysis.",
             progress=1.0,
-            result=final_result,
+            result=review_result,
         )
     except asyncio.CancelledError:
         _set_job(
@@ -982,6 +985,108 @@ async def analyze_back_label(
                 f"Back-label analysis failed: {error}"
             ),
         ) from error
+
+
+
+def _resolved_meal_to_review_draft(
+    resolved_result: dict[str, Any],
+    *,
+    analysis_id: str,
+) -> dict[str, Any]:
+    """Convert resolved vision foods into the same editable USDA recipe contract used by Flutter."""
+    meal = resolved_result.get("meal")
+    if not isinstance(meal, dict):
+        raise ValueError("Resolved analysis is missing meal data.")
+
+    raw_foods = meal.get("foods")
+    if not isinstance(raw_foods, list):
+        raise ValueError("Resolved analysis is missing foods.")
+
+    ingredients: list[dict[str, Any]] = []
+    unresolved: list[str] = []
+
+    for food in raw_foods:
+        if not isinstance(food, dict):
+            continue
+        if food.get("display_in_food_list") is False:
+            continue
+
+        resolver = food.get("resolver")
+        if not isinstance(resolver, dict):
+            resolver = {}
+
+        fdc_id = resolver.get("fdc_id")
+        try:
+            fdc_id = int(fdc_id)
+        except (TypeError, ValueError):
+            unresolved.append(str(food.get("display_name") or food.get("name") or "Food"))
+            continue
+
+        grams = food.get("estimated_weight_g")
+        if grams is None and str(food.get("unit") or "").lower() in {"g", "gram", "grams"}:
+            grams = food.get("quantity")
+        try:
+            grams = float(grams)
+        except (TypeError, ValueError):
+            grams = 0.0
+        if grams <= 0:
+            unresolved.append(str(food.get("display_name") or food.get("name") or "Food"))
+            continue
+
+        matched = str(
+            resolver.get("matched_description")
+            or resolver.get("description")
+            or food.get("canonical_name")
+            or food.get("display_name")
+            or food.get("name")
+            or "Food"
+        ).strip()
+
+        display_name = str(
+            food.get("display_name")
+            or food.get("name")
+            or matched
+        ).strip()
+
+        ingredients.append(
+            {
+                "food": {
+                    "fdc_id": fdc_id,
+                    "description": matched,
+                    "display_name": display_name,
+                    "data_type": str(resolver.get("data_type") or "USDA"),
+                    "food_category": food.get("category"),
+                    "brand_owner": resolver.get("brand_owner"),
+                },
+                "grams": round(grams, 3),
+            }
+        )
+
+    if not ingredients:
+        raise ValueError(
+            "No resolved foods with usable quantities were available for confirmation."
+        )
+
+    meal_name = str(
+        meal.get("meal_name")
+        or meal.get("meal_type")
+        or "Detected meal"
+    ).strip()
+
+    return {
+        "status": "waiting_for_meal_confirmation",
+        "analysis_id": analysis_id,
+        "message": "Review the detected foods and quantities before final analysis.",
+        "meal_draft": {
+            "id": analysis_id,
+            "name": meal_name or "Detected meal",
+            "source": "photo",
+            "ingredients": ingredients,
+            "servings_made": 1.0,
+            "servings_eaten": 1.0,
+        },
+        "unresolved_foods": unresolved,
+    }
 
 
 async def run_nutrica_pipeline(
