@@ -15,6 +15,9 @@ class InsightsScreen extends ConsumerStatefulWidget {
 
 class _InsightsScreenState extends ConsumerState<InsightsScreen> {
   int _days = 7;
+  InsightCategory _category = InsightCategory.health;
+  String _metricKey = 'overall';
+  DailyNutritionInsight? _selectedDay;
 
   @override
   Widget build(BuildContext context) {
@@ -25,6 +28,12 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
     );
     final theme = Theme.of(context);
 
+    final availableMetrics = _metricsFor(insights, _category);
+    if (!availableMetrics.any((item) => item.$1 == _metricKey)) {
+      _metricKey = availableMetrics.isEmpty ? '' : availableMetrics.first.$1;
+      _selectedDay = null;
+    }
+
     return Scaffold(
       appBar: AppBar(title: const Text('Insights')),
       body: ListView(
@@ -34,10 +43,14 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
             segments: const [
               ButtonSegment(value: 7, label: Text('7 days')),
               ButtonSegment(value: 30, label: Text('30 days')),
+              ButtonSegment(value: 90, label: Text('90 days')),
             ],
             selected: {_days},
             onSelectionChanged: (selection) {
-              setState(() => _days = selection.first);
+              setState(() {
+                _days = selection.first;
+                _selectedDay = null;
+              });
             },
           ),
           const SizedBox(height: 18),
@@ -64,56 +77,105 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
               ],
             ),
             const SizedBox(height: 26),
-            const _SectionTitle('Average daily macros'),
-            const SizedBox(height: 12),
-            _MacroSummary(insights: insights),
-            if (insights.targetAchievement.isNotEmpty) ...[
-              const SizedBox(height: 26),
-              const _SectionTitle('Personal target achievement'),
-              const SizedBox(height: 12),
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: insights.targetAchievement.entries
-                        .where(
-                          (entry) => const {
-                            'protein_g',
-                            'carbohydrate_g',
-                            'fat_g',
-                            'fiber_g',
-                          }.contains(entry.key),
-                        )
-                        .map(
-                          (entry) => _ProgressRow(
-                            label: _friendlyName(entry.key),
-                            percent: entry.value,
-                          ),
-                        )
-                        .toList(growable: false),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Trend explorer',
+                    style: theme.textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w900,
+                    ),
                   ),
                 ),
+                Icon(
+                  Icons.auto_graph_rounded,
+                  color: theme.colorScheme.primary,
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Switch between health domains, macronutrients, and micronutrients. Tap any point to inspect that day.',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 14),
+            _MetricSelectors(
+              category: _category,
+              metricKey: _metricKey,
+              metrics: availableMetrics,
+              onCategoryChanged: (category) {
+                setState(() {
+                  _category = category;
+                  final next = _metricsFor(insights, category);
+                  _metricKey = next.isEmpty ? '' : next.first.$1;
+                  _selectedDay = null;
+                });
+              },
+              onMetricChanged: (key) {
+                setState(() {
+                  _metricKey = key;
+                  _selectedDay = null;
+                });
+              },
+            ),
+            const SizedBox(height: 12),
+            if (_metricKey.isNotEmpty)
+              _MetricChart(
+                days: insights.dailyInsights,
+                category: _category,
+                metricKey: _metricKey,
+                selectedDate: _selectedDay?.date,
+                onDaySelected: (day) {
+                  setState(() => _selectedDay = day);
+                },
+              ),
+            if (_selectedDay != null && _metricKey.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              _SelectedDayCard(
+                day: _selectedDay!,
+                category: _category,
+                metricKey: _metricKey,
               ),
             ],
-            if (insights.dailyInsights.isNotEmpty) ...[
-              const SizedBox(height: 26),
-              const _SectionTitle('Daily health trend'),
+            const SizedBox(height: 28),
+            if (_category == InsightCategory.health)
+              _HealthDomainOverview(
+                insights: insights,
+                onTap: (key) {
+                  setState(() {
+                    _metricKey = key;
+                    _selectedDay = null;
+                  });
+                },
+              )
+            else
+              _NutritionBalanceSection(
+                insights: insights,
+                category: _category,
+                onTap: (key) {
+                  setState(() {
+                    _metricKey = key;
+                    _selectedDay = null;
+                  });
+                },
+              ),
+            const SizedBox(height: 28),
+            _WhatChangedSection(
+              insights: insights,
+              category: _category,
+            ),
+            if (insights.topFoodNames.isNotEmpty) ...[
+              const SizedBox(height: 28),
+              const _SectionTitle('Most frequent foods'),
               const SizedBox(height: 6),
               Text(
-                'Tap a day to inspect that day’s macros, micronutrients, and health scores.',
+                'Foods that appeared most often during this period.',
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
               ),
-              const SizedBox(height: 12),
-              _DailyHealthChart(
-                days: insights.dailyInsights,
-                onDaySelected: (day) => _showDayDetails(context, day),
-              ),
-            ],
-            if (insights.topFoodNames.isNotEmpty) ...[
-              const SizedBox(height: 26),
-              const _SectionTitle('Most frequent foods'),
               const SizedBox(height: 12),
               Wrap(
                 spacing: 8,
@@ -121,6 +183,10 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
                 children: insights.topFoodNames
                     .map(
                       (entry) => Chip(
+                        avatar: const Icon(
+                          Icons.restaurant_rounded,
+                          size: 17,
+                        ),
                         label: Text('${entry.key} · ${entry.value}'),
                       ),
                     )
@@ -132,144 +198,205 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
       ),
     );
   }
+}
 
-  void _showDayDetails(
-    BuildContext context,
-    DailyNutritionInsight day,
-  ) {
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      useSafeArea: true,
-      isScrollControlled: true,
-      builder: (context) {
-        final theme = Theme.of(context);
-        final scores = day.healthScores.entries.toList()
-          ..sort((a, b) => b.value.compareTo(a.value));
-        final micros = day.micronutrients.entries.toList()
-          ..sort((a, b) => b.value.compareTo(a.value));
+class _MetricSelectors extends StatelessWidget {
+  const _MetricSelectors({
+    required this.category,
+    required this.metricKey,
+    required this.metrics,
+    required this.onCategoryChanged,
+    required this.onMetricChanged,
+  });
 
-        return DraggableScrollableSheet(
-          expand: false,
-          initialChildSize: 0.78,
-          minChildSize: 0.48,
-          maxChildSize: 0.94,
-          builder: (context, controller) => ListView(
-            controller: controller,
-            padding: const EdgeInsets.fromLTRB(20, 4, 20, 30),
-            children: [
-              Text(
-                _fullDate(day.date),
-                style: theme.textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w900,
-                ),
+  final InsightCategory category;
+  final String metricKey;
+  final List<(String, String)> metrics;
+  final ValueChanged<InsightCategory> onCategoryChanged;
+  final ValueChanged<String> onMetricChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: DropdownButtonFormField<InsightCategory>(
+            value: category,
+            decoration: const InputDecoration(
+              labelText: 'Category',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: const [
+              DropdownMenuItem(
+                value: InsightCategory.health,
+                child: Text('Health'),
               ),
-              const SizedBox(height: 4),
-              Text(
-                '${day.mealCount} ${day.mealCount == 1 ? 'meal' : 'meals'} · '
-                '${day.calories.round()} kcal · '
-                'Health ${day.overallHealthScore.round()}/100',
-                style: theme.textTheme.bodyLarge?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
+              DropdownMenuItem(
+                value: InsightCategory.macros,
+                child: Text('Macros'),
               ),
-              const SizedBox(height: 24),
-              const _SectionTitle('Macronutrients'),
-              const SizedBox(height: 10),
-              _DayMacroGrid(macros: day.macronutrients),
-              if (micros.isNotEmpty) ...[
-                const SizedBox(height: 24),
-                const _SectionTitle('Micronutrients'),
-                const SizedBox(height: 10),
-                ...micros.take(12).map(
-                      (entry) => _DetailRow(
-                        label: _friendlyName(entry.key),
-                        value: _formatNutrient(entry.key, entry.value),
-                      ),
-                    ),
-              ],
-              if (scores.isNotEmpty) ...[
-                const SizedBox(height: 24),
-                const _SectionTitle('Health scores'),
-                const SizedBox(height: 10),
-                ...scores.map(
-                  (entry) => Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: _ScoreRow(
-                      label: _friendlyName(entry.key),
-                      score: entry.value,
-                    ),
+              DropdownMenuItem(
+                value: InsightCategory.micronutrients,
+                child: Text('Micronutrients'),
+              ),
+            ],
+            onChanged: (value) {
+              if (value != null) onCategoryChanged(value);
+            },
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: DropdownButtonFormField<String>(
+            value: metrics.any((item) => item.$1 == metricKey)
+                ? metricKey
+                : null,
+            decoration: const InputDecoration(
+              labelText: 'Metric',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: [
+              for (final item in metrics)
+                DropdownMenuItem(
+                  value: item.$1,
+                  child: Text(
+                    item.$2,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
-              ],
             ],
+            onChanged: (value) {
+              if (value != null) onMetricChanged(value);
+            },
           ),
-        );
-      },
+        ),
+      ],
     );
   }
 }
 
-class _DailyHealthChart extends StatelessWidget {
-  const _DailyHealthChart({
+class _MetricChart extends StatelessWidget {
+  const _MetricChart({
     required this.days,
+    required this.category,
+    required this.metricKey,
+    required this.selectedDate,
     required this.onDaySelected,
   });
 
   final List<DailyNutritionInsight> days;
+  final InsightCategory category;
+  final String metricKey;
+  final DateTime? selectedDate;
   final ValueChanged<DailyNutritionInsight> onDaySelected;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final chartDays = days;
+    final available = days
+        .where((day) => day.metricValue(category, metricKey) != null)
+        .toList(growable: false);
+
+    if (available.isEmpty) {
+      return _MessageCard(
+        icon: Icons.query_stats_rounded,
+        text: 'There is not enough data for this metric yet.',
+      );
+    }
+
+    final last = available.last;
+    final latestValue = last.metricValue(category, metricKey)!;
+    final target = category == InsightCategory.health
+        ? null
+        : last.targetFor(metricKey);
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(14, 18, 14, 12),
+      padding: const EdgeInsets.fromLTRB(14, 16, 14, 12),
       decoration: BoxDecoration(
         color: theme.colorScheme.surfaceContainerLow,
         borderRadius: BorderRadius.circular(24),
         border: Border.all(color: theme.colorScheme.outlineVariant),
       ),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            height: 210,
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                return GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTapDown: (details) {
-                    if (chartDays.isEmpty) return;
-                    const left = 34.0;
-                    const right = 10.0;
-                    final usable = math.max(
-                      1.0,
-                      constraints.maxWidth - left - right,
-                    );
-                    final normalized =
-                        ((details.localPosition.dx - left) / usable)
-                            .clamp(0.0, 1.0);
-                    final index = chartDays.length == 1
-                        ? 0
-                        : (normalized * (chartDays.length - 1)).round();
-                    onDaySelected(chartDays[index]);
-                  },
-                  child: CustomPaint(
-                    painter: _HealthChartPainter(
-                      days: chartDays,
-                      lineColor: theme.colorScheme.primary,
-                      gridColor: theme.colorScheme.outlineVariant,
-                      textColor: theme.colorScheme.onSurfaceVariant,
-                      pointColor: theme.colorScheme.primary,
-                    ),
-                    child: const SizedBox.expand(),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  friendlyMetricName(metricKey),
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w900,
                   ),
-                );
-              },
+                ),
+              ),
+              Text(
+                _metricDisplayValue(
+                  category,
+                  metricKey,
+                  latestValue,
+                ),
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w900,
+                  color: theme.colorScheme.primary,
+                ),
+              ),
+            ],
+          ),
+          if (target != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              _targetDescription(target),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 225,
+            child: LayoutBuilder(
+              builder: (context, constraints) => GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTapDown: (details) {
+                  const left = 42.0;
+                  const right = 12.0;
+                  final usable = math
+                      .max(
+                        1.0,
+                        constraints.maxWidth - left - right,
+                      )
+                      .toDouble();
+                  final normalized =
+                      ((details.localPosition.dx - left) / usable)
+                          .clamp(0.0, 1.0);
+                  final index = available.length == 1
+                      ? 0
+                      : (normalized * (available.length - 1)).round();
+                  onDaySelected(available[index]);
+                },
+                child: CustomPaint(
+                  painter: _MetricChartPainter(
+                    days: available,
+                    category: category,
+                    metricKey: metricKey,
+                    selectedDate: selectedDate,
+                    lineColor: theme.colorScheme.primary,
+                    gridColor: theme.colorScheme.outlineVariant,
+                    textColor: theme.colorScheme.onSurfaceVariant,
+                    targetColor: theme.colorScheme.tertiary,
+                    goodColor: Colors.green,
+                    warningColor: Colors.orange,
+                    dangerColor: theme.colorScheme.error,
+                  ),
+                  child: const SizedBox.expand(),
+                ),
+              ),
             ),
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 2),
           Row(
             children: [
               Icon(
@@ -278,12 +405,10 @@ class _DailyHealthChart extends StatelessWidget {
                 color: theme.colorScheme.onSurfaceVariant,
               ),
               const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  'Each point is the average of that day’s health-domain scores.',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
+              Text(
+                'Tap a point for that day',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
                 ),
               ),
             ],
@@ -294,70 +419,179 @@ class _DailyHealthChart extends StatelessWidget {
   }
 }
 
-class _HealthChartPainter extends CustomPainter {
-  _HealthChartPainter({
+class _MetricChartPainter extends CustomPainter {
+  const _MetricChartPainter({
     required this.days,
+    required this.category,
+    required this.metricKey,
+    required this.selectedDate,
     required this.lineColor,
     required this.gridColor,
     required this.textColor,
-    required this.pointColor,
+    required this.targetColor,
+    required this.goodColor,
+    required this.warningColor,
+    required this.dangerColor,
   });
 
   final List<DailyNutritionInsight> days;
+  final InsightCategory category;
+  final String metricKey;
+  final DateTime? selectedDate;
   final Color lineColor;
   final Color gridColor;
   final Color textColor;
-  final Color pointColor;
+  final Color targetColor;
+  final Color goodColor;
+  final Color warningColor;
+  final Color dangerColor;
 
   @override
   void paint(Canvas canvas, Size size) {
-    const left = 34.0;
-    const right = 10.0;
-    const top = 12.0;
-    const bottom = 32.0;
-    final width = math.max(1.0, size.width - left - right);
-    final height = math.max(1.0, size.height - top - bottom);
+    if (days.isEmpty) {
+      return;
+    }
+
+    const left = 42.0;
+    const right = 12.0;
+    const top = 10.0;
+    const bottom = 34.0;
+    final width = math.max(1.0, size.width - left - right).toDouble();
+    final height = math.max(1.0, size.height - top - bottom).toDouble();
+
+    final values = <double>[
+      for (final day in days)
+        day.metricValue(category, metricKey) ?? 0,
+    ];
+
+    double minValue;
+    double maxValue;
+
+    if (category == InsightCategory.health) {
+      minValue = 0;
+      maxValue = 100;
+
+      _paintHealthBand(
+        canvas,
+        Rect.fromLTWH(
+          left,
+          top,
+          width,
+          height * 0.15,
+        ),
+        goodColor.withOpacity(0.08),
+      );
+      _paintHealthBand(
+        canvas,
+        Rect.fromLTWH(
+          left,
+          top + height * 0.15,
+          width,
+          height * 0.15,
+        ),
+        goodColor.withOpacity(0.04),
+      );
+      _paintHealthBand(
+        canvas,
+        Rect.fromLTWH(
+          left,
+          top + height * 0.30,
+          width,
+          height * 0.15,
+        ),
+        warningColor.withOpacity(0.05),
+      );
+      _paintHealthBand(
+        canvas,
+        Rect.fromLTWH(
+          left,
+          top + height * 0.45,
+          width,
+          height * 0.55,
+        ),
+        dangerColor.withOpacity(0.045),
+      );
+    } else {
+      minValue = 0;
+      final valueMax = values.fold<double>(
+        0,
+        (a, b) => math.max(a, b).toDouble(),
+      );
+      final targetHighs = days
+          .map((day) => day.targetFor(metricKey)?.high)
+          .whereType<double>()
+          .toList();
+      final targetMax = targetHighs.isEmpty
+          ? 0.0
+          : targetHighs.fold<double>(
+              0,
+              (a, b) => math.max(a, b).toDouble(),
+            );
+      maxValue = math
+          .max(
+            1.0,
+            math.max(valueMax, targetMax).toDouble() * 1.18,
+          )
+          .toDouble();
+    }
 
     final gridPaint = Paint()
-      ..color = gridColor
+      ..color = gridColor.withOpacity(0.55)
       ..strokeWidth = 1;
-    final linePaint = Paint()
-      ..color = lineColor
-      ..strokeWidth = 3
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
-    final pointPaint = Paint()
-      ..color = pointColor
-      ..style = PaintingStyle.fill;
 
-    for (final score in const [0, 25, 50, 75, 100]) {
-      final y = top + height * (1 - score / 100);
-      canvas.drawLine(
-        Offset(left, y),
-        Offset(left + width, y),
-        gridPaint,
-      );
+    for (var i = 0; i <= 4; i++) {
+      final y = top + height * i / 4;
+      canvas.drawLine(Offset(left, y), Offset(left + width, y), gridPaint);
+      final labelValue = maxValue - (maxValue - minValue) * i / 4;
       _paintText(
         canvas,
-        '$score',
+        _axisLabel(labelValue),
         Offset(0, y - 7),
         textColor,
         10,
       );
     }
 
-    if (days.isEmpty) return;
+    if (category != InsightCategory.health) {
+      final target = days.last.targetFor(metricKey);
+      if (target != null) {
+        final low = target.low;
+        final high = target.high;
+        if (low != null && high != null && high > low) {
+          final yHigh = _yFor(high, minValue, maxValue, top, height);
+          final yLow = _yFor(low, minValue, maxValue, top, height);
+          canvas.drawRect(
+            Rect.fromLTRB(left, yHigh, left + width, yLow),
+            Paint()..color = targetColor.withOpacity(0.10),
+          );
+        } else {
+          final reference = target.high ?? target.reference;
+          if (reference != null) {
+            final y = _yFor(reference, minValue, maxValue, top, height);
+            canvas.drawLine(
+              Offset(left, y),
+              Offset(left + width, y),
+              Paint()
+                ..color = targetColor.withOpacity(0.65)
+                ..strokeWidth = 1.4,
+            );
+          }
+        }
+      }
+    }
 
     final points = <Offset>[];
-    for (var index = 0; index < days.length; index++) {
+    for (var index = 0; index < values.length; index++) {
       final x = days.length == 1
           ? left + width / 2
           : left + width * index / (days.length - 1);
-      final score = days[index].overallHealthScore
-          .clamp(0.0, 100.0)
-          .toDouble();
-      final y = top + height * (1 - score / 100);
+      final y = _yFor(
+        values[index],
+        minValue,
+        maxValue,
+        top,
+        height,
+      );
       points.add(Offset(x, y));
     }
 
@@ -366,21 +600,35 @@ class _HealthChartPainter extends CustomPainter {
       for (final point in points.skip(1)) {
         path.lineTo(point.dx, point.dy);
       }
-      canvas.drawPath(path, linePaint);
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = lineColor
+          ..strokeWidth = 3
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round,
+      );
     }
 
     for (var index = 0; index < points.length; index++) {
-      canvas.drawCircle(points[index], 5, pointPaint);
+      final selected = selectedDate != null &&
+          _sameDay(days[index].date, selectedDate!);
       canvas.drawCircle(
         points[index],
-        2,
+        selected ? 7 : 5,
+        Paint()..color = selected ? targetColor : lineColor,
+      );
+      canvas.drawCircle(
+        points[index],
+        selected ? 3 : 2,
         Paint()..color = Colors.white,
       );
 
       final showLabel = days.length <= 7 ||
           index == 0 ||
           index == days.length - 1 ||
-          index % math.max(1, (days.length / 5).round()) == 0;
+          index % math.max(1, (days.length / 5).round()).toInt() == 0;
       if (showLabel) {
         final date = days[index].date;
         _paintText(
@@ -394,66 +642,289 @@ class _HealthChartPainter extends CustomPainter {
     }
   }
 
+  double _yFor(
+    double value,
+    double min,
+    double max,
+    double top,
+    double height,
+  ) {
+    if ((max - min).abs() < 0.000001) return top + height / 2;
+    final normalized = ((value - min) / (max - min)).clamp(0.0, 1.0);
+    return top + height * (1 - normalized);
+  }
+
+  void _paintHealthBand(Canvas canvas, Rect rect, Color color) {
+    canvas.drawRect(rect, Paint()..color = color);
+  }
+
   void _paintText(
     Canvas canvas,
     String text,
     Offset offset,
     Color color,
-    double size,
+    double fontSize,
   ) {
     final painter = TextPainter(
       text: TextSpan(
         text: text,
-        style: TextStyle(color: color, fontSize: size),
+        style: TextStyle(color: color, fontSize: fontSize),
       ),
       textDirection: TextDirection.ltr,
     )..layout();
     painter.paint(canvas, offset);
   }
 
+  String _axisLabel(double value) {
+    if (category == InsightCategory.health) {
+      return value.round().toString();
+    }
+    if (value >= 1000) return '${(value / 1000).toStringAsFixed(1)}k';
+    if (value >= 100) return value.round().toString();
+    if (value >= 10) return value.toStringAsFixed(0);
+    return value.toStringAsFixed(1);
+  }
+
   @override
-  bool shouldRepaint(covariant _HealthChartPainter oldDelegate) {
+  bool shouldRepaint(covariant _MetricChartPainter oldDelegate) {
     return oldDelegate.days != days ||
-        oldDelegate.lineColor != lineColor ||
-        oldDelegate.gridColor != gridColor;
+        oldDelegate.category != category ||
+        oldDelegate.metricKey != metricKey ||
+        oldDelegate.selectedDate != selectedDate ||
+        oldDelegate.lineColor != lineColor;
   }
 }
 
-class _MacroSummary extends StatelessWidget {
-  const _MacroSummary({required this.insights});
+class _SelectedDayCard extends StatelessWidget {
+  const _SelectedDayCard({
+    required this.day,
+    required this.category,
+    required this.metricKey,
+  });
+
+  final DailyNutritionInsight day;
+  final InsightCategory category;
+  final String metricKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final value = day.metricValue(category, metricKey);
+    final target = category == InsightCategory.health
+        ? null
+        : day.targetFor(metricKey);
+    if (value == null) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.primaryContainer.withOpacity(0.32),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: theme.colorScheme.primary.withOpacity(0.22),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            _fullDate(day.date),
+            style: theme.textTheme.titleMedium?.copyWith(
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '${day.mealCount} ${day.mealCount == 1 ? 'meal' : 'meals'} · ${day.calories.round()} kcal',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  friendlyMetricName(metricKey),
+                  style: theme.textTheme.bodyLarge,
+                ),
+              ),
+              Text(
+                _metricDisplayValue(category, metricKey, value),
+                style: theme.textTheme.titleLarge?.copyWith(
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+          if (category == InsightCategory.health) ...[
+            const SizedBox(height: 4),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Text(
+                healthStatusLabel(value),
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: _healthColor(value),
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+            if (metricKey != 'overall') ...[
+              const SizedBox(height: 14),
+              ...day.mealImpacts
+                  .where((meal) => meal.healthScores[metricKey] != null)
+                  .map(
+                    (meal) => _MealImpactRow(
+                      mealName: meal.mealName,
+                      score: meal.healthScores[metricKey]!,
+                      dailyScore: value,
+                    ),
+                  ),
+            ],
+          ] else if (target != null) ...[
+            const SizedBox(height: 8),
+            _TargetStatus(
+              value: value,
+              target: target,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _MealImpactRow extends StatelessWidget {
+  const _MealImpactRow({
+    required this.mealName,
+    required this.score,
+    required this.dailyScore,
+  });
+
+  final String mealName;
+  final double score;
+  final double dailyScore;
+
+  @override
+  Widget build(BuildContext context) {
+    final difference = score - dailyScore;
+    final icon = difference.abs() < 2
+        ? Icons.remove_rounded
+        : difference > 0
+            ? Icons.arrow_upward_rounded
+            : Icons.arrow_downward_rounded;
+    final color = difference.abs() < 2
+        ? Theme.of(context).colorScheme.onSurfaceVariant
+        : difference > 0
+            ? Colors.green
+            : Theme.of(context).colorScheme.error;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              mealName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 5),
+          Text(
+            score.round().toString(),
+            style: TextStyle(
+              color: color,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TargetStatus extends StatelessWidget {
+  const _TargetStatus({
+    required this.value,
+    required this.target,
+  });
+
+  final double value;
+  final NutrientTargetBand target;
+
+  @override
+  Widget build(BuildContext context) {
+    final state = target.classify(value);
+    final theme = Theme.of(context);
+    final (label, color) = switch (state) {
+      BalanceState.low => ('Below target', Colors.orange),
+      BalanceState.balanced => ('In target range', Colors.green),
+      BalanceState.high => ('Above target', theme.colorScheme.error),
+      BalanceState.unknown => (
+          'Target unavailable',
+          theme.colorScheme.onSurfaceVariant,
+        ),
+    };
+
+    return Row(
+      children: [
+        Icon(Icons.circle, size: 10, color: color),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Text(
+            '$label · ${_targetDescription(target)}',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _HealthDomainOverview extends StatelessWidget {
+  const _HealthDomainOverview({
+    required this.insights,
+    required this.onTap,
+  });
 
   final NutritionInsights insights;
+  final ValueChanged<String> onTap;
 
   @override
   Widget build(BuildContext context) {
-    return GridView.count(
-      crossAxisCount: 2,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      crossAxisSpacing: 10,
-      mainAxisSpacing: 10,
-      childAspectRatio: 1.55,
+    final trends = insights.healthDomainTrends();
+    if (trends.isEmpty) {
+      return const _MessageCard(
+        icon: Icons.favorite_border_rounded,
+        text: 'Health-domain scores will appear after scored meals are logged.',
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _MacroTile(
-          label: 'Protein',
-          value: _macro(insights.averageDailyMacros, const ['protein_g', 'protein']),
+        const _SectionTitle('Health domains'),
+        const SizedBox(height: 6),
+        Text(
+          'A dietary score, not a diagnosis. Lower-scoring domains are shown first so changes are easier to monitor.',
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
         ),
-        _MacroTile(
-          label: 'Carbohydrates',
-          value: _macro(
-            insights.averageDailyMacros,
-            const ['carbohydrate_g', 'carbohydrates_g', 'carbs_g', 'carbs'],
-          ),
-        ),
-        _MacroTile(
-          label: 'Fat',
-          value: _macro(insights.averageDailyMacros, const ['fat_g', 'total_fat_g', 'fat']),
-        ),
-        _MacroTile(
-          label: 'Fiber',
-          value: _macro(
-            insights.averageDailyMacros,
-            const ['fiber_g', 'fibre_g', 'dietary_fiber_g'],
+        const SizedBox(height: 12),
+        ...trends.map(
+          (trend) => Padding(
+            padding: const EdgeInsets.only(bottom: 9),
+            child: _DomainTrendCard(
+              trend: trend,
+              onTap: () => onTap(trend.key),
+            ),
           ),
         ),
       ],
@@ -461,38 +932,411 @@ class _MacroSummary extends StatelessWidget {
   }
 }
 
-class _DayMacroGrid extends StatelessWidget {
-  const _DayMacroGrid({required this.macros});
-  final Map<String, double> macros;
+class _DomainTrendCard extends StatelessWidget {
+  const _DomainTrendCard({
+    required this.trend,
+    required this.onTap,
+  });
+
+  final HealthDomainTrend trend;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
+    final theme = Theme.of(context);
+    final delta = trend.delta;
+    final scoreColor = _healthColor(trend.averageScore);
+
+    return Material(
+      color: theme.colorScheme.surfaceContainerLow,
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(18),
+        child: Padding(
+          padding: const EdgeInsets.all(15),
+          child: Row(
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: scoreColor.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Text(
+                  trend.averageScore.round().toString(),
+                  style: TextStyle(
+                    color: scoreColor,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      trend.label,
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      healthStatusLabel(trend.averageScore),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scoreColor,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (delta != null)
+                _DeltaBadge(
+                  value: delta,
+                  suffix: ' pts',
+                  positiveIsGood: true,
+                ),
+              const SizedBox(width: 4),
+              const Icon(Icons.chevron_right_rounded),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _NutritionBalanceSection extends StatelessWidget {
+  const _NutritionBalanceSection({
+    required this.insights,
+    required this.category,
+    required this.onTap,
+  });
+
+  final NutritionInsights insights;
+  final InsightCategory category;
+  final ValueChanged<String> onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final summaries = insights.balanceSummaries(category);
+    final theme = Theme.of(context);
+
+    if (summaries.isEmpty) {
+      return const _MessageCard(
+        icon: Icons.balance_rounded,
+        text: 'No usable daily target/reference data is available for this category yet.',
+      );
+    }
+
+    final low = summaries
+        .where((item) => item.dominantState == BalanceState.low)
+        .toList();
+    final balanced = summaries
+        .where((item) => item.dominantState == BalanceState.balanced)
+        .toList();
+    final high = summaries
+        .where((item) => item.dominantState == BalanceState.high)
+        .toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _SmallValueChip(label: 'Protein', value: _macro(macros, const ['protein_g', 'protein'])),
-        _SmallValueChip(label: 'Carbs', value: _macro(macros, const ['carbohydrate_g', 'carbohydrates_g', 'carbs_g', 'carbs'])),
-        _SmallValueChip(label: 'Fat', value: _macro(macros, const ['fat_g', 'total_fat_g', 'fat'])),
-        _SmallValueChip(label: 'Fiber', value: _macro(macros, const ['fiber_g', 'fibre_g', 'dietary_fiber_g'])),
+        const _SectionTitle('Nutrition balance'),
+        const SizedBox(height: 6),
+        Text(
+          'Based on how often each nutrient was below, within, or above its available daily target/reference.',
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: 12),
+        if (low.isNotEmpty)
+          _BalanceGroup(
+            title: 'Needs more',
+            color: Colors.orange,
+            items: low,
+            onTap: onTap,
+          ),
+        if (balanced.isNotEmpty)
+          _BalanceGroup(
+            title: 'Well balanced',
+            color: Colors.green,
+            items: balanced,
+            onTap: onTap,
+          ),
+        if (high.isNotEmpty)
+          _BalanceGroup(
+            title: 'Frequently above target',
+            color: theme.colorScheme.error,
+            items: high,
+            onTap: onTap,
+          ),
       ],
     );
   }
 }
 
-class _SmallValueChip extends StatelessWidget {
-  const _SmallValueChip({required this.label, required this.value});
+class _BalanceGroup extends StatelessWidget {
+  const _BalanceGroup({
+    required this.title,
+    required this.color,
+    required this.items,
+    required this.onTap,
+  });
+
+  final String title;
+  final Color color;
+  final List<NutrientBalanceSummary> items;
+  final ValueChanged<String> onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: color.withOpacity(0.16)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: theme.textTheme.titleSmall?.copyWith(
+              color: color,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 8),
+          ...items.take(7).map(
+            (item) => InkWell(
+              onTap: () => onTap(item.key),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 7),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        item.label,
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                    Text(
+                      _balanceFrequency(item),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    const Icon(Icons.chevron_right_rounded, size: 18),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _WhatChangedSection extends StatelessWidget {
+  const _WhatChangedSection({
+    required this.insights,
+    required this.category,
+  });
+
+  final NutritionInsights insights;
+  final InsightCategory category;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    if (insights.previousDailyInsights.isEmpty) {
+      return const _MessageCard(
+        icon: Icons.compare_arrows_rounded,
+        text: 'Keep logging meals. Quinone will compare this period with the previous one when enough history is available.',
+      );
+    }
+
+    if (category == InsightCategory.health) {
+      final changes = insights
+          .healthDomainTrends()
+          .where((item) => item.delta != null)
+          .toList()
+        ..sort(
+          (a, b) => b.delta!.abs().compareTo(a.delta!.abs()),
+        );
+      if (changes.isEmpty) return const SizedBox.shrink();
+
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _SectionTitle('What changed'),
+          const SizedBox(height: 6),
+          Text(
+            'Compared with the previous ${insights.daysWithMeals == 1 ? 'tracked period' : 'period'}.',
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 10),
+          ...changes.take(4).map(
+            (item) => _ChangeRow(
+              label: item.label,
+              detail: '${item.averageScore.round()}/100',
+              delta: item.delta!,
+              suffix: ' pts',
+              positiveIsGood: true,
+            ),
+          ),
+        ],
+      );
+    }
+
+    final changes = insights.metricChanges(category);
+    if (changes.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const _SectionTitle('What changed'),
+        const SizedBox(height: 6),
+        Text(
+          'Largest changes in average daily intake versus the previous period.',
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: 10),
+        ...changes.take(4).map(
+          (item) => _ChangeRow(
+            label: item.label,
+            detail:
+                '${_compactNumber(item.currentAverage)}${item.unit.isEmpty ? '' : ' ${item.unit}'} / day',
+            delta: item.percentChange,
+            suffix: '%',
+            positiveIsGood: null,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ChangeRow extends StatelessWidget {
+  const _ChangeRow({
+    required this.label,
+    required this.detail,
+    required this.delta,
+    required this.suffix,
+    required this.positiveIsGood,
+  });
+
   final String label;
-  final double value;
+  final String detail;
+  final double delta;
+  final String suffix;
+  final bool? positiveIsGood;
 
   @override
   Widget build(BuildContext context) {
-    return Chip(label: Text('$label ${value.toStringAsFixed(1)} g'));
+    final theme = Theme.of(context);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  detail,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          _DeltaBadge(
+            value: delta,
+            suffix: suffix,
+            positiveIsGood: positiveIsGood,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DeltaBadge extends StatelessWidget {
+  const _DeltaBadge({
+    required this.value,
+    required this.suffix,
+    required this.positiveIsGood,
+  });
+
+  final double value;
+  final String suffix;
+  final bool? positiveIsGood;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final positive = value >= 0;
+    Color color;
+    if (positiveIsGood == null) {
+      color = theme.colorScheme.primary;
+    } else {
+      final good = positiveIsGood! ? positive : !positive;
+      color = good ? Colors.green : theme.colorScheme.error;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        '${positive ? '+' : ''}${value.toStringAsFixed(value.abs() >= 10 ? 0 : 1)}$suffix',
+        style: theme.textTheme.labelMedium?.copyWith(
+          color: color,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+    );
   }
 }
 
 class _StatCard extends StatelessWidget {
-  const _StatCard({required this.label, required this.value, required this.icon});
+  const _StatCard({
+    required this.label,
+    required this.value,
+    required this.icon,
+  });
+
   final String label;
   final String value;
   final IconData icon;
@@ -501,20 +1345,21 @@ class _StatCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Card(
+      elevation: 0,
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(icon),
-            const SizedBox(height: 16),
+            Icon(icon, color: theme.colorScheme.primary),
+            const SizedBox(height: 14),
             Text(
               value,
               style: theme.textTheme.headlineMedium?.copyWith(
                 fontWeight: FontWeight.w900,
               ),
             ),
-            const SizedBox(height: 4),
+            const SizedBox(height: 3),
             Text(label),
           ],
         ),
@@ -523,108 +1368,9 @@ class _StatCard extends StatelessWidget {
   }
 }
 
-class _MacroTile extends StatelessWidget {
-  const _MacroTile({required this.label, required this.value});
-  final String label;
-  final double value;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(label, style: theme.textTheme.bodyLarge),
-          const SizedBox(height: 4),
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            child: Text(
-              '${value.toStringAsFixed(1)} g',
-              style: theme.textTheme.headlineSmall?.copyWith(
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ProgressRow extends StatelessWidget {
-  const _ProgressRow({required this.label, required this.percent});
-  final String label;
-  final double percent;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Expanded(child: Text(label)),
-              Text('${percent.round()}%'),
-            ],
-          ),
-          const SizedBox(height: 7),
-          LinearProgressIndicator(
-            value: (percent / 100).clamp(0.0, 1.0).toDouble(),
-            borderRadius: BorderRadius.circular(999),
-            minHeight: 7,
-            color: percent > 100
-                ? theme.colorScheme.error
-                : theme.colorScheme.primary,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ScoreRow extends StatelessWidget {
-  const _ScoreRow({required this.label, required this.score});
-  final String label;
-  final double score;
-
-  @override
-  Widget build(BuildContext context) {
-    return _ProgressRow(label: label, percent: score);
-  }
-}
-
-class _DetailRow extends StatelessWidget {
-  const _DetailRow({required this.label, required this.value});
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 7),
-      child: Row(
-        children: [
-          Expanded(child: Text(label)),
-          const SizedBox(width: 12),
-          Text(value, style: const TextStyle(fontWeight: FontWeight.w800)),
-        ],
-      ),
-    );
-  }
-}
-
 class _SectionTitle extends StatelessWidget {
   const _SectionTitle(this.text);
+
   final String text;
 
   @override
@@ -638,8 +1384,47 @@ class _SectionTitle extends StatelessWidget {
   }
 }
 
+class _MessageCard extends StatelessWidget {
+  const _MessageCard({
+    required this.icon,
+    required this.text,
+  });
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: theme.colorScheme.primary),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              text,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _EmptyInsights extends StatelessWidget {
   const _EmptyInsights({required this.theme});
+
   final ThemeData theme;
 
   @override
@@ -674,45 +1459,82 @@ class _EmptyInsights extends StatelessWidget {
   }
 }
 
-double _macro(Map<String, double> source, List<String> keys) {
-  for (final key in keys) {
-    final value = source[key];
-    if (value != null) return value;
+List<(String, String)> _metricsFor(
+  NutritionInsights insights,
+  InsightCategory category,
+) {
+  switch (category) {
+    case InsightCategory.health:
+      return [
+        ('overall', 'Overall score'),
+        for (final key in insights.healthDomainKeys)
+          (key, friendlyMetricName(key)),
+      ];
+    case InsightCategory.macros:
+      return [
+        for (final key in insights.macroKeys)
+          (key, friendlyMetricName(key)),
+      ];
+    case InsightCategory.micronutrients:
+      return [
+        for (final key in insights.micronutrientKeys)
+          (key, friendlyMetricName(key)),
+      ];
   }
-  return 0;
 }
 
-String _friendlyName(String value) {
-  const aliases = <String, String>{
-    'protein_g': 'Protein',
-    'carbohydrate_g': 'Carbohydrates',
-    'fat_g': 'Fat',
-    'fiber_g': 'Fiber',
-  };
-  if (aliases[value] != null) return aliases[value]!;
-  return value
-      .replaceAll(RegExp(r'_(mg|ug|mcg|g)$'), '')
-      .replaceAll('_', ' ')
-      .split(RegExp(r'\s+'))
-      .where((word) => word.isNotEmpty)
-      .map((word) => '${word[0].toUpperCase()}${word.substring(1).toLowerCase()}')
-      .join(' ');
+String _metricDisplayValue(
+  InsightCategory category,
+  String key,
+  double value,
+) {
+  if (category == InsightCategory.health) {
+    return '${value.round()}/100';
+  }
+  final unit = unitForMetric(key);
+  return '${_compactNumber(value)}${unit.isEmpty ? '' : ' $unit'}';
 }
 
-String _formatNutrient(String key, double value) {
-  final unit = key.endsWith('_ug') || key.endsWith('_mcg')
-      ? 'µg'
-      : key.endsWith('_mg')
-          ? 'mg'
-          : key.endsWith('_g')
-              ? 'g'
-              : '';
-  final text = value >= 100
-      ? value.toStringAsFixed(0)
-      : value >= 10
-          ? value.toStringAsFixed(1)
-          : value.toStringAsFixed(2);
-  return unit.isEmpty ? text : '$text $unit';
+String _compactNumber(double value) {
+  if (value.abs() >= 100) return value.toStringAsFixed(0);
+  if (value.abs() >= 10) return value.toStringAsFixed(1);
+  return value.toStringAsFixed(2);
+}
+
+String _targetDescription(NutrientTargetBand target) {
+  final unit = target.unit.isEmpty ? '' : ' ${target.unit}';
+  if (target.isUpperLimit) {
+    final ceiling = target.high ?? target.reference;
+    if (ceiling == null) return 'Daily reference';
+    return 'Daily upper reference: ${_compactNumber(ceiling)}$unit';
+  }
+  if (target.low != null && target.high != null) {
+    return 'Target range: ${_compactNumber(target.low!)}–${_compactNumber(target.high!)}$unit';
+  }
+  if (target.reference != null) {
+    return 'Daily reference: ${_compactNumber(target.reference!)}$unit';
+  }
+  return 'Daily target';
+}
+
+String _balanceFrequency(NutrientBalanceSummary item) {
+  switch (item.dominantState) {
+    case BalanceState.low:
+      return '${item.lowDays} of ${item.trackedDays} days low';
+    case BalanceState.balanced:
+      return '${item.balancedDays} of ${item.trackedDays} days in range';
+    case BalanceState.high:
+      return '${item.highDays} of ${item.trackedDays} days high';
+    case BalanceState.unknown:
+      return 'No target data';
+  }
+}
+
+Color _healthColor(double score) {
+  if (score >= 85) return Colors.green;
+  if (score >= 70) return Colors.lightGreen.shade700;
+  if (score >= 55) return Colors.orange;
+  return Colors.red;
 }
 
 String _fullDate(DateTime date) {
@@ -732,3 +1554,6 @@ String _fullDate(DateTime date) {
   ];
   return '${date.day} ${months[date.month - 1]} ${date.year}';
 }
+
+bool _sameDay(DateTime a, DateTime b) =>
+    a.year == b.year && a.month == b.month && a.day == b.day;
