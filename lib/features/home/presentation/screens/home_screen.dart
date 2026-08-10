@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../../history/models/analysis_history_record.dart';
 import '../../../history/providers/analysis_history_provider.dart';
+import '../../../insights/models/nutrition_insights.dart';
 import '../../../profile/providers/profile_provider.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
@@ -35,7 +36,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final today = _todayRecords(records);
     final calories = today.fold<double>(0, (sum, item) => sum + item.calories);
     final protein = today.fold<double>(0, (sum, item) => sum + item.protein);
-    final health = _averageDailyHealth(today);
+    final todayInsight = NutritionInsights.fromRecords(
+      records,
+      const Duration(days: 1),
+    ).dailyInsights;
+    final daily = todayInsight.isEmpty ? null : todayInsight.last;
+    final health = daily == null || daily.overallHealthScore <= 0
+        ? null
+        : daily.overallHealthScore;
     final name = profileState.profile.displayName?.trim();
 
     return Scaffold(
@@ -127,6 +135,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           suffix: health == null ? null : '/100',
                           icon: Icons.favorite_rounded,
                           color: Colors.red,
+                          onTap: daily == null
+                              ? null
+                              : () => _showTodayHealthProfile(
+                                    context,
+                                    daily,
+                                  ),
                         ),
                       ),
                     ],
@@ -322,6 +336,7 @@ class _StatCard extends StatelessWidget {
     required this.icon,
     required this.color,
     this.suffix,
+    this.onTap,
   });
 
   final String title;
@@ -329,47 +344,63 @@ class _StatCard extends StatelessWidget {
   final String? suffix;
   final IconData icon;
   final Color color;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLow,
+    return Material(
+      color: theme.colorScheme.surfaceContainerLow,
+      borderRadius: BorderRadius.circular(22),
+      child: InkWell(
+        onTap: onTap,
         borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-      ),
-      child: Column(
-        children: [
-          CircleAvatar(
-            backgroundColor: color.withOpacity(0.12),
-            child: Icon(icon, color: color),
+        child: Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: theme.colorScheme.outlineVariant),
           ),
-          const SizedBox(height: 16),
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.baseline,
-              textBaseline: TextBaseline.alphabetic,
-              children: [
-                Text(
-                  value,
-                  style: theme.textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.w900,
-                  ),
+          child: Column(
+            children: [
+              CircleAvatar(
+                backgroundColor: color.withOpacity(0.12),
+                child: Icon(icon, color: color),
+              ),
+              const SizedBox(height: 16),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(
+                      value,
+                      style: theme.textTheme.headlineSmall?.copyWith(
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    if (suffix != null) ...[
+                      const SizedBox(width: 3),
+                      Text(suffix!, style: theme.textTheme.labelMedium),
+                    ],
+                  ],
                 ),
-                if (suffix != null) ...[
-                  const SizedBox(width: 3),
-                  Text(suffix!, style: theme.textTheme.labelMedium),
-                ],
+              ),
+              const SizedBox(height: 5),
+              Text(title),
+              if (onTap != null) ...[
+                const SizedBox(height: 3),
+                Icon(
+                  Icons.touch_app_outlined,
+                  size: 14,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
               ],
-            ),
+            ],
           ),
-          const SizedBox(height: 5),
-          Text(title),
-        ],
+        ),
       ),
     );
   }
@@ -443,18 +474,225 @@ List<AnalysisHistoryRecord> _todayRecords(List<AnalysisHistoryRecord> records) {
   }).toList(growable: false);
 }
 
-double? _averageDailyHealth(List<AnalysisHistoryRecord> records) {
-  final values = <double>[];
-  for (final record in records) {
-    if (record.healthScores.isEmpty) continue;
-    values.add(
-      record.healthScores.values.reduce((a, b) => a + b) /
-          record.healthScores.length,
+
+void _showTodayHealthProfile(
+  BuildContext context,
+  DailyNutritionInsight day,
+) {
+  showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    useSafeArea: true,
+    isScrollControlled: true,
+    builder: (context) {
+      final theme = Theme.of(context);
+      final scores = day.healthScores.entries.toList()
+        ..sort((a, b) => a.value.compareTo(b.value));
+
+      return DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.78,
+        minChildSize: 0.50,
+        maxChildSize: 0.94,
+        builder: (context, controller) => ListView(
+          controller: controller,
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 30),
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    "Today's Health Profile",
+                    style: theme.textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+                _HomeScorePill(score: day.overallHealthScore),
+              ],
+            ),
+            const SizedBox(height: 5),
+            Text(
+              '${day.mealCount} ${day.mealCount == 1 ? 'meal' : 'meals'} analysed today',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'These are dietary health-domain scores, not medical diagnoses. Tap a domain to see how individual meals compared with today’s combined score.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 20),
+            if (scores.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 30),
+                child: Center(
+                  child: Text('No health-domain scores are available today.'),
+                ),
+              )
+            else
+              ...scores.map(
+                (entry) => Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: _HomeDomainTile(
+                    domainKey: entry.key,
+                    score: entry.value,
+                    meals: day.mealImpacts,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+class _HomeScorePill extends StatelessWidget {
+  const _HomeScorePill({required this.score});
+
+  final double score;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _homeHealthColor(score);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        '${score.round()}/100',
+        style: TextStyle(
+          color: color,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
     );
   }
-  if (values.isEmpty) return null;
-  return values.reduce((a, b) => a + b) / values.length;
 }
+
+class _HomeDomainTile extends StatelessWidget {
+  const _HomeDomainTile({
+    required this.domainKey,
+    required this.score,
+    required this.meals,
+  });
+
+  final String domainKey;
+  final double score;
+  final List<MealHealthImpact> meals;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = _homeHealthColor(score);
+    final relevantMeals = meals
+        .where((meal) => meal.healthScores[domainKey] != null)
+        .toList(growable: false);
+
+    return Material(
+      color: theme.colorScheme.surfaceContainerLow,
+      borderRadius: BorderRadius.circular(18),
+      child: ExpansionTile(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+        ),
+        collapsedShape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+        ),
+        leading: Container(
+          width: 42,
+          height: 42,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.12),
+            borderRadius: BorderRadius.circular(13),
+          ),
+          child: Text(
+            score.round().toString(),
+            style: TextStyle(
+              color: color,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+        title: Text(
+          friendlyMetricName(domainKey),
+          style: const TextStyle(fontWeight: FontWeight.w800),
+        ),
+        subtitle: Text(
+          healthStatusLabel(score),
+          style: TextStyle(color: color),
+        ),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+        children: [
+          if (relevantMeals.isEmpty)
+            Text(
+              'No meal-level breakdown is available.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            )
+          else
+            ...relevantMeals.map(
+              (meal) {
+                final mealScore = meal.healthScores[domainKey]!;
+                final delta = mealScore - score;
+                final near = delta.abs() < 2;
+                final deltaColor = near
+                    ? theme.colorScheme.onSurfaceVariant
+                    : delta > 0
+                        ? Colors.green
+                        : theme.colorScheme.error;
+                final icon = near
+                    ? Icons.remove_rounded
+                    : delta > 0
+                        ? Icons.arrow_upward_rounded
+                        : Icons.arrow_downward_rounded;
+
+                return Padding(
+                  padding: const EdgeInsets.only(top: 9),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          meal.mealName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      Icon(icon, size: 16, color: deltaColor),
+                      const SizedBox(width: 5),
+                      Text(
+                        '${mealScore.round()}/100',
+                        style: TextStyle(
+                          color: deltaColor,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+Color _homeHealthColor(double score) {
+  if (score >= 85) return Colors.green;
+  if (score >= 70) return Colors.lightGreen.shade700;
+  if (score >= 55) return Colors.orange;
+  return Colors.red;
+}
+
 
 String _greeting() {
   final hour = DateTime.now().hour;
