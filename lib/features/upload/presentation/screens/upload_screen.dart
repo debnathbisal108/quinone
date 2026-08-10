@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../profile/providers/profile_provider.dart';
+import '../../../recipe/models/manual_recipe.dart';
 import '../../providers/upload_provider.dart';
 import '../widgets/analyze_button.dart';
 import '../widgets/back_label_request_card.dart';
@@ -107,6 +108,37 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
 
     if (status == 'waiting_for_back_label') {
       _handledResponse = true;
+      return;
+    }
+
+
+    if (status == 'waiting_for_meal_confirmation') {
+      final rawDraft = data['meal_draft'];
+      if (rawDraft is! Map) {
+        _handledResponse = true;
+        _showMessage('The server returned an invalid meal draft.');
+        return;
+      }
+
+      try {
+        final recipe = ManualRecipe.fromJson(
+          Map<String, dynamic>.from(rawDraft),
+        );
+        if (recipe.ingredients.isEmpty) {
+          throw const FormatException('Meal draft contains no ingredients.');
+        }
+        _handledResponse = true;
+        context.push(
+          '/recipe',
+          extra: {
+            'recipe': recipe.toJson(),
+            'photo_review': true,
+          },
+        );
+      } catch (_) {
+        _handledResponse = true;
+        _showMessage('Couldn’t prepare the detected meal for review.');
+      }
       return;
     }
 
