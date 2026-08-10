@@ -13,7 +13,14 @@ import '../../repositories/saved_recipe_repository.dart';
 import '../../services/recipe_service.dart';
 
 class RecipeBuilderScreen extends ConsumerStatefulWidget {
-  const RecipeBuilderScreen({super.key});
+  const RecipeBuilderScreen({
+    super.key,
+    this.initialRecipe,
+    this.photoReview = false,
+  });
+
+  final ManualRecipe? initialRecipe;
+  final bool photoReview;
 
   @override
   ConsumerState<RecipeBuilderScreen> createState() => _RecipeBuilderScreenState();
@@ -39,6 +46,13 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
   @override
   void initState() {
     super.initState();
+    final initial = widget.initialRecipe;
+    if (initial != null) {
+      _nameController.text = initial.name;
+      _servingsMadeController.text = _format(initial.servingsMade);
+      _servingsEatenController.text = _format(initial.servingsEaten);
+      _ingredients = [...initial.ingredients];
+    }
     _loadSaved();
   }
 
@@ -190,6 +204,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       ingredients: List.unmodifiable(_ingredients),
       servingsMade: made,
       servingsEaten: eaten,
+      source: widget.photoReview ? 'photo_confirmed' : 'manual',
     );
   }
 
@@ -247,21 +262,25 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     return Scaffold(
-      appBar: AppBar(title: const Text('Add recipe')),
+      appBar: AppBar(title: Text(widget.photoReview ? 'Review detected meal' : 'Add recipe')),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 36),
           children: [
             Text(
-              'Build your meal from exact ingredients',
+              widget.photoReview
+                  ? 'Check what Quinone detected'
+                  : 'Build your meal from exact ingredients',
               style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900),
             ),
             const SizedBox(height: 8),
             Text(
-              'Search USDA foods, enter the amount used, and Quinone will skip image recognition.',
+              widget.photoReview
+                  ? 'Edit quantities, remove incorrect foods, or search and add anything the image missed. Final nutrition and health scores are calculated only after you confirm.'
+                  : 'Search USDA foods, enter the amount used, and Quinone will skip image recognition.',
               style: theme.textTheme.bodyLarge?.copyWith(color: scheme.onSurfaceVariant),
             ),
-            if (_savedRecipes.isNotEmpty) ...[
+            if (!widget.photoReview && _savedRecipes.isNotEmpty) ...[
               const SizedBox(height: 20),
               Text('Saved recipes', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800)),
               const SizedBox(height: 10),
@@ -458,7 +477,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
                   child: FilledButton.icon(
                     onPressed: _analyzing ? null : _analyze,
                     icon: const Icon(Icons.analytics_outlined),
-                    label: Text(_analyzing ? 'Analyzing…' : 'Analyze'),
+                    label: Text(_analyzing ? 'Analyzing…' : (widget.photoReview ? 'Confirm & analyze' : 'Analyze')),
                   ),
                 ),
               ],
