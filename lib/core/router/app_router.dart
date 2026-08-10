@@ -6,6 +6,7 @@ import '../../features/navigation/presentation/screens/bottom_navigation_screen.
 import '../../features/onboarding/presentation/screens/onboarding_screen.dart';
 import '../../features/profile/presentation/screens/profile_setup_screen.dart';
 import '../../features/recipe/presentation/screens/recipe_builder_screen.dart';
+import '../../features/recipe/models/manual_recipe.dart';
 import '../../features/result/models/analysis_result.dart';
 import '../../features/result/presentation/screens/result_screen.dart';
 import '../../features/upload/presentation/screens/upload_screen.dart';
@@ -31,7 +32,28 @@ class AppRouter {
       ),
       GoRoute(
         path: '/recipe',
-        builder: (context, state) => const RecipeBuilderScreen(),
+        builder: (context, state) {
+          ManualRecipe? initialRecipe;
+          var photoReview = false;
+          final extra = state.extra;
+          if (extra is Map) {
+            photoReview = extra['photo_review'] == true;
+            final rawRecipe = extra['recipe'];
+            if (rawRecipe is Map) {
+              try {
+                initialRecipe = ManualRecipe.fromJson(
+                  Map<String, dynamic>.from(rawRecipe),
+                );
+              } catch (_) {
+                initialRecipe = null;
+              }
+            }
+          }
+          return RecipeBuilderScreen(
+            initialRecipe: initialRecipe,
+            photoReview: photoReview,
+          );
+        },
       ),
       GoRoute(
         path: '/profile',
