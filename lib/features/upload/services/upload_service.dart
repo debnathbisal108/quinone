@@ -156,6 +156,7 @@ class UploadService {
       switch (progress.status) {
         case 'completed':
         case 'waiting_for_back_label':
+        case 'waiting_for_meal_confirmation':
         case 'no_food_detected':
           final result = progress.result;
           if (result == null) {
