@@ -25,10 +25,26 @@ _detail_cache_lock = asyncio.Lock()
 _detail_semaphore = asyncio.Semaphore(DETAIL_CONCURRENCY)
 
 _DATA_TYPE_SCORE = {
-    "Foundation": 40,
-    "SR Legacy": 34,
-    "Survey (FNDDS)": 27,
-    "Branded": 8,
+    "Foundation": 100,
+    "SR Legacy": 82,
+    "Survey (FNDDS)": 62,
+    "Branded": 18,
+}
+
+_PREPARATION_TERMS = {
+    "raw", "fresh", "cooked", "boiled", "fried", "baked", "roasted",
+    "frozen", "dried", "dry", "sweetened", "unsweetened", "canned",
+    "drained", "pasteurized", "powder", "ground", "whole", "sliced",
+    "chopped", "prepared",
+}
+
+# Strong clues that a result is a compound/product rather than the ingredient
+# itself. These are penalties only; they are not hard rejections because a
+# user may genuinely search for one of these prepared foods.
+_COMPOUND_TERMS = {
+    "pudding", "pastry", "granola", "cereal", "babyfood", "bar", "snack",
+    "cookie", "cake", "pie", "muffin", "bread", "sauce", "soup", "dip",
+    "sandwich", "pizza", "casserole", "meal", "mix", "filling",
 }
 
 
@@ -41,33 +57,124 @@ def _tokens(value: str) -> list[str]:
     return [token for token in re.split(r"\W+", value.lower()) if token]
 
 
-def _candidate_score(candidate: dict[str, Any], query: str) -> float:
+def _canonical_token(token: str) -> str:
+    token = token.lower().strip()
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 4 and token.endswith("es"):
+        return token[:-2]
+    if len(token) > 3 and token.endswith("s"):
+        return token[:-1]
+    return token
+
+
+def _token_matches(query_token: str, candidate_token: str) -> bool:
+    q = _canonical_token(query_token)
+    c = _canonical_token(candidate_token)
+    if q == c:
+        return True
+    # Supports type-ahead searches such as "blueberr" -> "blueberries".
+    if len(q) >= 4 and c.startswith(q):
+        return True
+    if len(c) >= 4 and q.startswith(c) and len(q) - len(c) <= 2:
+        return True
+    return False
+
+
+def _ordered_identity_match(query: str, description: str) -> tuple[int, float]:
+    """Return (identity tier, token coverage).
+
+    Tier 5: exact normalized description.
+    Tier 4: the description begins with the queried food identity.
+    Tier 3: all query identity tokens occur very early in the description.
+    Tier 2: all query identity tokens occur, but only later in a compound food.
+    Tier 1: partial token coverage.
+    """
+    q_tokens = [t for t in _tokens(query) if t not in _PREPARATION_TERMS]
+    d_tokens = _tokens(description)
+    if not q_tokens or not d_tokens:
+        return (0, 0.0)
+
+    matched_indices: list[int] = []
+    for q in q_tokens:
+        idx = next((i for i, d in enumerate(d_tokens) if _token_matches(q, d)), None)
+        if idx is not None:
+            matched_indices.append(idx)
+
+    coverage = len(matched_indices) / len(q_tokens)
+    normalized_q = " ".join(_canonical_token(t) for t in _tokens(query))
+    normalized_d = " ".join(_canonical_token(t) for t in d_tokens)
+    if normalized_q == normalized_d:
+        return (5, coverage)
+
+    if coverage == 1.0:
+        # All identity words must occupy the beginning of the USDA description
+        # to be considered the food itself. "Egg, yolk, raw" satisfies this;
+        # "Pudding ... egg yolk" does not.
+        early_limit = max(2, len(q_tokens) + 1)
+        if max(matched_indices) < early_limit and min(matched_indices) <= 1:
+            return (4, coverage)
+        if max(matched_indices) < 5:
+            return (3, coverage)
+        return (2, coverage)
+    if coverage > 0:
+        return (1, coverage)
+    return (0, 0.0)
+
+
+def _preparation_score(query: str, description: str) -> float:
+    q = {_canonical_token(t) for t in _tokens(query) if t in _PREPARATION_TERMS}
+    if not q:
+        # Neutral when user did not request a preparation state. Prefer raw/fresh
+        # only very slightly over altered/sweetened forms through source/identity.
+        return 0.0
+    d = {_canonical_token(t) for t in _tokens(description)}
+    matched = len(q & d)
+    return matched / len(q)
+
+
+def _looks_brand_specific(query: str, brand_owner: str) -> bool:
+    if not brand_owner:
+        return False
+    q_tokens = {_canonical_token(t) for t in _tokens(query)}
+    brand_tokens = {_canonical_token(t) for t in _tokens(brand_owner) if len(t) > 2}
+    return bool(q_tokens & brand_tokens)
+
+
+def _candidate_score(candidate: dict[str, Any], query: str) -> tuple:
     description = str(candidate.get("description") or "")
     data_type = str(candidate.get("dataType") or "")
     brand_owner = str(candidate.get("brandOwner") or candidate.get("brandName") or "")
-    q = query.lower().strip()
-    d = description.lower()
-    score = float(_DATA_TYPE_SCORE.get(data_type, 0))
 
-    if d == q:
-        score += 60
-    elif d.startswith(q):
-        score += 38
-    elif q in d:
-        score += 22
+    identity_tier, coverage = _ordered_identity_match(query, description)
+    prep_score = _preparation_score(query, description)
+    source_score = float(_DATA_TYPE_SCORE.get(data_type, 0))
 
-    query_tokens = set(_tokens(query))
-    description_tokens = set(_tokens(description))
-    if query_tokens:
-        score += 24 * len(query_tokens & description_tokens) / len(query_tokens)
+    d_tokens = _tokens(description)
+    q_tokens = _tokens(query)
+    extra_tokens = max(0, len(d_tokens) - len(q_tokens))
+    compound_count = sum(1 for token in d_tokens if token in _COMPOUND_TERMS)
 
-    # Generic/manual recipe searches should not be dominated by branded products.
-    if data_type == "Branded" and not any(token in brand_owner.lower() for token in query_tokens):
-        score -= 14
+    # Generic ingredient searches should almost never surface branded products
+    # above an equivalent Foundation/SR record. A brand-specific query can opt
+    # back into branded priority naturally.
+    branded_penalty = 0.0
+    if data_type == "Branded" and not _looks_brand_specific(query, brand_owner):
+        branded_penalty = 55.0
 
-    # Penalize obviously unrelated long descriptions.
-    score -= max(0, len(description_tokens) - len(query_tokens) - 8) * 0.35
-    return score
+    compound_penalty = compound_count * 16.0
+    verbosity_penalty = min(18.0, extra_tokens * 0.65)
+
+    # Sort tuple intentionally reflects product policy:
+    # identity relevance -> preparation relevance -> source quality -> cleanup.
+    cleanup_score = -(branded_penalty + compound_penalty + verbosity_penalty)
+    return (
+        identity_tier,
+        round(coverage, 4),
+        round(prep_score, 4),
+        source_score,
+        cleanup_score,
+    )
 
 
 def _display_name(description: str) -> str:
@@ -258,7 +365,7 @@ async def search_usda_foods(query: str, *, limit: int = 8) -> list[dict[str, Any
         body = response.json()
 
         raw_foods = body.get("foods", []) if isinstance(body, dict) else []
-        normalized: list[tuple[float, dict[str, Any]]] = []
+        normalized: list[tuple[tuple, dict[str, Any]]] = []
         seen: set[int] = set()
         for item in raw_foods if isinstance(raw_foods, list) else []:
             if not isinstance(item, dict):
