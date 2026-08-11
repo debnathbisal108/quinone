@@ -424,7 +424,12 @@ async def fetch_food_detail(fdc_id: int, client: httpx.AsyncClient) -> Optional[
                 continue
 
             if response.status_code == 404:
-                logger.warning("USDA fdcId=%s not found (404)", fdc_id)
+                logger.warning(
+                    "USDA Food Details API returned 404 for fdcId=%s; "
+                    "the browser-facing FDC page may still exist, but this "
+                    "ID is not retrievable through the API.",
+                    fdc_id,
+                )
                 return None
 
             if response.status_code >= 500:
