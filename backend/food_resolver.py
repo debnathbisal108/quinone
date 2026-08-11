@@ -42,7 +42,7 @@ if not USDA_API_KEY:
         "USDA_API_KEY is not configured."
     )
 
-PAGE_SIZE = 10
+PAGE_SIZE = 25
 REQUEST_TIMEOUT_S = 8.0
 MAX_RETRIES = 2
 RETRY_BACKOFF_BASE_S = 1.5
@@ -57,8 +57,8 @@ CACHE_FILE_PATH = os.environ.get("NUTRICA_USDA_CACHE_PATH", "")  # optional disk
 # Cache candidate accessibility so the same FDC ID is not validated repeatedly.
 _fdc_accessibility_cache: Dict[int, bool] = {}
 
-FUZZY_WEIGHT = 0.75
-DB_PRIORITY_WEIGHT = 0.25
+FUZZY_WEIGHT = 0.82
+DB_PRIORITY_WEIGHT = 0.18
 
 # Higher number = higher priority. Applied per the ROUTES/DATABASE PRIORITY spec.
 DB_PRIORITY_GENERIC = {
@@ -503,7 +503,67 @@ _GENERIC_QUERY_WORDS = {
     "and",
     "or",
     "the",
+    "dry",
+    "dried",
+    "frozen",
+    "sliced",
+    "chopped",
+    "ground",
+    "whole",
 }
+
+_COMPOUND_RESULT_TERMS = {
+    "pudding", "pastry", "granola", "cereal", "babyfood", "bar", "snack",
+    "cookie", "cake", "pie", "muffin", "bread", "sauce", "soup", "dip",
+    "sandwich", "pizza", "casserole", "meal", "mix", "filling",
+}
+
+
+def _canonical_identity_token(token: str) -> str:
+    token = token.lower().strip()
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 4 and token.endswith("es"):
+        return token[:-2]
+    if len(token) > 3 and token.endswith("s"):
+        return token[:-1]
+    return token
+
+
+def _identity_token_matches(q: str, c: str) -> bool:
+    qn = _canonical_identity_token(q)
+    cn = _canonical_identity_token(c)
+    if qn == cn:
+        return True
+    if len(qn) >= 4 and cn.startswith(qn):
+        return True
+    if len(cn) >= 4 and qn.startswith(cn) and len(qn) - len(cn) <= 2:
+        return True
+    return False
+
+
+def _identity_tier(query: str, candidate_description: str) -> tuple[int, float]:
+    q_tokens = list(_meaningful_tokens(query))
+    d_tokens_raw = _normalize_text(candidate_description).split()
+    if not q_tokens or not d_tokens_raw:
+        return (0, 0.0)
+
+    indices: list[int] = []
+    for q in q_tokens:
+        idx = next((i for i, d in enumerate(d_tokens_raw) if _identity_token_matches(q, d)), None)
+        if idx is not None:
+            indices.append(idx)
+    coverage = len(indices) / len(q_tokens)
+    if coverage == 1.0:
+        early_limit = max(2, len(q_tokens) + 1)
+        if max(indices) < early_limit and min(indices) <= 1:
+            return (4, coverage)
+        if max(indices) < 5:
+            return (3, coverage)
+        return (2, coverage)
+    if coverage > 0:
+        return (1, coverage)
+    return (0, 0.0)
 
 
 def _meaningful_tokens(
@@ -613,6 +673,11 @@ def rank_candidates(
             )
         )
 
+        identity_tier, identity_coverage = _identity_tier(
+            query,
+            description,
+        )
+
         missing_tokens = sorted(
             query_tokens
             - description_tokens
@@ -632,11 +697,38 @@ def rank_candidates(
             else 0.0
         )
 
+        compound_penalty = 0.0
+        description_word_tokens = set(_normalize_text(description).split())
+        query_word_tokens = set(_normalize_text(query).split())
+        for term in _COMPOUND_RESULT_TERMS:
+            if term in description_word_tokens and term not in query_word_tokens:
+                compound_penalty += 12.0
+
+        brand_owner_text = str(
+            candidate.get("brandOwner")
+            or candidate.get("brandName")
+            or ""
+        ).lower()
+        brand_specific = any(
+            token in brand_owner_text
+            for token in _normalize_text(query).split()
+            if len(token) > 2
+        )
+        branded_penalty = (
+            35.0
+            if data_type == "Branded"
+            and food_source != "Branded"
+            and not brand_specific
+            else 0.0
+        )
+
         final_score = (
             FUZZY_WEIGHT * fuzzy
             + DB_PRIORITY_WEIGHT * db_priority
             + exact_match_bonus
             - specificity_penalty
+            - compound_penalty
+            - branded_penalty
         )
 
         # If a multi-word food loses half or more of its
@@ -678,6 +770,8 @@ def rank_candidates(
                 "db_priority_score": (
                     db_priority
                 ),
+                "identity_tier": identity_tier,
+                "identity_coverage": round(identity_coverage, 4),
                 "query_token_coverage": round(
                     token_coverage,
                     4,
@@ -691,10 +785,11 @@ def rank_candidates(
 
     ranked.sort(
         key=lambda candidate: (
-            candidate[
-                "query_token_coverage"
-            ],
+            candidate.get("identity_tier", 0),
+            candidate.get("identity_coverage", 0.0),
+            candidate.get("query_token_coverage", 0.0),
             candidate["final_score"],
+            candidate.get("db_priority_score", 0.0),
         ),
         reverse=True,
     )
