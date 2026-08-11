@@ -25,7 +25,10 @@ from feature_engineering import compute_features
 from health_domain_scoring import attach_domain_scores
 from food_resolver import resolve_meal
 from nutrient_profile import attach_nutrients
-from usda_recipe_service import search_usda_foods
+from usda_recipe_service import (
+    search_usda_foods,
+    validate_or_recover_usda_food,
+)
 
 from personalization_engine import (
     attach_personalization,
@@ -568,7 +571,25 @@ async def _process_manual_recipe_job(
         foods: list[dict[str, Any]] = []
         total_weight = 0.0
 
-        for index, ingredient in enumerate(request.ingredients, start=1):
+        # Revalidate IDs at Analyze time, not just at search time. This also
+        # repairs saved recipes/photo drafts that still contain a stale FDC ID.
+        validated_ingredients = await asyncio.gather(
+            *[
+                validate_or_recover_usda_food(
+                    fdc_id=ingredient.fdc_id,
+                    name=ingredient.name,
+                    description=ingredient.description,
+                    data_type=ingredient.data_type,
+                    food_category=ingredient.food_category,
+                )
+                for ingredient in request.ingredients
+            ]
+        )
+
+        for index, (ingredient, resolved_food) in enumerate(
+            zip(request.ingredients, validated_ingredients),
+            start=1,
+        ):
             grams = float(ingredient.grams) * portion_fraction
             total_weight += grams
             foods.append(
@@ -585,9 +606,9 @@ async def _process_manual_recipe_job(
                     "estimated_weight_g": grams,
                     "resolver": {
                         "status": "resolved",
-                        "fdc_id": ingredient.fdc_id,
-                        "matched_description": ingredient.description,
-                        "data_type": ingredient.data_type,
+                        "fdc_id": resolved_food["fdc_id"],
+                        "matched_description": resolved_food["description"],
+                        "data_type": resolved_food.get("data_type"),
                         "confidence": 1.0,
                         "source": "user_selected_usda",
                     },
