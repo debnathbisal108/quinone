@@ -123,6 +123,7 @@ class Rule:
     organ: str = ""
     confidence_label: str = "Medium"   # source document's own High/Medium/.../N/A label
     citation: Optional[str] = None
+    modifier_gate: Optional[str] = None
     source: str = "Nutrica coefficient reference document"
 
     @property
@@ -798,10 +799,12 @@ def build_evidence(
         rec for rec in interaction_records
         if rule.feature in rec.get("features", ()) and rec.get("domain") == rule.domain
     ]
+    # Interactions are retained as explanatory observations, but are not
+    # allowed to multiply base-rule weights generically. A textual
+    # interaction such as "low fiber x sodium" needs its own explicit
+    # predicate/equation; multiplying every constituent rule can invert
+    # protective evidence or fire on the wrong side of a threshold.
     interaction_multiplier = 1.0
-    for rec in relevant_interactions:
-        interaction_multiplier *= _interaction_contribution(rec)
-    interaction_multiplier = round(interaction_multiplier, 4)
 
     base_weight = round(abs(rule.coefficient), 4)
     curve_multiplier = round(magnitude, 6)
@@ -1482,6 +1485,7 @@ KIDNEY_RULES: List[Rule] = [
         mechanism="Moderate protein is generally fine, but higher protein burden matters more when kidney function is impaired",
         pathway="Renal protein filtration load", organ="Kidneys",
         confidence_label="Medium",
+        modifier_gate="ckd",
     ),
     Rule(
         rule_id="kidney_processed_meat", domain="kidney", feature="processed_meat_tag",
@@ -1498,6 +1502,7 @@ KIDNEY_RULES: List[Rule] = [
         mechanism="Phosphate burden is especially relevant when kidney function is impaired",
         pathway="Mineral / bone-kidney axis", organ="Kidneys",
         confidence_label="Medium-high",
+        modifier_gate="ckd",
     ),
     Rule(
         rule_id="kidney_whole_grain", domain="kidney", feature="whole_grain_tag",
@@ -2948,7 +2953,7 @@ for _pm in POPULATION_MODIFIERS:
 ALL_DOMAIN_RULES: List[List[Rule]] = [
     BLOOD_SUGAR_RULES, BLOOD_PRESSURE_RULES, HEART_RULES, METABOLIC_SYNDROME_RULES,
     KIDNEY_RULES, LIVER_RULES, BONE_RULES, BRAIN_RULES, INFLAMMATION_RULES,
-    CANCER_RULES, WEIGHT_RULES, MUSCLE_RULES, GUT_RULES,
+    CANCER_RULES, WEIGHT_RULES, MUSCLE_RULES, ARTHRITIS_RULES, GUT_RULES,
 ]
 
 ALL_DOMAIN_INTERACTIONS: List[List[Interaction]] = [
@@ -2956,7 +2961,7 @@ ALL_DOMAIN_INTERACTIONS: List[List[Interaction]] = [
     METABOLIC_SYNDROME_INTERACTIONS, KIDNEY_INTERACTIONS, LIVER_INTERACTIONS,
     BONE_INTERACTIONS, BRAIN_INTERACTIONS, INFLAMMATION_INTERACTIONS,
     CANCER_INTERACTIONS, WEIGHT_INTERACTIONS,
-    MUSCLE_INTERACTIONS, GUT_INTERACTIONS,
+    MUSCLE_INTERACTIONS, ARTHRITIS_INTERACTIONS, GUT_INTERACTIONS,
 ]
 
 
@@ -3143,17 +3148,44 @@ def process_feature(
     if value is None:
         return []
 
-    applicable_modifiers = [
-        m for m in _POPULATION_MODIFIER_BY_FEATURE.get(feature_key, [])
-        if m.modifier_id in active_modifiers
-    ]
-
     evidence_objects = []
     for rule in rules:
+        if rule.modifier_gate is not None and rule.modifier_gate not in active_modifiers:
+            continue
+
+        # A population modifier belongs to one health domain. Never let a
+        # modifier for (say) blood pressure alter a renal rule merely
+        # because both happen to use sodium_density.
+        applicable_modifiers = [
+            m for m in _POPULATION_MODIFIER_BY_FEATURE.get(feature_key, [])
+            if m.modifier_id in active_modifiers and m.domain == rule.domain
+        ]
+
+        # In CKD, potassium direction depends on serum potassium, kidney
+        # function and treatment. Without those data, do not award the
+        # general-population potassium renal benefit.
+        if rule.rule_id == "kidney_potassium" and "ckd" in active_modifiers:
+            continue
+
         magnitude = evaluate_threshold(rule, value)
         if magnitude <= 0.0:
             continue
         evidence = build_evidence(rule, value, magnitude, interaction_records)
+
+        # U-shaped adequacy rules have opposite meaning below the low
+        # threshold: low protein/energy is adverse, while adequate/high
+        # values are beneficial. The old implementation returned only an
+        # unsigned magnitude and therefore rewarded deficiency.
+        if rule.curve == CurveType.U_SHAPED:
+            try:
+                below_low = float(value) < float(rule.curve_params.get("low_threshold", 0.0))
+            except (TypeError, ValueError):
+                below_low = False
+            if below_low:
+                evidence["direction"] = "negative" if evidence["direction"] == "positive" else "positive"
+                evidence["evidence_type"] = _EVIDENCE_TYPE_BY_DIRECTION[evidence["direction"]]
+                evidence["raw_effect"] = -abs(evidence["effective_weight"]) if evidence["direction"] == "negative" else abs(evidence["effective_weight"])
+
         if applicable_modifiers:
             combined_multiplier = 1.0
             for m in applicable_modifiers:
