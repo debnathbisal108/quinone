@@ -11,11 +11,18 @@ import httpx
 
 USDA_API_KEY = os.getenv("USDA_API_KEY", "DEMO_KEY")
 USDA_SEARCH_URL = "https://api.nal.usda.gov/fdc/v1/foods/search"
+USDA_FOOD_URL = "https://api.nal.usda.gov/fdc/v1/food/{fdc_id}"
+DETAIL_TIMEOUT_SECONDS = 12.0
+DETAIL_MAX_RETRIES = 2
+DETAIL_CONCURRENCY = 6
 CACHE_TTL_SECONDS = 15 * 60
 MAX_CACHE_ITEMS = 250
 
 _cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _cache_lock = asyncio.Lock()
+_detail_cache: dict[int, dict[str, Any] | None] = {}
+_detail_cache_lock = asyncio.Lock()
+_detail_semaphore = asyncio.Semaphore(DETAIL_CONCURRENCY)
 
 _DATA_TYPE_SCORE = {
     "Foundation": 40,
@@ -87,6 +94,143 @@ def _normalize_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+
+async def get_usda_food_detail(
+    fdc_id: int,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, Any] | None:
+    """Return a USDA Food Details record when the API can retrieve it.
+
+    A browser-facing FoodData Central page can remain visible even when the
+    Food Details API returns 404 for that historical FDC ID. Quinone must use
+    the API record as the source of truth because nutrient_profile consumes
+    the same endpoint.
+    """
+    try:
+        numeric_id = int(fdc_id)
+    except (TypeError, ValueError):
+        return None
+
+    async with _detail_cache_lock:
+        if numeric_id in _detail_cache:
+            return _detail_cache[numeric_id]
+
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(timeout=httpx.Timeout(DETAIL_TIMEOUT_SECONDS))
+
+    try:
+        url = USDA_FOOD_URL.format(fdc_id=numeric_id)
+        for attempt in range(1, DETAIL_MAX_RETRIES + 1):
+            try:
+                async with _detail_semaphore:
+                    response = await client.get(
+                        url,
+                        params={"api_key": USDA_API_KEY},
+                    )
+
+                if response.status_code == 200:
+                    body = response.json()
+                    if isinstance(body, dict):
+                        async with _detail_cache_lock:
+                            _detail_cache[numeric_id] = body
+                        return body
+                    return None
+
+                if response.status_code == 404:
+                    async with _detail_cache_lock:
+                        _detail_cache[numeric_id] = None
+                    return None
+
+                if response.status_code == 429 or response.status_code >= 500:
+                    if attempt < DETAIL_MAX_RETRIES:
+                        await asyncio.sleep(0.45 * attempt)
+                        continue
+                    return None
+
+                response.raise_for_status()
+            except (httpx.TimeoutException, httpx.RequestError):
+                if attempt < DETAIL_MAX_RETRIES:
+                    await asyncio.sleep(0.45 * attempt)
+                    continue
+                return None
+            except (ValueError, httpx.HTTPStatusError):
+                return None
+        return None
+    finally:
+        if owns_client:
+            await client.aclose()
+
+
+async def _candidate_is_usable(
+    candidate: dict[str, Any],
+    *,
+    client: httpx.AsyncClient,
+) -> bool:
+    fdc_id = candidate.get("fdc_id")
+    if not isinstance(fdc_id, int):
+        return False
+    return await get_usda_food_detail(fdc_id, client=client) is not None
+
+
+async def validate_or_recover_usda_food(
+    *,
+    fdc_id: int,
+    name: str,
+    description: str,
+    data_type: str | None = None,
+    food_category: str | None = None,
+) -> dict[str, Any]:
+    """Validate an already-selected FDC ID and recover it if it became stale.
+
+    This is intentionally called again at Analyze time. It protects:
+    - saved recipes created before this fix,
+    - photo-review drafts containing an older FDC ID,
+    - stale client state,
+    - USDA records that were superseded after selection.
+    """
+    detail = await get_usda_food_detail(fdc_id)
+    if detail is not None:
+        normalized = _normalize_candidate(detail)
+        if normalized is not None:
+            return normalized
+        return {
+            "fdc_id": int(fdc_id),
+            "description": str(detail.get("description") or description or name).strip(),
+            "display_name": _display_name(
+                str(detail.get("description") or description or name)
+            ),
+            "data_type": str(detail.get("dataType") or data_type or "Unknown"),
+            "food_category": str(
+                detail.get("foodCategory") or food_category or ""
+            ).strip() or None,
+            "brand_owner": str(
+                detail.get("brandOwner") or detail.get("brandName") or ""
+            ).strip() or None,
+        }
+
+    # The chosen ID is stale/unavailable. Re-run a fresh search by the human-
+    # readable identity instead of passing the dead ID to nutrient_profile.
+    query_candidates: list[str] = []
+    for value in (name, description):
+        cleaned = _clean_query(value)
+        if len(cleaned) >= 2 and cleaned.lower() not in {
+            q.lower() for q in query_candidates
+        }:
+            query_candidates.append(cleaned)
+
+    for query in query_candidates:
+        recovered = await search_usda_foods(query, limit=8)
+        if recovered:
+            return recovered[0]
+
+    raise ValueError(
+        f"USDA food '{name or description}' could not be retrieved and "
+        f"no valid replacement was found for fdcId={fdc_id}."
+    )
+
+
 async def search_usda_foods(query: str, *, limit: int = 8) -> list[dict[str, Any]]:
     cleaned = _clean_query(query)
     if len(cleaned) < 2:
@@ -97,6 +241,7 @@ async def search_usda_foods(query: str, *, limit: int = 8) -> list[dict[str, Any
     async with _cache_lock:
         cached = _cache.get(cache_key)
         if cached is not None and now - cached[0] < CACHE_TTL_SECONDS:
+            # Cached search results are already detail-validated.
             return cached[1][:limit]
 
     payload = {
@@ -112,20 +257,37 @@ async def search_usda_foods(query: str, *, limit: int = 8) -> list[dict[str, Any
         response.raise_for_status()
         body = response.json()
 
-    raw_foods = body.get("foods", []) if isinstance(body, dict) else []
-    normalized: list[tuple[float, dict[str, Any]]] = []
-    seen: set[int] = set()
-    for item in raw_foods if isinstance(raw_foods, list) else []:
-        if not isinstance(item, dict):
-            continue
-        candidate = _normalize_candidate(item)
-        if candidate is None or candidate["fdc_id"] in seen:
-            continue
-        seen.add(candidate["fdc_id"])
-        normalized.append((_candidate_score(item, cleaned), candidate))
+        raw_foods = body.get("foods", []) if isinstance(body, dict) else []
+        normalized: list[tuple[float, dict[str, Any]]] = []
+        seen: set[int] = set()
+        for item in raw_foods if isinstance(raw_foods, list) else []:
+            if not isinstance(item, dict):
+                continue
+            candidate = _normalize_candidate(item)
+            if candidate is None or candidate["fdc_id"] in seen:
+                continue
+            seen.add(candidate["fdc_id"])
+            normalized.append((_candidate_score(item, cleaned), candidate))
 
-    normalized.sort(key=lambda pair: pair[0], reverse=True)
-    results = [candidate for _, candidate in normalized[: max(limit, 12)]]
+        normalized.sort(key=lambda pair: pair[0], reverse=True)
+
+        # Validate the best-scoring candidates concurrently. Search can return
+        # historical IDs that the Food Details API no longer serves.
+        pool = [
+            candidate
+            for _, candidate in normalized[: max(16, limit * 2)]
+        ]
+        usability = await asyncio.gather(
+            *[
+                _candidate_is_usable(candidate, client=client)
+                for candidate in pool
+            ]
+        )
+        results = [
+            candidate
+            for candidate, usable in zip(pool, usability)
+            if usable
+        ][: max(limit, 12)]
 
     async with _cache_lock:
         if len(_cache) >= MAX_CACHE_ITEMS:
