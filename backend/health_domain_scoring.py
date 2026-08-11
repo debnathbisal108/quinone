@@ -422,6 +422,15 @@ class DefaultCoverageCalculator(
         if not signal_items:
             return 0.0
 
+        # Repeated instances of the same rule (for example the same
+        # nutrient mechanism emitted by several ingredient rows) must not
+        # manufacture extra certainty. Coverage measures distinct evidence
+        # mechanisms, not row count.
+        unique_rules = {
+            item.get("rule_id") or (item.get("feature"), item.get("mechanism"))
+            for item in signal_items
+        }
+
         mechanisms = {
             item.get("mechanism")
             for item in signal_items
@@ -435,7 +444,7 @@ class DefaultCoverageCalculator(
         }
 
         signal = (
-            len(signal_items)
+            len(unique_rules)
             + 0.5 * len(mechanisms)
             + 0.5 * len(pathways)
         )
@@ -972,7 +981,7 @@ class DomainAggregator:
     normalizer: DomainNormalizer = (
         field(
             default_factory=(
-                LinearRatioNormalizer
+                SigmoidNormalizer
             )
         )
     )
