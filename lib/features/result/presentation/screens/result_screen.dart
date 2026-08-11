@@ -510,6 +510,9 @@ class ResultScreen extends StatelessWidget {
                                         nutrientKey: macro.nutrientKey,
                                         amount: macro.value,
                                         unit: 'g',
+                                        breakdownTitle: 'Carbohydrate composition',
+                                        breakdownNote:
+                                            'Sugars are included within total carbohydrate; they are not added on top. Added sugars, when available, are a subset of total sugars. Dietary fiber is shown separately as part of the carbohydrate profile.',
                                         relatedValues: [
                                           _NutrientDetailItem(
                                             label: 'Total carbohydrates',
@@ -518,13 +521,13 @@ class ResultScreen extends StatelessWidget {
                                             available: true,
                                           ),
                                           _NutrientDetailItem(
-                                            label: 'Total sugars',
+                                            label: '↳ of which total sugars',
                                             value: result.sugars ?? 0,
                                             unit: 'g',
                                             available: result.sugars != null,
                                           ),
                                           _NutrientDetailItem(
-                                            label: 'Added sugars',
+                                            label: '   ↳ of which added sugars',
                                             value: result.addedSugars ?? 0,
                                             unit: 'g',
                                             available: result.addedSugars != null,
