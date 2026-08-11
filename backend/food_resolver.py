@@ -31,6 +31,7 @@ logger.propagate = False
 # =========================================================================
 
 USDA_SEARCH_URL = "https://api.nal.usda.gov/fdc/v1/foods/search"
+USDA_FOOD_URL = "https://api.nal.usda.gov/fdc/v1/food/{fdc_id}"
 
 USDA_API_KEY = os.environ.get(
     "USDA_API_KEY"
@@ -52,6 +53,9 @@ RESOLVED_THRESHOLD = 70.0        # final_score (0-100) at/above this -> "resolve
 LOW_CONFIDENCE_THRESHOLD = 40.0  # below RESOLVED but at/above this -> "resolved_low_confidence"
 
 CACHE_FILE_PATH = os.environ.get("NUTRICA_USDA_CACHE_PATH", "")  # optional disk persistence
+
+# Cache candidate accessibility so the same FDC ID is not validated repeatedly.
+_fdc_accessibility_cache: Dict[int, bool] = {}
 
 FUZZY_WEIGHT = 0.75
 DB_PRIORITY_WEIGHT = 0.25
@@ -702,6 +706,131 @@ def rank_candidates(
 # RESOLUTION
 # =========================================================================
 
+
+async def _candidate_is_accessible(
+    client: httpx.AsyncClient,
+    fdc_id: Any,
+) -> bool:
+    """Verify that a USDA search candidate can actually be fetched by the
+    Food Details endpoint.
+
+    FoodData Central can retain a browser-facing page for an older FDC ID
+    while the API detail endpoint no longer serves that exact record. Search
+    candidates that cannot be fetched must never be accepted as resolved,
+    otherwise nutrient_profile receives an FDC ID that produces a 404 and the
+    food silently loses its nutrient profile.
+    """
+    try:
+        numeric_id = int(fdc_id)
+    except (TypeError, ValueError):
+        return False
+
+    cached = _fdc_accessibility_cache.get(numeric_id)
+    if cached is not None:
+        return cached
+
+    url = USDA_FOOD_URL.format(fdc_id=numeric_id)
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            async with _fetch_semaphore:
+                await _throttle_fetch()
+                response = await client.get(
+                    url,
+                    params={"api_key": USDA_API_KEY},
+                    timeout=REQUEST_TIMEOUT_S,
+                )
+
+            if response.status_code == 200:
+                _fdc_accessibility_cache[numeric_id] = True
+                return True
+
+            if response.status_code == 404:
+                logger.warning(
+                    "Rejecting stale/unavailable USDA candidate fdcId=%s "
+                    "because Food Details returned 404.",
+                    numeric_id,
+                )
+                _fdc_accessibility_cache[numeric_id] = False
+                return False
+
+            if response.status_code == 429:
+                wait = RETRY_BACKOFF_BASE_S * attempt * 2
+                logger.warning(
+                    "USDA rate limit while validating fdcId=%s; "
+                    "retrying in %.1fs.",
+                    numeric_id,
+                    wait,
+                )
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(wait)
+                continue
+
+            if response.status_code >= 500:
+                logger.warning(
+                    "USDA server error %s while validating fdcId=%s "
+                    "(attempt %d/%d).",
+                    response.status_code,
+                    numeric_id,
+                    attempt,
+                    MAX_RETRIES,
+                )
+                if attempt < MAX_RETRIES:
+                    await asyncio.sleep(RETRY_BACKOFF_BASE_S * attempt)
+                continue
+
+            # Authentication/configuration errors are not evidence that the
+            # food itself is invalid. Surface the problem rather than caching
+            # the candidate as permanently unavailable.
+            response.raise_for_status()
+
+        except httpx.TimeoutException:
+            logger.warning(
+                "Timeout validating USDA fdcId=%s (attempt %d/%d).",
+                numeric_id,
+                attempt,
+                MAX_RETRIES,
+            )
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "USDA validation HTTP %s for fdcId=%s.",
+                exc.response.status_code,
+                numeric_id,
+            )
+            return False
+        except httpx.RequestError as exc:
+            logger.warning(
+                "USDA validation request failed for fdcId=%s "
+                "(attempt %d/%d): %s",
+                numeric_id,
+                attempt,
+                MAX_RETRIES,
+                exc,
+            )
+
+        if attempt < MAX_RETRIES:
+            await asyncio.sleep(RETRY_BACKOFF_BASE_S * attempt)
+
+    # A transient outage must not be cached as a permanent invalid ID.
+    return False
+
+
+async def _first_accessible_candidate(
+    client: httpx.AsyncClient,
+    ranked: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return the highest-ranked candidate whose Food Details record is
+    retrievable. If a search result points to a stale 404 ID, continue to the
+    next ranked candidate instead of poisoning the nutrient stage."""
+    for candidate in ranked:
+        fdc_id = candidate.get("fdc_id")
+        if fdc_id is None:
+            continue
+        if await _candidate_is_accessible(client, fdc_id):
+            return candidate
+    return None
+
+
 async def _resolve_single(
     client: httpx.AsyncClient,
     primary_query: Optional[str],
@@ -783,7 +912,15 @@ async def _resolve_single(
 
         ranked = rank_candidates(q, raw_candidates, food_source)
         if ranked:
-            top = ranked[0]
+            top = await _first_accessible_candidate(client, ranked)
+            if top is None:
+                logger.warning(
+                    "USDA search %r returned ranked candidates, but none "
+                    "could be retrieved from Food Details.",
+                    q,
+                )
+                continue
+
             if best is None or top["final_score"] > best["final_score"]:
                 best = top
                 best_query = q
