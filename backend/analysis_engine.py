@@ -1066,11 +1066,13 @@ Atta
 Correct
 Whole wheat flour
 
-Incorrect
+Correct
 Paneer
 
-Correct
+Incorrect
 Fresh cheese
+
+IMPORTANT: Paneer is a distinct food identity. Never rename paneer to generic fresh cheese, cottage cheese, ricotta, queso fresco, or another cheese. Keep canonical_name = "Paneer" and use paneer-specific USDA queries. If USDA has no exact paneer record, preserve the name Paneer and let the resolver report low confidence rather than silently changing the food identity.
 
 Incorrect
 Desi Ghee
@@ -1315,9 +1317,11 @@ Onion as an ingredient inside a DECOMPOSE food
 →
 Onions, raw
 
-Fresh cheese as an ingredient inside Paneer Tikka
+Paneer as an ingredient inside Paneer Tikka
 →
-Cheese, fresh
+Paneer
+
+Do not substitute Paneer with "Cheese, fresh". Food identity takes priority over forcing a USDA-style generic description.
 
 Yogurt as an ingredient inside Paneer Tikka
 →
