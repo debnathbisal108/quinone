@@ -1066,13 +1066,11 @@ Atta
 Correct
 Whole wheat flour
 
-Correct
+Incorrect
 Paneer
 
-Incorrect
+Correct
 Fresh cheese
-
-IMPORTANT: Paneer is a distinct food identity. Never rename paneer to generic fresh cheese, cottage cheese, ricotta, queso fresco, or another cheese. Keep canonical_name = "Paneer" and use paneer-specific USDA queries. If USDA has no exact paneer record, preserve the name Paneer and let the resolver report low confidence rather than silently changing the food identity.
 
 Incorrect
 Desi Ghee
@@ -1317,11 +1315,9 @@ Onion as an ingredient inside a DECOMPOSE food
 →
 Onions, raw
 
-Paneer as an ingredient inside Paneer Tikka
+Fresh cheese as an ingredient inside Paneer Tikka
 →
-Paneer
-
-Do not substitute Paneer with "Cheese, fresh". Food identity takes priority over forcing a USDA-style generic description.
+Cheese, fresh
 
 Yogurt as an ingredient inside Paneer Tikka
 →
@@ -2447,6 +2443,17 @@ Rules
 - Read the complete Nutrition Facts panel exactly as printed.
 
   Extract every nutrient shown.
+- Nutrition labels may be bilingual (for example English/French). Treat
+  "Carbohydrate / Glucides", "Sugars / Sucres", "Sodium", etc. as the
+  corresponding schema nutrients.
+- If a label says something like "Per 1 can (355 mL)", store:
+    serving_size.value = 355
+    serving_size.unit = "ml"
+  Do NOT use "can" as the serving_size unit when a gram or millilitre amount
+  is printed in parentheses.
+- If the label says "Per 1 bottle (500 mL)", use 500 ml by the same rule.
+- If a servings-per-container count is explicitly printed, store it in
+  servings_per_container. Otherwise use null.
 
   Do not infer or calculate missing nutrients.
 
@@ -2455,9 +2462,10 @@ Rules
 - Never estimate values.
 - Missing values must be null.
 - Use the exact field names shown in the schema.
-- For beverages, nutrition_per_100g may represent values per 100 ml.
-    If both "per serving" and "per 100 g" are present,
-    return BOTH.
+- For beverages, values printed per 100 mL belong in nutrition_per_100g,
+  but nutrition_basis.unit MUST be "ml".
+- Never convert beverage millilitres to grams.
+- If both "per serving" and "per 100 g/ml" are present, return BOTH.
 - Set nutrition_basis.value to the printed reference quantity, usually 100.
 - Set nutrition_basis.unit to "g" or "ml" exactly as printed.
 - Return each ingredient as a separate string in the ingredients list.
