@@ -120,6 +120,15 @@ class ManualRecipeIngredientRequest(BaseModel):
     grams: float = Field(gt=0, le=100000)
 
 
+class MixedMealConfirmationRequest(BaseModel):
+    analysis_id: str
+    recipe_name: str = "Detected meal"
+    ingredients: list[ManualRecipeIngredientRequest]
+    label_items: list[LabelServingItemRequest]
+    servings_made: float = Field(default=1.0, gt=0, le=1000)
+    servings_eaten: float = Field(default=1.0, gt=0, le=1000)
+
+
 class ManualRecipeRequest(BaseModel):
     recipe_name: str = "Manual recipe"
     ingredients: list[ManualRecipeIngredientRequest]
@@ -448,6 +457,202 @@ async def get_analysis_job(job_id: str) -> dict[str, Any]:
 
 
 
+async def _process_mixed_meal_confirmation_job(
+    *,
+    job_id: str,
+    request: MixedMealConfirmationRequest,
+) -> None:
+    try:
+        session = load_session(request.analysis_id)
+        if session is None:
+            raise ValueError("Analysis session was not found or has expired.")
+        base_result = session.get("confirmed_label_result")
+        if not isinstance(base_result, dict):
+            raise ValueError("The saved mixed-meal result is unavailable.")
+
+        _set_job(
+            job_id,
+            status="running",
+            stage="meal_confirmation",
+            message="Applying your meal corrections…",
+            progress=0.12,
+        )
+
+        # First apply the confirmed packaged-food serving(s).
+        label_request = LabelServingConfirmationRequest(
+            analysis_id=request.analysis_id,
+            items=request.label_items,
+        )
+        updated = _apply_label_serving_confirmation(base_result, label_request)
+
+        portion_fraction = request.servings_eaten / request.servings_made
+        validated = await asyncio.gather(
+            *[
+                validate_or_recover_usda_food(
+                    fdc_id=item.fdc_id,
+                    name=item.name,
+                    description=item.description,
+                    data_type=item.data_type,
+                    food_category=item.food_category,
+                )
+                for item in request.ingredients
+            ]
+        )
+
+        meal = updated.get("meal")
+        if not isinstance(meal, dict):
+            raise ValueError("The mixed meal is missing meal data.")
+        existing_foods = meal.get("foods")
+        if not isinstance(existing_foods, list):
+            raise ValueError("The mixed meal is missing foods.")
+
+        # Keep only authoritative label-backed foods from the original meal.
+        foods: list[dict[str, Any]] = [
+            copy.deepcopy(food)
+            for food in existing_foods
+            if isinstance(food, dict)
+            and food.get("analysis_route") == "NUTRITION_LABEL"
+        ]
+
+        total_weight = 0.0
+        for index, (ingredient, resolved_food) in enumerate(
+            zip(request.ingredients, validated),
+            start=1,
+        ):
+            grams = float(ingredient.grams) * portion_fraction
+            total_weight += grams
+            foods.append(
+                {
+                    "id": f"confirmed_{index:04d}",
+                    "name": ingredient.name.strip() or ingredient.description,
+                    "display_name": ingredient.name.strip() or ingredient.description,
+                    "canonical_name": ingredient.description,
+                    "category": ingredient.food_category or "Unknown",
+                    "food_source": "photo_user_confirmed",
+                    "analysis_route": "DIRECT_USDA",
+                    "quantity": grams,
+                    "unit": "g",
+                    "estimated_weight_g": grams,
+                    "resolver": {
+                        "status": "resolved",
+                        "fdc_id": resolved_food["fdc_id"],
+                        "matched_description": resolved_food["description"],
+                        "data_type": resolved_food.get("data_type"),
+                        "confidence": 1.0,
+                        "source": "user_confirmed_usda",
+                    },
+                    "ingredients": [],
+                    "spices": [],
+                }
+            )
+
+        meal["foods"] = foods
+        meal["meal_name"] = request.recipe_name.strip() or meal.get("meal_name") or "Detected meal"
+        meal["meal_type"] = request.recipe_name.strip() or meal.get("meal_type") or "Detected meal"
+        meal["recipe_servings_made"] = request.servings_made
+        meal["recipe_servings_eaten"] = request.servings_eaten
+        # Label foods may be ml/serving-based, so this is the confirmed USDA
+        # gram mass only rather than inventing a mass for beverages.
+        meal["estimated_visible_food_weight_g"] = round(total_weight, 3)
+        updated["input_method"] = "photo_confirmed_mixed"
+        updated["status"] = "completed"
+
+        final_result = await run_manual_recipe_pipeline(
+            updated,
+            profile=session.get("profile"),
+            progress_callback=lambda stage, message, progress: _set_job(
+                job_id,
+                status="running",
+                stage=stage,
+                message=message,
+                progress=progress,
+            ),
+            cancellation_check=lambda: _raise_if_cancelled(job_id),
+        )
+        final_result["analysis_id"] = request.analysis_id
+        delete_session(request.analysis_id)
+        _set_job(
+            job_id,
+            status="completed",
+            stage="completed",
+            message="Your meal report is ready.",
+            progress=1.0,
+            result=final_result,
+        )
+    except asyncio.CancelledError:
+        _set_job(
+            job_id,
+            status="cancelled",
+            stage="cancelled",
+            message="Analysis cancelled.",
+            progress=0.0,
+        )
+    except Exception as error:
+        _set_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            message="The confirmed mixed meal could not be analyzed.",
+            error=str(error),
+        )
+
+
+@app.post("/analyze/mixed-meal-confirmation/start")
+@app.post(
+    "/api/v1/analyze/mixed-meal-confirmation/start",
+    include_in_schema=False,
+)
+async def start_mixed_meal_confirmation_job(
+    payload: dict[str, Any] = Body(...),
+) -> dict[str, Any]:
+    try:
+        request = (
+            MixedMealConfirmationRequest.model_validate(payload)
+            if hasattr(MixedMealConfirmationRequest, "model_validate")
+            else MixedMealConfirmationRequest.parse_obj(payload)
+        )
+    except ValidationError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="The confirmed meal is invalid.",
+        ) from error
+
+    if request.servings_eaten > request.servings_made:
+        raise HTTPException(
+            status_code=422,
+            detail="servings_eaten cannot exceed servings_made",
+        )
+
+    if load_session(request.analysis_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Analysis session was not found or has expired.",
+        )
+
+    _cleanup_expired_jobs()
+    job_id = str(uuid.uuid4())
+    _set_job(
+        job_id,
+        status="queued",
+        stage="meal_confirmation",
+        message="Meal confirmed. Final analysis is starting…",
+        progress=0.08,
+    )
+    asyncio.create_task(
+        _process_mixed_meal_confirmation_job(
+            job_id=job_id,
+            request=request,
+        )
+    )
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "stage": "meal_confirmation",
+        "message": "Meal confirmed. Final analysis is starting…",
+        "progress": 0.08,
+    }
+
+
 async def _process_label_serving_confirmation_job(
     *,
     job_id: str,
@@ -646,23 +851,23 @@ async def _process_initial_job(
             raise ValueError(f"Unsupported analysis status: {status}")
 
         if _has_attached_nutrition_label_foods(analysis_result):
-            save_session(
-                analysis_id=job_id,
-                data={
-                    "analysis_id": job_id,
-                    "profile": profile_data,
-                    "confirmed_label_result": analysis_result,
-                },
+            next_status, confirmation, session_data = (
+                await _confirmation_after_label_analysis(
+                    analysis_result,
+                    analysis_id=job_id,
+                    profile=profile_data,
+                )
             )
-            confirmation = _label_serving_confirmation_payload(
-                analysis_result,
-                analysis_id=job_id,
-            )
+            save_session(analysis_id=job_id, data=session_data)
             _set_job(
                 job_id,
-                status="waiting_for_serving_confirmation",
-                stage="serving_confirmation",
-                message="Confirm how much of the packaged food you consumed.",
+                status=next_status,
+                stage=(
+                    "meal_confirmation"
+                    if next_status == "waiting_for_meal_confirmation"
+                    else "serving_confirmation"
+                ),
+                message=str(confirmation.get("message") or "Review the detected meal."),
                 progress=1.0,
                 result=confirmation,
             )
@@ -874,18 +1079,27 @@ async def _process_back_label_job(
         if status != "completed":
             raise ValueError(f"Unsupported continuation status: {status}")
 
-        session["confirmed_label_result"] = continued_result
+        next_status, confirmation, session_data = (
+            await _confirmation_after_label_analysis(
+                continued_result,
+                analysis_id=analysis_id,
+                profile=session.get("profile"),
+            )
+        )
+        # Preserve any session fields used by the back-label flow while
+        # replacing the stored final meal with its resolved version.
+        session.update(session_data)
         save_session(analysis_id=analysis_id, data=session)
 
-        confirmation = _label_serving_confirmation_payload(
-            continued_result,
-            analysis_id=analysis_id,
-        )
         _set_job(
             job_id,
-            status="waiting_for_serving_confirmation",
-            stage="serving_confirmation",
-            message="Confirm how much of the packaged food you consumed.",
+            status=next_status,
+            stage=(
+                "meal_confirmation"
+                if next_status == "waiting_for_meal_confirmation"
+                else "serving_confirmation"
+            ),
+            message=str(confirmation.get("message") or "Review the detected meal."),
             progress=1.0,
             result=confirmation,
         )
@@ -1160,6 +1374,47 @@ async def analyze_back_label(
 
 
 
+async def _confirmation_after_label_analysis(
+    result: dict[str, Any],
+    *,
+    analysis_id: str,
+    profile: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Resolve the non-label portion of a meal and choose the correct review UI.
+
+    Mixed meals must not lose their ordinary foods simply because one item
+    required a nutrition label. The returned session data preserves the full
+    resolved meal so final confirmation can merge USDA-backed foods and
+    label-backed foods into one nutrient/scoring run.
+    """
+    resolved = await resolve_meal(result)
+    session_data = {
+        "analysis_id": analysis_id,
+        "profile": profile,
+        "confirmed_label_result": resolved,
+    }
+
+    label_payload = _label_serving_confirmation_payload(
+        resolved,
+        analysis_id=analysis_id,
+    )
+
+    try:
+        draft_payload = _resolved_meal_to_review_draft(
+            resolved,
+            analysis_id=analysis_id,
+        )
+    except ValueError:
+        # A label-only upload has no USDA-backed foods to review.
+        return "waiting_for_serving_confirmation", label_payload, session_data
+
+    draft_payload["label_items"] = label_payload.get("items", [])
+    draft_payload["message"] = (
+        "Review the detected foods, ingredients, quantities, and packaged-food serving before final analysis."
+    )
+    return "waiting_for_meal_confirmation", draft_payload, session_data
+
+
 def _has_attached_nutrition_label_foods(result: dict[str, Any]) -> bool:
     meal = result.get("meal")
     if not isinstance(meal, dict):
@@ -1354,6 +1609,11 @@ def _resolved_meal_to_review_draft(
         if not isinstance(food, dict):
             continue
         if food.get("display_in_food_list") is False:
+            continue
+
+        if food.get("analysis_route") == "NUTRITION_LABEL":
+            # Packaged foods are reviewed using their printed-label serving
+            # data, not forced through a USDA ingredient record.
             continue
 
         resolver = food.get("resolver")
