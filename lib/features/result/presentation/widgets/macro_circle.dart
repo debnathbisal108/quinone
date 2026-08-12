@@ -1,18 +1,28 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
+import 'nutrient_target_view_data.dart';
+
 class MacroCircle extends StatelessWidget {
-  const MacroCircle({super.key, required this.label, required this.value, required this.target, required this.icon, required this.onTap});
+  const MacroCircle({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.target,
+    required this.icon,
+    required this.onTap,
+  });
+
   final String label;
   final double value;
-  final double target;
+  final NutrientTargetViewData target;
   final IconData icon;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final ratio = target <= 0 ? 0.0 : value / target;
+    final ratio = target.ratioFor(value);
     final percent = ratio * 100;
     final over = ratio > 1;
     final valueColor = over ? theme.colorScheme.error : theme.colorScheme.primary;
@@ -49,7 +59,15 @@ class MacroCircle extends StatelessWidget {
             const SizedBox(height: 13),
             FittedBox(fit: BoxFit.scaleDown, child: Text('${_formatNumber(value)} g', style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900, height: 1))),
             const SizedBox(height: 5),
-            Text(target > 0 ? 'Target ${_formatNumber(target)} g' : 'No target available', maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSurfaceVariant, fontWeight: FontWeight.w600)),
+            Text(
+              target.displayText,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
             const SizedBox(height: 12),
             Text(label, textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800)),
           ]),
@@ -76,17 +94,48 @@ class _TargetRingPainter extends CustomPainter {
     final track = Paint()..style = PaintingStyle.stroke..strokeWidth = 10..strokeCap = StrokeCap.round..color = trackColor;
     final safe = Paint()..style = PaintingStyle.stroke..strokeWidth = 10..strokeCap = StrokeCap.round..color = safeColor;
     canvas.drawCircle(center, baseRadius, track);
-    final safeRatio = ratio.clamp(0.0, 1.0).toDouble();
-    if (safeRatio > 0) canvas.drawArc(Rect.fromCircle(center: center, radius: baseRadius), start, math.pi * 2 * safeRatio, false, safe);
 
-    // Once 100% is reached the complete green target ring remains visible.
-    // Excess grows as a second, immediately-adjacent red arc instead of
-    // replacing/painting over the achieved target.
-    if (ratio > 1) {
-      final excessRatio = (ratio - 1).clamp(0.0, 1.0).toDouble();
-      final excess = Paint()..style = PaintingStyle.stroke..strokeWidth = 6..strokeCap = StrokeCap.round..color = excessColor;
-      canvas.drawArc(Rect.fromCircle(center: center, radius: baseRadius + 8), start, math.pi * 2 * excessRatio, false, excess);
+    final ring = Rect.fromCircle(center: center, radius: baseRadius);
+    if (ratio <= 1) {
+      final safeRatio = ratio.clamp(0.0, 1.0).toDouble();
+      if (safeRatio > 0) {
+        canvas.drawArc(
+          ring,
+          start,
+          math.pi * 2 * safeRatio,
+          false,
+          safe,
+        );
+      }
+      return;
     }
+
+    // Above 100%, target and excess share the same complete ring. The target
+    // is 100 parts of the total percentage, while everything beyond 100 is
+    // excess. At 200%, for example, the ring is 50% green and 50% red.
+    final targetShare = (1 / ratio).clamp(0.0, 1.0).toDouble();
+    final excessShare = 1 - targetShare;
+    final targetSweep = math.pi * 2 * targetShare;
+    final excessSweep = math.pi * 2 * excessShare;
+    final targetSegment = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 10
+      ..strokeCap = StrokeCap.butt
+      ..color = safeColor;
+    final excessSegment = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 10
+      ..strokeCap = StrokeCap.butt
+      ..color = excessColor;
+
+    canvas.drawArc(ring, start, targetSweep, false, targetSegment);
+    canvas.drawArc(
+      ring,
+      start + targetSweep,
+      excessSweep,
+      false,
+      excessSegment,
+    );
   }
 
   @override
