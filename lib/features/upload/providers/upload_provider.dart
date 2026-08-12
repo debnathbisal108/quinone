@@ -501,7 +501,10 @@ class UploadNotifier extends StateNotifier<UploadState> {
 
   bool _isCompletedResult(Map<String, dynamic> data) {
     final status = data['status']?.toString().trim().toLowerCase();
-    if (status == 'waiting_for_back_label' || status == 'no_food_detected') {
+    if (status == 'waiting_for_back_label' ||
+        status == 'waiting_for_meal_confirmation' ||
+        status == 'waiting_for_serving_confirmation' ||
+        status == 'no_food_detected') {
       return false;
     }
     const completed = {
