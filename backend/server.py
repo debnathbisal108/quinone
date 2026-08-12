@@ -1430,6 +1430,109 @@ def _has_attached_nutrition_label_foods(result: dict[str, Any]) -> bool:
     )
 
 
+
+def _normalize_label_quantity_unit(value: Any) -> str:
+    unit = str(value or "").strip().lower()
+    aliases = {
+        "gram": "g",
+        "grams": "g",
+        "g": "g",
+        "millilitre": "ml",
+        "millilitres": "ml",
+        "milliliter": "ml",
+        "milliliters": "ml",
+        "ml": "ml",
+        "litre": "l",
+        "litres": "l",
+        "liter": "l",
+        "liters": "l",
+        "l": "l",
+        "servings": "serving",
+        "serving": "serving",
+        "pieces": "piece",
+        "piece": "piece",
+        "can": "serving",
+        "cans": "serving",
+        "bottle": "serving",
+        "bottles": "serving",
+    }
+    return aliases.get(unit, unit)
+
+
+def _positive_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _authoritative_label_quantity(
+    *,
+    food: dict[str, Any],
+    label: dict[str, Any],
+) -> tuple[float, str, float | None, str]:
+    """Choose a confirmation quantity/unit that can actually scale the label.
+
+    The printed label unit is authoritative. A vision estimate such as
+    ``250 g`` for a cola bottle must never be paired with a label whose
+    nutrition is printed per ``355 ml``; nutrient_profile intentionally rejects
+    that mismatch.
+    """
+    current_quantity = _positive_float(food.get("quantity"))
+    current_unit = _normalize_label_quantity_unit(food.get("unit"))
+
+    serving = label.get("serving_size")
+    serving = serving if isinstance(serving, dict) else {}
+    serving_value = _positive_float(serving.get("value"))
+    serving_unit = _normalize_label_quantity_unit(serving.get("unit"))
+
+    basis = label.get("nutrition_basis")
+    basis = basis if isinstance(basis, dict) else {}
+    basis_value = _positive_float(basis.get("value"))
+    basis_unit = _normalize_label_quantity_unit(basis.get("unit"))
+
+    net = label.get("net_weight")
+    net = net if isinstance(net, dict) else {}
+    net_value = _positive_float(net.get("value"))
+    net_unit = _normalize_label_quantity_unit(net.get("unit"))
+
+    # Prefer a printed serving unit because per-serving nutrient panels scale
+    # directly from it. If there is no serving unit, use the printed per-100
+    # basis, then the package/net unit.
+    label_unit = ""
+    if serving_unit in {"g", "ml"}:
+        label_unit = serving_unit
+    elif basis_unit in {"g", "ml"}:
+        label_unit = basis_unit
+    elif net_unit in {"g", "ml"}:
+        label_unit = net_unit
+
+    if label_unit:
+        # Keep the vision quantity only when it is already expressed in the
+        # exact same physical unit as the printed label.
+        if current_quantity is not None and current_unit == label_unit:
+            quantity = current_quantity
+        elif serving_value is not None and serving_unit == label_unit:
+            quantity = serving_value
+        elif net_value is not None and net_unit == label_unit:
+            quantity = net_value
+        elif basis_value is not None and basis_unit == label_unit:
+            quantity = basis_value
+        else:
+            quantity = 1.0
+        return quantity, label_unit, serving_value, serving_unit
+
+    # Count-based labels can still be scaled by number of servings/pieces.
+    if current_quantity is not None and current_unit in {"serving", "piece"}:
+        return current_quantity, current_unit, serving_value, serving_unit
+    if serving_value is not None and serving_unit in {"serving", "piece"}:
+        return serving_value, serving_unit, serving_value, serving_unit
+
+    # Final fallback is explicitly one serving, not an invented gram amount.
+    return 1.0, "serving", serving_value, serving_unit
+
+
 def _label_serving_confirmation_payload(
     result: dict[str, Any],
     *,
@@ -1453,33 +1556,12 @@ def _label_serving_confirmation_payload(
         if not isinstance(label, dict):
             continue
 
-        quantity = food.get("quantity")
-        unit = str(food.get("unit") or "").strip().lower()
-        try:
-            quantity = float(quantity)
-        except (TypeError, ValueError):
-            quantity = 0.0
-
-        serving = label.get("serving_size")
-        serving_value = None
-        serving_unit = ""
-        if isinstance(serving, dict):
-            try:
-                serving_value = float(serving.get("value"))
-            except (TypeError, ValueError):
-                serving_value = None
-            serving_unit = str(serving.get("unit") or "").strip().lower()
-
-        # If vision did not produce a usable consumed quantity, the printed
-        # serving size is a much safer confirmation default than inventing one.
-        if quantity <= 0 and serving_value is not None and serving_value > 0:
-            quantity = serving_value
-            unit = serving_unit
-
-        if quantity <= 0:
-            quantity = 1.0
-        if not unit:
-            unit = serving_unit or "serving"
+        quantity, unit, serving_value, serving_unit = (
+            _authoritative_label_quantity(
+                food=food,
+                label=label,
+            )
+        )
 
         servings_per_container = label.get("servings_per_container")
         try:
@@ -1502,6 +1584,15 @@ def _label_serving_confirmation_payload(
                 "serving_size_value": serving_value,
                 "serving_size_unit": serving_unit or None,
                 "servings_per_container": servings_per_container,
+                "label_nutrient_source": (
+                    "nutrition_per_serving"
+                    if isinstance(label.get("nutrition_per_serving"), dict)
+                    and any(
+                        value is not None
+                        for value in label.get("nutrition_per_serving", {}).values()
+                    )
+                    else "nutrition_per_100"
+                ),
             }
         )
 
@@ -1555,15 +1646,22 @@ def _apply_label_serving_confirmation(
             "pieces": "piece",
         }
         unit = aliases.get(unit, unit)
-        if unit not in {"g", "ml", "l", "serving", "piece"}:
+        quantity = float(item.quantity)
+        if unit == "l":
+            quantity *= 1000.0
+            unit = "ml"
+
+        if unit not in {"g", "ml", "serving", "piece"}:
             raise ValueError(
                 f"Unsupported serving unit '{item.unit}' for {food_id}."
             )
 
-        food["quantity"] = float(item.quantity)
+        food["quantity"] = quantity
         food["unit"] = unit
         if unit == "g":
-            food["estimated_weight_g"] = float(item.quantity)
+            food["estimated_weight_g"] = quantity
+        else:
+            food.pop("estimated_weight_g", None)
         matched += 1
 
     if matched == 0:
