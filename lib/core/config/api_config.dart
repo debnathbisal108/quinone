@@ -24,6 +24,9 @@ class ApiConfig {
   static const String servingConfirmationStartEndpoint =
       "/analyze/serving-confirmation/start";
 
+  static const String mixedMealConfirmationStartEndpoint =
+      "/analyze/mixed-meal-confirmation/start";
+
   static const String recipeSearchEndpoint =
       "/recipes/usda/search";
 
