@@ -87,6 +87,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     final colorScheme = theme.colorScheme;
 
     return Scaffold(
+      resizeToAvoidBottomInset: true,
       body: SafeArea(
         child: Column(
           children: [
@@ -109,63 +110,78 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 onPageChanged: (index) => setState(() => _currentPage = index),
                 itemBuilder: (context, index) {
                   final data = _pages[index];
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 28),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Container(
-                          width: 152,
-                          height: 152,
-                          decoration: BoxDecoration(
-                            color: colorScheme.primaryContainer,
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(
-                            data.icon,
-                            size: 68,
-                            color: colorScheme.onPrimaryContainer,
+                  return LayoutBuilder(
+                    builder: (context, constraints) => SingleChildScrollView(
+                      keyboardDismissBehavior:
+                          ScrollViewKeyboardDismissBehavior.onDrag,
+                      padding: const EdgeInsets.symmetric(horizontal: 28),
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minHeight: constraints.maxHeight,
+                        ),
+                        child: IntrinsicHeight(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Container(
+                                width: 152,
+                                height: 152,
+                                decoration: BoxDecoration(
+                                  color: colorScheme.primaryContainer,
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Icon(
+                                  data.icon,
+                                  size: 68,
+                                  color: colorScheme.onPrimaryContainer,
+                                ),
+                              ),
+                              const SizedBox(height: 44),
+                              Text(
+                                data.title,
+                                textAlign: TextAlign.center,
+                                style: theme.textTheme.headlineMedium?.copyWith(
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                              Text(
+                                data.description,
+                                textAlign: TextAlign.center,
+                                style: theme.textTheme.bodyLarge?.copyWith(
+                                  color: colorScheme.onSurfaceVariant,
+                                  height: 1.45,
+                                ),
+                              ),
+                              if (index == 0) ...[
+                                const SizedBox(height: 26),
+                                TextField(
+                                  controller: _nameController,
+                                  autofocus: true,
+                                  scrollPadding:
+                                      const EdgeInsets.only(bottom: 140),
+                                  textCapitalization:
+                                      TextCapitalization.words,
+                                  textInputAction: TextInputAction.done,
+                                  decoration: InputDecoration(
+                                    labelText: 'Your name',
+                                    hintText: 'What should Quinone call you?',
+                                    errorText: _nameError,
+                                    prefixIcon:
+                                        const Icon(Icons.badge_outlined),
+                                  ),
+                                  onChanged: (_) {
+                                    if (_nameError != null) {
+                                      setState(() => _nameError = null);
+                                    }
+                                  },
+                                  onSubmitted: (_) => _nextPage(),
+                                ),
+                              ],
+                            ],
                           ),
                         ),
-                        const SizedBox(height: 44),
-                        Text(
-                          data.title,
-                          textAlign: TextAlign.center,
-                          style: theme.textTheme.headlineMedium?.copyWith(
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          data.description,
-                          textAlign: TextAlign.center,
-                          style: theme.textTheme.bodyLarge?.copyWith(
-                            color: colorScheme.onSurfaceVariant,
-                            height: 1.45,
-                          ),
-                        ),
-                        if (index == 0) ...[
-                          const SizedBox(height: 26),
-                          TextField(
-                            controller: _nameController,
-                            autofocus: true,
-                            textCapitalization: TextCapitalization.words,
-                            textInputAction: TextInputAction.done,
-                            decoration: InputDecoration(
-                              labelText: 'Your name',
-                              hintText: 'What should Quinone call you?',
-                              errorText: _nameError,
-                              prefixIcon: const Icon(Icons.badge_outlined),
-                            ),
-                            onChanged: (_) {
-                              if (_nameError != null) {
-                                setState(() => _nameError = null);
-                              }
-                            },
-                            onSubmitted: (_) => _nextPage(),
-                          ),
-                        ],
-                      ],
+                      ),
                     ),
                   );
                 },
