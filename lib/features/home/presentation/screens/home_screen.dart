@@ -102,6 +102,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           suffix: today.isEmpty ? null : 'kcal',
                           icon: Icons.local_fire_department_rounded,
                           color: Colors.orange,
+                          onTap: today.isEmpty
+                              ? null
+                              : () => _showTodaySummaryBreakdown(
+                                    context,
+                                    type: _TodaySummaryType.calories,
+                                    records: today,
+                                  ),
                         ),
                       ),
                       const SizedBox(width: 14),
@@ -112,6 +119,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           suffix: today.isEmpty ? null : 'g',
                           icon: Icons.fitness_center_rounded,
                           color: Colors.green,
+                          onTap: today.isEmpty
+                              ? null
+                              : () => _showTodaySummaryBreakdown(
+                                    context,
+                                    type: _TodaySummaryType.protein,
+                                    records: today,
+                                  ),
                         ),
                       ),
                     ],
@@ -125,6 +139,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           value: '${today.length}',
                           icon: Icons.restaurant_menu_rounded,
                           color: Colors.teal,
+                          onTap: today.isEmpty
+                              ? null
+                              : () => _showTodaySummaryBreakdown(
+                                    context,
+                                    type: _TodaySummaryType.meals,
+                                    records: today,
+                                  ),
                         ),
                       ),
                       const SizedBox(width: 14),
@@ -206,24 +227,30 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         return StatefulBuilder(
           builder: (context, setDialogState) => AlertDialog(
             title: const Text('What should Quinone call you?'),
-            content: TextField(
-              controller: controller,
-              autofocus: true,
-              textCapitalization: TextCapitalization.words,
-              textInputAction: TextInputAction.done,
-              decoration: InputDecoration(
-                labelText: 'Your name',
-                hintText: 'Enter your name',
-                errorText: error,
+            scrollable: true,
+            content: SingleChildScrollView(
+              child: TextField(
+                controller: controller,
+                autofocus: true,
+                scrollPadding: const EdgeInsets.only(bottom: 120),
+                textCapitalization: TextCapitalization.words,
+                textInputAction: TextInputAction.done,
+                decoration: InputDecoration(
+                  labelText: 'Your name',
+                  hintText: 'Enter your name',
+                  errorText: error,
+                ),
+                onSubmitted: (_) {
+                  final value = controller.text.trim();
+                  if (value.length < 2) {
+                    setDialogState(
+                      () => error = 'Enter at least 2 characters.',
+                    );
+                    return;
+                  }
+                  Navigator.of(dialogContext).pop(value);
+                },
               ),
-              onSubmitted: (_) {
-                final value = controller.text.trim();
-                if (value.length < 2) {
-                  setDialogState(() => error = 'Enter at least 2 characters.');
-                  return;
-                }
-                Navigator.of(dialogContext).pop(value);
-              },
             ),
             actions: [
               FilledButton(
@@ -390,14 +417,6 @@ class _StatCard extends StatelessWidget {
               ),
               const SizedBox(height: 5),
               Text(title),
-              if (onTap != null) ...[
-                const SizedBox(height: 3),
-                Icon(
-                  Icons.touch_app_outlined,
-                  size: 14,
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ],
             ],
           ),
         ),
@@ -472,6 +491,172 @@ List<AnalysisHistoryRecord> _todayRecords(List<AnalysisHistoryRecord> records) {
         local.month == now.month &&
         local.day == now.day;
   }).toList(growable: false);
+}
+
+enum _TodaySummaryType { calories, protein, meals }
+
+void _showTodaySummaryBreakdown(
+  BuildContext context, {
+  required _TodaySummaryType type,
+  required List<AnalysisHistoryRecord> records,
+}) {
+  final pageContext = context;
+  final totalCalories = records.fold<double>(
+    0,
+    (sum, record) => sum + record.calories,
+  );
+  final totalProtein = records.fold<double>(
+    0,
+    (sum, record) => sum + record.protein,
+  );
+  final title = switch (type) {
+    _TodaySummaryType.calories => 'Calories by meal',
+    _TodaySummaryType.protein => 'Protein by meal',
+    _TodaySummaryType.meals => "Today's meals",
+  };
+  final totalText = switch (type) {
+    _TodaySummaryType.calories => '${totalCalories.round()} kcal today',
+    _TodaySummaryType.protein =>
+      '${totalProtein.toStringAsFixed(1)} g protein today',
+    _TodaySummaryType.meals =>
+      '${records.length} ${records.length == 1 ? 'meal' : 'meals'} analysed today',
+  };
+  final sorted = [...records]
+    ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+  showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    useSafeArea: true,
+    isScrollControlled: true,
+    builder: (sheetContext) {
+      final theme = Theme.of(sheetContext);
+
+      return DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.62,
+        minChildSize: 0.38,
+        maxChildSize: 0.90,
+        builder: (context, controller) => ListView(
+          controller: controller,
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 30),
+          children: [
+            Text(
+              title,
+              style: theme.textTheme.headlineSmall?.copyWith(
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              totalText,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 18),
+            ...sorted.map(
+              (record) {
+                final value = type == _TodaySummaryType.protein
+                    ? record.protein
+                    : record.calories;
+                final total = type == _TodaySummaryType.protein
+                    ? totalProtein
+                    : totalCalories;
+                final fraction = total <= 0
+                    ? 0.0
+                    : (value / total).clamp(0.0, 1.0).toDouble();
+                final localTime = TimeOfDay.fromDateTime(
+                  record.createdAt.toLocal(),
+                );
+
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: Material(
+                    color: theme.colorScheme.surfaceContainerLow,
+                    borderRadius: BorderRadius.circular(18),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(18),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        pageContext.push('/result', extra: record.rawResult);
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(
+                            color: theme.colorScheme.outlineVariant,
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    record.mealName,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.titleSmall?.copyWith(
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Text(
+                                  MaterialLocalizations.of(sheetContext)
+                                      .formatTimeOfDay(localTime),
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: theme.colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                                const SizedBox(width: 4),
+                                const Icon(Icons.chevron_right_rounded),
+                              ],
+                            ),
+                            const SizedBox(height: 7),
+                            Text(
+                              '${record.calories.round()} kcal · '
+                              '${record.protein.toStringAsFixed(1)} g protein',
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                            if (type != _TodaySummaryType.meals) ...[
+                              const SizedBox(height: 11),
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(999),
+                                child: LinearProgressIndicator(
+                                  minHeight: 7,
+                                  value: fraction,
+                                  backgroundColor:
+                                      theme.colorScheme.surfaceContainerHighest,
+                                ),
+                              ),
+                              const SizedBox(height: 5),
+                              Text(
+                                '${(fraction * 100).round()}% of today’s '
+                                '${type == _TodaySummaryType.protein ? 'protein' : 'calories'}',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      );
+    },
+  );
 }
 
 
