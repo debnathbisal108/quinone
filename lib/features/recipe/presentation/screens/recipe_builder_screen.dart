@@ -48,7 +48,6 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
   AnalysisJobProgress? _progress;
   final List<TextEditingController> _labelQuantityControllers = [];
 
-  
   @override
   void initState() {
     super.initState();
@@ -478,6 +477,130 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
                   ),
                 );
               }),
+            if (widget.labelItems.isNotEmpty) ...[
+              const SizedBox(height: 26),
+              Text(
+                'Packaged foods',
+                style: theme.textTheme.titleLarge?.copyWith(
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Nutrition comes from the label you uploaded. Confirm the amount you actually consumed.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 12),
+              ...List.generate(
+                widget.labelItems.length,
+                (index) {
+                  final item = widget.labelItems[index];
+                  final name =
+                      item['name']?.toString().trim().isNotEmpty == true
+                          ? item['name'].toString().trim()
+                          : 'Packaged food';
+                  final brand = item['brand']?.toString().trim();
+                  final unit =
+                      item['unit']?.toString().trim().isNotEmpty == true
+                          ? item['unit'].toString().trim()
+                          : 'serving';
+                  final servingValue =
+                      (item['serving_size_value'] as num?)?.toDouble();
+                  final servingUnit =
+                      item['serving_size_unit']?.toString().trim();
+                  final servingsPerContainer =
+                      (item['servings_per_container'] as num?)?.toDouble();
+
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: scheme.surfaceContainerLow,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: scheme.outlineVariant,
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            CircleAvatar(
+                              backgroundColor:
+                                  scheme.primaryContainer,
+                              child: Icon(
+                                Icons.inventory_2_outlined,
+                                color: scheme.onPrimaryContainer,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    name,
+                                    style: theme.textTheme.titleMedium
+                                        ?.copyWith(
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                                  if (brand != null &&
+                                      brand.isNotEmpty) ...[
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      brand,
+                                      style: theme.textTheme.bodySmall
+                                          ?.copyWith(
+                                        color:
+                                            scheme.onSurfaceVariant,
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (servingValue != null &&
+                            servingValue > 0) ...[
+                          const SizedBox(height: 12),
+                          Text(
+                            'Label serving: ${_format(servingValue)}'
+                            '${servingUnit != null && servingUnit.isNotEmpty ? ' $servingUnit' : ''}'
+                            '${servingsPerContainer != null && servingsPerContainer > 0 ? ' • ${_format(servingsPerContainer)} servings/container' : ''}',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 14),
+                        TextField(
+                          controller:
+                              _labelQuantityControllers[index],
+                          enabled: !_analyzing,
+                          keyboardType:
+                              const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          decoration: InputDecoration(
+                            labelText: 'Amount consumed',
+                            suffixText: unit,
+                            helperText:
+                                'Change this if you consumed a different amount.',
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ],
             const SizedBox(height: 22),
             Text('Portion', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
             const SizedBox(height: 10),
