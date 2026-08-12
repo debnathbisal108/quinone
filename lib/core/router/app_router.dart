@@ -60,9 +60,23 @@ class AppRouter {
               }
             }
           }
+          String? analysisId;
+          List<Map<String, dynamic>> labelItems = const [];
+          if (extra is Map) {
+            analysisId = extra['analysis_id']?.toString();
+            final rawLabels = extra['label_items'];
+            if (rawLabels is List) {
+              labelItems = rawLabels
+                  .whereType<Map>()
+                  .map((item) => Map<String, dynamic>.from(item))
+                  .toList(growable: false);
+            }
+          }
           return RecipeBuilderScreen(
             initialRecipe: initialRecipe,
             photoReview: photoReview,
+            analysisId: analysisId,
+            labelItems: labelItems,
           );
         },
       ),
