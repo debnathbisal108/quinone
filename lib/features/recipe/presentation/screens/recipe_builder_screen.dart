@@ -46,7 +46,9 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
   bool _analyzing = false;
   String? _searchError;
   AnalysisJobProgress? _progress;
+  final List<TextEditingController> _labelQuantityControllers = [];
 
+  
   @override
   void initState() {
     super.initState();
