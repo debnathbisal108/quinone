@@ -32,9 +32,14 @@ class ResultScreen extends StatelessWidget {
     required String nutrientKey,
     required double amount,
     required String unit,
+    List<_NutrientDetailItem> summaryValues = const [],
+    String summaryTitle = 'Coverage summary',
+    String? summaryNote,
     List<_NutrientDetailItem> relatedValues = const [],
     String breakdownTitle = 'Breakdown',
     String? breakdownNote,
+    String contributorTitle = 'Food contributors',
+    String? contributorNote,
   }) {
     final contributions = result.contributionsFor(nutrientKey);
 
@@ -69,6 +74,27 @@ class ResultScreen extends StatelessWidget {
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
                 ),
+                if (summaryValues.isNotEmpty) ...[
+                  const SizedBox(height: 20),
+                  Text(
+                    summaryTitle,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  if (summaryNote != null && summaryNote.trim().isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      summaryNote,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 10),
+                  _NutrientDetailList(items: summaryValues),
+                ],
                 if (relatedValues.isNotEmpty) ...[
                   const SizedBox(height: 20),
                   Text(
@@ -89,73 +115,26 @@ class ResultScreen extends StatelessWidget {
                     ),
                   ],
                   const SizedBox(height: 10),
-                  Container(
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.surfaceContainerLow,
-                      borderRadius: BorderRadius.circular(18),
-                      border: Border.all(
-                        color: theme.colorScheme.outlineVariant,
-                      ),
-                    ),
-                    child: Column(
-                      children: [
-                        for (
-                          var index = 0;
-                          index < relatedValues.length;
-                          index++
-                        ) ...[
-                          Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 14,
-                            ),
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    relatedValues[index].label,
-                                    style:
-                                        theme.textTheme.bodyLarge?.copyWith(
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                Text(
-                                  relatedValues[index].available
-                                      ? '${_formatNumber(relatedValues[index].value)} '
-                                          '${relatedValues[index].unit}'
-                                      : 'Not available',
-                                  style:
-                                      theme.textTheme.titleSmall?.copyWith(
-                                    fontWeight: FontWeight.w800,
-                                    color: relatedValues[index].available
-                                        ? null
-                                        : theme
-                                            .colorScheme
-                                            .onSurfaceVariant,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          if (index < relatedValues.length - 1)
-                            Divider(
-                              height: 1,
-                              color: theme.colorScheme.outlineVariant,
-                            ),
-                        ],
-                      ],
-                    ),
-                  ),
+                  _NutrientDetailList(items: relatedValues),
                 ],
                 const SizedBox(height: 20),
                 Text(
-                  'Food contributors',
+                  contributorTitle,
                   style: theme.textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.w800,
                   ),
                 ),
+                if (contributorNote != null &&
+                    contributorNote.trim().isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    contributorNote,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 10),
                 if (contributions.isEmpty)
                   Container(
@@ -326,6 +305,16 @@ class ResultScreen extends StatelessWidget {
     );
   }
 
+  double _reportedMajorFatTotal() {
+    final reported = (result.saturatedFat ?? 0) +
+        (result.monounsaturatedFat ?? 0) +
+        (result.polyunsaturatedFat ?? 0);
+    return reported.clamp(0, result.fat).toDouble();
+  }
+
+  double _unclassifiedFat() =>
+      (result.fat - _reportedMajorFatTotal()).clamp(0, result.fat).toDouble();
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -366,7 +355,7 @@ class ResultScreen extends StatelessWidget {
         leading: IconButton(
           onPressed: () => context.canPop()
               ? context.pop()
-              : context.go('/home'),
+              : context.go('/app'),
           icon: const Icon(Icons.arrow_back_rounded),
         ),
       ),
@@ -450,10 +439,36 @@ class ResultScreen extends StatelessWidget {
                                         nutrientKey: 'fat_g',
                                         amount: result.fat,
                                         unit: 'g',
-                                        breakdownTitle: 'Known fat composition',
+                                        summaryTitle: 'How the total is covered',
+                                        summaryNote:
+                                            'The total-fat value is authoritative. Fat databases often report only part of the fatty-acid composition, so the subtype rows may not add up to the total.',
+                                        summaryValues: [
+                                          _NutrientDetailItem(
+                                            label: 'Total fat',
+                                            value: result.fat,
+                                            unit: 'g',
+                                            available: true,
+                                          ),
+                                          _NutrientDetailItem(
+                                            label: 'Reported major subtypes',
+                                            value: _reportedMajorFatTotal(),
+                                            unit: 'g',
+                                            available: true,
+                                          ),
+                                          _NutrientDetailItem(
+                                            label: 'Not classified by source',
+                                            value: _unclassifiedFat(),
+                                            unit: 'g',
+                                            available: true,
+                                          ),
+                                        ],
+                                        breakdownTitle: 'Reported fat details',
                                         breakdownNote:
-                                            'USDA may not report every fatty-acid subtype for every food. '
-                                            'The known subtypes below therefore may not add up to total fat.',
+                                            'Saturated, monounsaturated, and polyunsaturated fat are major classes. Omega-3 and omega-6 are subsets of polyunsaturated fat, while trans fat is reported separately and cholesterol is not part of total fat. Do not add every row together.',
+                                        contributorTitle:
+                                            'Total-fat contributors',
+                                        contributorNote:
+                                            'These values show how much total fat each food contributed. They are not saturated-fat or unsaturated-fat amounts.',
                                         relatedValues: [
                                           _NutrientDetailItem(
                                             label: 'Saturated fat',
@@ -639,7 +654,7 @@ class ResultScreen extends StatelessWidget {
                       SizedBox(
                         height: 52,
                         child: FilledButton.icon(
-                          onPressed: () => context.go('/upload'),
+                          onPressed: () => context.push('/upload'),
                           icon: const Icon(Icons.add_a_photo_outlined),
                           label: const Text('Analyze another meal'),
                         ),
@@ -851,6 +866,70 @@ class _NutrientDetailItem {
   final String unit;
   final bool available;
 }
+
+class _NutrientDetailList extends StatelessWidget {
+  const _NutrientDetailList({required this.items});
+
+  final List<_NutrientDetailItem> items;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Container(
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Column(
+        children: [
+          for (var index = 0; index < items.length; index++) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 16,
+                vertical: 14,
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      items[index].label,
+                      style: theme.textTheme.bodyLarge?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Text(
+                    items[index].available
+                        ? '${_formatResultNumber(items[index].value)} '
+                            '${items[index].unit}'
+                        : 'Not available',
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w800,
+                      color: items[index].available
+                          ? null
+                          : theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (index < items.length - 1)
+              Divider(
+                height: 1,
+                color: theme.colorScheme.outlineVariant,
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+String _formatResultNumber(double value) =>
+    value >= 10 ? value.toStringAsFixed(1) : value.toStringAsFixed(2);
 
 class _ScoreMetricChip extends StatelessWidget {
   const _ScoreMetricChip({
