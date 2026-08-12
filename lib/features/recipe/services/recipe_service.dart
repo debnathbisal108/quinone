@@ -162,6 +162,82 @@ class RecipeService {
     }
   }
 
+  Future<Map<String, dynamic>> analyzeConfirmedMixedMeal({
+    required String analysisId,
+    required ManualRecipe recipe,
+    required List<Map<String, dynamic>> labelItems,
+    void Function(AnalysisJobProgress progress)? onProgress,
+  }) async {
+    try {
+      final payload = {
+        'analysis_id': analysisId,
+        'recipe_name': recipe.name,
+        'ingredients': recipe.ingredients
+            .map((item) => item.toBackendJson())
+            .toList(growable: false),
+        'label_items': labelItems,
+        'servings_made': recipe.servingsMade,
+        'servings_eaten': recipe.servingsEaten,
+      };
+
+      final start = await _dio.post<dynamic>(
+        _absoluteUrl(ApiConfig.mixedMealConfirmationStartEndpoint),
+        data: jsonEncode(payload),
+        options: Options(
+          responseType: ResponseType.json,
+          contentType: Headers.jsonContentType,
+          headers: const {'Accept': 'application/json'},
+        ),
+      );
+
+      final startMap = _asMap(start.data);
+      final jobId = startMap['job_id']?.toString().trim();
+      if (jobId == null || jobId.isEmpty) {
+        throw const RecipeServiceException(
+          'The server could not start the confirmed meal analysis.',
+        );
+      }
+
+      while (true) {
+        final response = await _dio.get<dynamic>(
+          _absoluteUrl(ApiConfig.analysisJobEndpoint(jobId)),
+          options: Options(responseType: ResponseType.json),
+        );
+        final progress = AnalysisJobProgress.fromJson(_asMap(response.data));
+        onProgress?.call(progress);
+        if (progress.status == 'completed') {
+          final result = progress.result;
+          if (result == null) {
+            throw const RecipeServiceException(
+              'Analysis finished without a result.',
+            );
+          }
+          return result;
+        }
+        if (progress.status == 'failed') {
+          throw RecipeServiceException(
+            _friendlyServerMessage(
+              progress.error ?? progress.message,
+              fallback: 'The confirmed meal could not be analyzed.',
+            ),
+          );
+        }
+        if (progress.status == 'cancelled') {
+          throw const RecipeServiceException('Analysis was cancelled.');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 650));
+      }
+    } on RecipeServiceException {
+      rethrow;
+    } on DioException catch (error, stackTrace) {
+      throw _mapDioError(
+        error,
+        operation: 'analyze confirmed mixed meal',
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
   RecipeServiceException _mapDioError(
     DioException error, {
     required String operation,
