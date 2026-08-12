@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+
+import '../../../history/providers/analysis_history_provider.dart';
 
 import '../../../upload/models/analysis_job_progress.dart';
 import '../../services/serving_confirmation_service.dart';
 
-class ServingConfirmationScreen extends StatefulWidget {
+class ServingConfirmationScreen extends ConsumerStatefulWidget {
   const ServingConfirmationScreen({
     super.key,
     required this.payload,
@@ -13,12 +16,12 @@ class ServingConfirmationScreen extends StatefulWidget {
   final Map<String, dynamic> payload;
 
   @override
-  State<ServingConfirmationScreen> createState() =>
+  ConsumerState<ServingConfirmationScreen> createState() =>
       _ServingConfirmationScreenState();
 }
 
 class _ServingConfirmationScreenState
-    extends State<ServingConfirmationScreen> {
+    extends ConsumerState<ServingConfirmationScreen> {
   final _service = ServingConfirmationService();
   final List<TextEditingController> _controllers = [];
   late final List<Map<String, dynamic>> _items;
@@ -90,6 +93,7 @@ class _ServingConfirmationScreenState
           if (mounted) setState(() => _progress = progress);
         },
       );
+      await ref.read(analysisHistoryProvider.notifier).saveResult(result);
       if (!mounted) return;
       context.pushReplacement('/result', extra: result);
     } catch (error) {
