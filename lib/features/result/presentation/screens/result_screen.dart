@@ -5,6 +5,7 @@ import '../widgets/food_card.dart';
 import '../widgets/health_score_card.dart';
 import '../widgets/macro_circle.dart';
 import '../widgets/micronutrient_bar.dart';
+import '../widgets/nutrient_target_view_data.dart';
 import '../widgets/score_gauge.dart';
 
 // import 'package:flutter/material.dart';
@@ -303,27 +304,26 @@ class ResultScreen extends StatelessWidget {
     );
   }
 
-  double _resolvedMacroTarget(
+  NutrientTargetViewData _targetFor(
     String nutrientKey,
-    double fallback,
+    double fallbackValue,
+    String fallbackUnit,
   ) {
-    if (!result.personalizationApplied) return fallback;
-    final target = result.nutrientTargets[nutrientKey];
-    if (target == null || !target.isResolved) return fallback;
+    if (result.personalizationApplied) {
+      final personalizedTarget = result.targetForNutrient(nutrientKey);
+      if (personalizedTarget != null && personalizedTarget.isResolved) {
+        return NutrientTargetViewData.personalized(
+          personalizedTarget,
+          fallbackValue: fallbackValue,
+          fallbackUnit: fallbackUnit,
+        );
+      }
+    }
 
-    return target.resolvedValue ??
-        target.baselineValue ??
-        target.rangeLow ??
-        fallback;
-  }
-
-  double? _personalizedTargetValue(String nutrientKey) {
-    if (!result.personalizationApplied) return null;
-    final target = result.nutrientTargets[nutrientKey];
-    if (target == null || !target.isResolved) return null;
-    return target.resolvedValue ??
-        target.baselineValue ??
-        target.rangeLow;
+    return NutrientTargetViewData.generic(
+      value: fallbackValue,
+      unit: fallbackUnit,
+    );
   }
 
   @override
@@ -333,28 +333,28 @@ class ResultScreen extends StatelessWidget {
       _MacroItem(
         label: 'Protein',
         value: result.protein,
-        target: _resolvedMacroTarget('protein_g', 50),
+        target: _targetFor('protein_g', 50, 'g'),
         nutrientKey: 'protein_g',
         icon: Icons.fitness_center_rounded,
       ),
       _MacroItem(
         label: 'Carbohydrates',
         value: result.carbohydrates,
-        target: _resolvedMacroTarget('carbohydrate_g', 275),
+        target: _targetFor('carbohydrate_g', 275, 'g'),
         nutrientKey: 'carbohydrate_g',
         icon: Icons.grain_rounded,
       ),
       _MacroItem(
         label: 'Fat',
         value: result.fat,
-        target: _resolvedMacroTarget('fat_g', 78),
+        target: _targetFor('fat_g', 78, 'g'),
         nutrientKey: 'fat_g',
         icon: Icons.water_drop_outlined,
       ),
       _MacroItem(
         label: 'Fiber',
         value: result.fiber,
-        target: _resolvedMacroTarget('fiber_g', 28),
+        target: _targetFor('fiber_g', 28, 'g'),
         nutrientKey: 'fiber_g',
         icon: Icons.eco_outlined,
       ),
@@ -593,8 +593,10 @@ class ResultScreen extends StatelessWidget {
                                 ),
                                 child: MicronutrientBar(
                                   nutrient: result.micronutrients[index],
-                                  targetOverride: _personalizedTargetValue(
+                                  target: _targetFor(
                                     result.micronutrients[index].key,
+                                    result.micronutrients[index].dailyValue,
+                                    result.micronutrients[index].unit,
                                   ),
                                   onTap: () {
                                     final nutrient = result.micronutrients[index];
@@ -620,24 +622,6 @@ class ResultScreen extends StatelessWidget {
                             height: 1.4,
                           ),
                         ),
-                      ],
-                      if (result.personalizationApplied &&
-                          result.nutrientTargets.isNotEmpty) ...[
-                        const SizedBox(height: 32),
-                        const _SectionTitle('Personalized daily targets'),
-                        const SizedBox(height: 14),
-                        ...result.nutrientTargets.values
-                            .where((target) =>
-                                target.isResolved ||
-                                target.status == 'requires_clinical_input')
-                            .map(
-                              (target) => Padding(
-                                padding: const EdgeInsets.only(bottom: 10),
-                                child: _PersonalizedTargetCard(
-                                  target: target,
-                                ),
-                              ),
-                            ),
                       ],
                       if (result.personalizationApplied &&
                           result.nutrientRiskFlags.isNotEmpty) ...[
@@ -785,78 +769,6 @@ class _CaloriesCard extends StatelessWidget {
   }
 }
 
-class _PersonalizedTargetCard extends StatelessWidget {
-  const _PersonalizedTargetCard({required this.target});
-
-  final PersonalizedNutrientTarget target;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    String valueText;
-    if (target.status == 'requires_clinical_input') {
-      valueText = 'Clinical input required';
-    } else if (target.isRange) {
-      valueText = '${_formatTarget(target.rangeLow!)}–${_formatTarget(target.rangeHigh!)} ${target.unit}';
-    } else if (target.resolvedValue != null) {
-      valueText = '${_formatTarget(target.resolvedValue!)} ${target.unit}';
-    } else {
-      valueText = 'Not resolved';
-    }
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(
-            target.status == 'requires_clinical_input'
-                ? Icons.medical_information_outlined
-                : Icons.track_changes_rounded,
-            color: theme.colorScheme.primary,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  target.name,
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  valueText,
-                  style: theme.textTheme.bodyLarge?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                if (target.targetType != null) ...[
-                  const SizedBox(height: 3),
-                  Text(
-                    _displayTargetType(target.targetType!),
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _RiskFlagCard extends StatelessWidget {
   const _RiskFlagCard({required this.flag});
 
@@ -894,12 +806,6 @@ class _RiskFlagCard extends StatelessWidget {
   }
 }
 
-String _formatTarget(double value) {
-  if (value == value.roundToDouble()) return value.round().toString();
-  if (value.abs() >= 10) return value.toStringAsFixed(1);
-  return value.toStringAsFixed(2);
-}
-
 class _SectionTitle extends StatelessWidget {
   const _SectionTitle(this.text);
 
@@ -927,7 +833,7 @@ class _MacroItem {
 
   final String label;
   final double value;
-  final double target;
+  final NutrientTargetViewData target;
   final String nutrientKey;
   final IconData icon;
 }
@@ -1141,35 +1047,6 @@ class _HealthContributorTile
   }
 }
 
-String _displayTargetType(String rawValue) {
-  final normalized = rawValue.trim().toLowerCase();
-
-  const exactLabels = <String, String>{
-    'rda': 'Recommended Dietary Allowance',
-    'ai': 'Adequate Intake',
-    'eer': 'Estimated Energy Requirement',
-    'amdr': 'Acceptable Macronutrient Distribution Range',
-    'clinical_target_range': 'Clinical target range',
-    'clinical_goal_range': 'Clinical goal range',
-    'clinical_goal': 'Clinical goal',
-    'maximum': 'Recommended maximum',
-    'minimum': 'Recommended minimum',
-  };
-
-  final exact = exactLabels[normalized];
-  if (exact != null) return exact;
-
-  return normalized
-      .replaceAll('_', ' ')
-      .split(RegExp(r'\s+'))
-      .where((word) => word.isNotEmpty)
-      .map(
-        (word) =>
-            '${word[0].toUpperCase()}${word.substring(1).toLowerCase()}',
-      )
-      .join(' ');
-}
-
 String _impactLabel(
   double effectiveWeight, {
   required bool positive,
@@ -1229,4 +1106,3 @@ class _ImpactBadge extends StatelessWidget {
     );
   }
 }
-
