@@ -828,8 +828,8 @@ async def _candidate_is_accessible(
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with _fetch_semaphore:
-                await _throttle_fetch()
+            async with _semaphore:
+                await _throttle()
                 response = await client.get(
                     url,
                     params={"api_key": USDA_API_KEY},
