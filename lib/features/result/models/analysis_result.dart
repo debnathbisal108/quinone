@@ -55,6 +55,24 @@ class AnalysisResult {
   final List<NutrientRiskFlag> nutrientRiskFlags;
   final bool personalizationApplied;
 
+  /// Returns the personalized target matching a nutrition payload key.
+  ///
+  /// Most payloads use the registry's canonical key. Some authoritative
+  /// nutrition sources use an accepted alias instead (for example,
+  /// `vitamin_a_ug_rae`). The target engine includes those aliases so the
+  /// result UI can still place the personalized target on the matching
+  /// nutrient card.
+  PersonalizedNutrientTarget? targetForNutrient(String nutrientKey) {
+    final directMatch = nutrientTargets[nutrientKey];
+    if (directMatch != null) return directMatch;
+
+    for (final target in nutrientTargets.values) {
+      if (target.acceptedInputKeys.contains(nutrientKey)) return target;
+    }
+
+    return null;
+  }
+
   /// A display-only de-duplicated food list. It never changes authoritative
   /// meal totals. Enrichment pipelines can carry both the visible portion and
   /// a database reference row for the same food; the best portion row wins.
@@ -412,6 +430,7 @@ class PersonalizedNutrientTarget {
     required this.requiredInputs,
     required this.warnings,
     required this.overrideChain,
+    required this.acceptedInputKeys,
   });
 
   final String key;
@@ -427,6 +446,7 @@ class PersonalizedNutrientTarget {
   final List<String> requiredInputs;
   final List<String> warnings;
   final List<String> overrideChain;
+  final List<String> acceptedInputKeys;
 
   bool get isResolved =>
       status == 'resolved' || status == 'resolved_range';
@@ -453,6 +473,7 @@ class PersonalizedNutrientTarget {
       requiredInputs: _stringList(json['required_inputs']),
       warnings: _stringList(json['warnings']),
       overrideChain: _stringList(json['override_chain']),
+      acceptedInputKeys: _stringList(json['accepted_input_keys']),
     );
   }
 }
