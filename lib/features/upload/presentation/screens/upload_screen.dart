@@ -143,6 +143,9 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
           extra: {
             'recipe': recipe.toJson(),
             'photo_review': true,
+            'analysis_id': data['analysis_id']?.toString(),
+            if (data['label_items'] is List)
+              'label_items': data['label_items'],
           },
         );
       } catch (_) {
