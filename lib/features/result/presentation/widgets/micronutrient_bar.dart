@@ -1,32 +1,24 @@
 import 'package:flutter/material.dart';
 
 import '../../models/analysis_result.dart';
+import 'nutrient_target_view_data.dart';
 
 class MicronutrientBar extends StatelessWidget {
   const MicronutrientBar({
     super.key,
     required this.nutrient,
+    required this.target,
     required this.onTap,
-    this.targetOverride,
   });
 
   final Micronutrient nutrient;
+  final NutrientTargetViewData target;
   final VoidCallback onTap;
-  final double? targetOverride;
-
-  double get _target {
-    final override = targetOverride;
-    if (override != null && override > 0) return override;
-    return nutrient.dailyValue;
-  }
-
-  double get _percent =>
-      _target <= 0 ? 0 : nutrient.amount / _target * 100;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final percent = _percent;
+    final percent = target.ratioFor(nutrient.amount) * 100;
     final over = percent > 100;
     final valueColor = over
         ? theme.colorScheme.error
@@ -85,6 +77,16 @@ class MicronutrientBar extends StatelessWidget {
                   ),
                 ],
               ),
+              const SizedBox(height: 5),
+              Text(
+                target.displayText,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
               const SizedBox(height: 12),
               _MicronutrientProgress(
                 percent: percent,
@@ -139,19 +141,31 @@ class _MicronutrientProgress extends StatelessWidget {
                   ),
                 ],
               )
-            : Row(
-                children: [
-                  // For values over 100%, the green part always represents
-                  // exactly the first 100%. Only the red excess grows.
-                  Expanded(
-                    flex: 100,
-                    child: ColoredBox(color: safeColor),
-                  ),
-                  Expanded(
-                    flex: (clamped - 100).round().clamp(1, 900).toInt(),
-                    child: ColoredBox(color: excessColor),
-                  ),
-                ],
+            : LayoutBuilder(
+                builder: (context, constraints) {
+                  // Target and excess share the same full-width bar. As the
+                  // total rises beyond 100%, the green target share shrinks
+                  // proportionally and the red excess share grows.
+                  final targetShare = (100 / clamped)
+                      .clamp(0.0, 1.0)
+                      .toDouble();
+                  final targetWidth = constraints.maxWidth * targetShare;
+
+                  return Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      ColoredBox(color: excessColor),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: SizedBox(
+                          width: targetWidth,
+                          height: double.infinity,
+                          child: ColoredBox(color: safeColor),
+                        ),
+                      ),
+                    ],
+                  );
+                },
               ),
       ),
     );
