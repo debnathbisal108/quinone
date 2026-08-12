@@ -148,6 +148,11 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
                     _metricKey = key;
                     _selectedDay = null;
                   });
+                  _showHealthDomainDailyBreakdown(
+                    context,
+                    insights: insights,
+                    domainKey: key,
+                  );
                 },
               )
             else
@@ -198,6 +203,166 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
       ),
     );
   }
+}
+
+void _showHealthDomainDailyBreakdown(
+  BuildContext context, {
+  required NutritionInsights insights,
+  required String domainKey,
+}) {
+  final days = insights.dailyInsights
+      .where((day) => day.healthScores[domainKey] != null)
+      .toList(growable: false)
+    ..sort((a, b) => b.date.compareTo(a.date));
+  if (days.isEmpty) return;
+
+  final average = days.fold<double>(
+        0,
+        (sum, day) => sum + day.healthScores[domainKey]!,
+      ) /
+      days.length;
+
+  showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    useSafeArea: true,
+    isScrollControlled: true,
+    builder: (sheetContext) {
+      final theme = Theme.of(sheetContext);
+
+      return DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.78,
+        minChildSize: 0.48,
+        maxChildSize: 0.94,
+        builder: (context, controller) => ListView(
+          controller: controller,
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 30),
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        friendlyMetricName(domainKey),
+                        style: theme.textTheme.headlineSmall?.copyWith(
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${days.length} ${days.length == 1 ? 'tracked day' : 'tracked days'} in this period',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: _healthColor(average).withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    '${average.round()}/100 avg',
+                    style: TextStyle(
+                      color: _healthColor(average),
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Each daily score combines that day’s meal scores, weighted by meal energy. Meal rows show what raised or lowered the daily result.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 18),
+            ...days.map(
+              (day) {
+                final dailyScore = day.healthScores[domainKey]!;
+                final meals = day.mealImpacts
+                    .where((meal) => meal.healthScores[domainKey] != null)
+                    .toList(growable: false)
+                  ..sort(
+                    (a, b) => b.healthScores[domainKey]!
+                        .compareTo(a.healthScores[domainKey]!),
+                  );
+
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerLow,
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: theme.colorScheme.outlineVariant,
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                _fullDate(day.date),
+                                style: theme.textTheme.titleSmall?.copyWith(
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              '${dailyScore.round()}/100',
+                              style: theme.textTheme.titleMedium?.copyWith(
+                                color: _healthColor(dailyScore),
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          '${day.mealCount} ${day.mealCount == 1 ? 'meal' : 'meals'} · ${day.calories.round()} kcal · ${healthStatusLabel(dailyScore)}',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                        if (meals.isNotEmpty) ...[
+                          const SizedBox(height: 10),
+                          Divider(color: theme.colorScheme.outlineVariant),
+                          ...meals.map(
+                            (meal) => _MealImpactRow(
+                              mealName: meal.mealName,
+                              score: meal.healthScores[domainKey]!,
+                              dailyScore: dailyScore,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      );
+    },
+  );
 }
 
 class _MetricSelectors extends StatelessWidget {
