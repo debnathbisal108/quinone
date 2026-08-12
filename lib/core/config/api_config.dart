@@ -21,6 +21,9 @@ class ApiConfig {
   static const String backLabelStartEndpoint =
       "/analyze/back-label/start";
 
+  static const String servingConfirmationStartEndpoint =
+      "/analyze/serving-confirmation/start";
+
   static const String recipeSearchEndpoint =
       "/recipes/usda/search";
 
