@@ -99,6 +99,18 @@ def health() -> dict[str, str]:
 
 
 
+
+class LabelServingItemRequest(BaseModel):
+    food_id: str
+    quantity: float = Field(gt=0, le=100000)
+    unit: str
+
+
+class LabelServingConfirmationRequest(BaseModel):
+    analysis_id: str
+    items: list[LabelServingItemRequest]
+
+
 class ManualRecipeIngredientRequest(BaseModel):
     fdc_id: int
     name: str
@@ -428,10 +440,132 @@ async def get_analysis_job(job_id: str) -> dict[str, Any]:
         "completed",
         "waiting_for_back_label",
         "waiting_for_meal_confirmation",
+        "waiting_for_serving_confirmation",
         "no_food_detected",
     }:
         response["result"] = job.get("result")
     return response
+
+
+
+async def _process_label_serving_confirmation_job(
+    *,
+    job_id: str,
+    analysis_id: str,
+    request: LabelServingConfirmationRequest,
+) -> None:
+    try:
+        session = load_session(analysis_id)
+        if session is None:
+            raise ValueError("Analysis session was not found or has expired.")
+
+        base_result = session.get("confirmed_label_result")
+        if not isinstance(base_result, dict):
+            raise ValueError(
+                "The saved nutrition-label result is unavailable."
+            )
+
+        _set_job(
+            job_id,
+            status="running",
+            stage="serving_confirmation",
+            message="Applying the confirmed serving…",
+            progress=0.12,
+        )
+        confirmed_result = _apply_label_serving_confirmation(
+            base_result,
+            request,
+        )
+
+        final_result = await run_nutrica_pipeline(
+            confirmed_result,
+            profile=session.get("profile"),
+            progress_callback=lambda stage, message, progress: _set_job(
+                job_id,
+                status="running",
+                stage=stage,
+                message=message,
+                progress=progress,
+            ),
+            cancellation_check=lambda: _raise_if_cancelled(job_id),
+        )
+        final_result["analysis_id"] = analysis_id
+        delete_session(analysis_id)
+        _set_job(
+            job_id,
+            status="completed",
+            stage="completed",
+            message="Your meal report is ready.",
+            progress=1.0,
+            result=final_result,
+        )
+    except asyncio.CancelledError:
+        _set_job(
+            job_id,
+            status="cancelled",
+            stage="cancelled",
+            message="Analysis cancelled.",
+            progress=0.0,
+        )
+    except Exception as error:
+        _set_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            message="The serving confirmation could not be completed.",
+            error=str(error),
+        )
+
+
+@app.post("/analyze/serving-confirmation/start")
+@app.post(
+    "/api/v1/analyze/serving-confirmation/start",
+    include_in_schema=False,
+)
+async def start_label_serving_confirmation_job(
+    payload: dict[str, Any] = Body(...),
+) -> dict[str, Any]:
+    try:
+        request = (
+            LabelServingConfirmationRequest.model_validate(payload)
+            if hasattr(LabelServingConfirmationRequest, "model_validate")
+            else LabelServingConfirmationRequest.parse_obj(payload)
+        )
+    except ValidationError as error:
+        raise HTTPException(
+            status_code=422,
+            detail="Serving confirmation is invalid.",
+        ) from error
+
+    if load_session(request.analysis_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Analysis session was not found or has expired.",
+        )
+
+    _cleanup_expired_jobs()
+    job_id = str(uuid.uuid4())
+    _set_job(
+        job_id,
+        status="queued",
+        stage="serving_confirmation",
+        message="Serving confirmed. Final analysis is starting…",
+        progress=0.08,
+    )
+    asyncio.create_task(
+        _process_label_serving_confirmation_job(
+            job_id=job_id,
+            analysis_id=request.analysis_id,
+            request=request,
+        )
+    )
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "stage": "serving_confirmation",
+        "message": "Serving confirmed. Final analysis is starting…",
+        "progress": 0.08,
+    }
 
 
 @app.post("/analyze/jobs/{job_id}/cancel")
@@ -510,6 +644,29 @@ async def _process_initial_job(
 
         if status != "completed":
             raise ValueError(f"Unsupported analysis status: {status}")
+
+        if _has_attached_nutrition_label_foods(analysis_result):
+            save_session(
+                analysis_id=job_id,
+                data={
+                    "analysis_id": job_id,
+                    "profile": profile_data,
+                    "confirmed_label_result": analysis_result,
+                },
+            )
+            confirmation = _label_serving_confirmation_payload(
+                analysis_result,
+                analysis_id=job_id,
+            )
+            _set_job(
+                job_id,
+                status="waiting_for_serving_confirmation",
+                stage="serving_confirmation",
+                message="Confirm how much of the packaged food you consumed.",
+                progress=1.0,
+                result=confirmation,
+            )
+            return
 
         _set_job(
             job_id,
@@ -717,27 +874,20 @@ async def _process_back_label_job(
         if status != "completed":
             raise ValueError(f"Unsupported continuation status: {status}")
 
-        final_result = await run_nutrica_pipeline(
+        session["confirmed_label_result"] = continued_result
+        save_session(analysis_id=analysis_id, data=session)
+
+        confirmation = _label_serving_confirmation_payload(
             continued_result,
-            profile=session.get("profile"),
-            progress_callback=lambda stage, message, progress: _set_job(
-                job_id,
-                status="running",
-                stage=stage,
-                message=message,
-                progress=progress,
-            ),
-            cancellation_check=lambda: _raise_if_cancelled(job_id),
+            analysis_id=analysis_id,
         )
-        final_result["analysis_id"] = analysis_id
-        delete_session(analysis_id)
         _set_job(
             job_id,
-            status="completed",
-            stage="completed",
-            message="Your meal report is ready.",
+            status="waiting_for_serving_confirmation",
+            stage="serving_confirmation",
+            message="Confirm how much of the packaged food you consumed.",
             progress=1.0,
-            result=final_result,
+            result=confirmation,
         )
     except asyncio.CancelledError:
         _set_job(job_id, status="cancelled", stage="cancelled", message="Analysis cancelled.", progress=0.0)
@@ -1007,6 +1157,180 @@ async def analyze_back_label(
             ),
         ) from error
 
+
+
+
+def _has_attached_nutrition_label_foods(result: dict[str, Any]) -> bool:
+    meal = result.get("meal")
+    if not isinstance(meal, dict):
+        return False
+    foods = meal.get("foods")
+    if not isinstance(foods, list):
+        return False
+    return any(
+        isinstance(food, dict)
+        and food.get("analysis_route") == "NUTRITION_LABEL"
+        and isinstance(food.get("nutrition_label"), dict)
+        for food in foods
+    )
+
+
+def _label_serving_confirmation_payload(
+    result: dict[str, Any],
+    *,
+    analysis_id: str,
+) -> dict[str, Any]:
+    meal = result.get("meal")
+    if not isinstance(meal, dict):
+        raise ValueError("The label analysis is missing meal data.")
+
+    foods = meal.get("foods")
+    if not isinstance(foods, list):
+        raise ValueError("The label analysis is missing foods.")
+
+    items: list[dict[str, Any]] = []
+    for food in foods:
+        if not isinstance(food, dict):
+            continue
+        if food.get("analysis_route") != "NUTRITION_LABEL":
+            continue
+        label = food.get("nutrition_label")
+        if not isinstance(label, dict):
+            continue
+
+        quantity = food.get("quantity")
+        unit = str(food.get("unit") or "").strip().lower()
+        try:
+            quantity = float(quantity)
+        except (TypeError, ValueError):
+            quantity = 0.0
+
+        serving = label.get("serving_size")
+        serving_value = None
+        serving_unit = ""
+        if isinstance(serving, dict):
+            try:
+                serving_value = float(serving.get("value"))
+            except (TypeError, ValueError):
+                serving_value = None
+            serving_unit = str(serving.get("unit") or "").strip().lower()
+
+        # If vision did not produce a usable consumed quantity, the printed
+        # serving size is a much safer confirmation default than inventing one.
+        if quantity <= 0 and serving_value is not None and serving_value > 0:
+            quantity = serving_value
+            unit = serving_unit
+
+        if quantity <= 0:
+            quantity = 1.0
+        if not unit:
+            unit = serving_unit or "serving"
+
+        servings_per_container = label.get("servings_per_container")
+        try:
+            servings_per_container = float(servings_per_container)
+        except (TypeError, ValueError):
+            servings_per_container = None
+
+        items.append(
+            {
+                "food_id": str(food.get("id") or ""),
+                "name": str(
+                    food.get("display_name")
+                    or food.get("name")
+                    or label.get("product_name")
+                    or "Packaged food"
+                ),
+                "brand": food.get("brand") or label.get("brand"),
+                "quantity": round(quantity, 3),
+                "unit": unit,
+                "serving_size_value": serving_value,
+                "serving_size_unit": serving_unit or None,
+                "servings_per_container": servings_per_container,
+            }
+        )
+
+    if not items:
+        raise ValueError(
+            "No nutrition-label food was available for serving confirmation."
+        )
+
+    return {
+        "status": "waiting_for_serving_confirmation",
+        "analysis_id": analysis_id,
+        "message": "Confirm how much of the packaged food you consumed.",
+        "items": items,
+    }
+
+
+def _apply_label_serving_confirmation(
+    result: dict[str, Any],
+    request: LabelServingConfirmationRequest,
+) -> dict[str, Any]:
+    updated = copy.deepcopy(result)
+    meal = updated.get("meal")
+    if not isinstance(meal, dict):
+        raise ValueError("The saved analysis is missing meal data.")
+    foods = meal.get("foods")
+    if not isinstance(foods, list):
+        raise ValueError("The saved analysis is missing foods.")
+
+    by_id = {item.food_id: item for item in request.items}
+    matched = 0
+    for food in foods:
+        if not isinstance(food, dict):
+            continue
+        food_id = str(food.get("id") or "")
+        item = by_id.get(food_id)
+        if item is None:
+            continue
+        if food.get("analysis_route") != "NUTRITION_LABEL":
+            continue
+
+        unit = item.unit.strip().lower()
+        aliases = {
+            "gram": "g",
+            "grams": "g",
+            "milliliter": "ml",
+            "milliliters": "ml",
+            "litre": "l",
+            "liter": "l",
+            "liters": "l",
+            "servings": "serving",
+            "pieces": "piece",
+        }
+        unit = aliases.get(unit, unit)
+        if unit not in {"g", "ml", "l", "serving", "piece"}:
+            raise ValueError(
+                f"Unsupported serving unit '{item.unit}' for {food_id}."
+            )
+
+        food["quantity"] = float(item.quantity)
+        food["unit"] = unit
+        if unit == "g":
+            food["estimated_weight_g"] = float(item.quantity)
+        matched += 1
+
+    if matched == 0:
+        raise ValueError("No packaged-food serving was updated.")
+
+    # Recalculate visible gram weight only from foods that actually have gram
+    # quantities. Do not pretend ml/serving counts are grams.
+    visible_g = 0.0
+    for food in foods:
+        if not isinstance(food, dict):
+            continue
+        if str(food.get("unit") or "").lower() != "g":
+            continue
+        try:
+            q = float(food.get("quantity"))
+        except (TypeError, ValueError):
+            continue
+        if q > 0:
+            visible_g += q
+    meal["estimated_visible_food_weight_g"] = round(visible_g, 3)
+
+    return updated
 
 
 def _resolved_meal_to_review_draft(
