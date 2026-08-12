@@ -112,6 +112,16 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
     }
 
 
+    if (status == 'waiting_for_serving_confirmation') {
+      _handledResponse = true;
+      context.push(
+        '/serving-confirmation',
+        extra: data,
+      );
+      return;
+    }
+
+
     if (status == 'waiting_for_meal_confirmation') {
       final rawDraft = data['meal_draft'];
       if (rawDraft is! Map) {
