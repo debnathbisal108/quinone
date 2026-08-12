@@ -6,6 +6,7 @@ import '../../features/navigation/presentation/screens/bottom_navigation_screen.
 import '../../features/onboarding/presentation/screens/onboarding_screen.dart';
 import '../../features/profile/presentation/screens/profile_setup_screen.dart';
 import '../../features/recipe/presentation/screens/recipe_builder_screen.dart';
+import '../../features/recipe/presentation/screens/serving_confirmation_screen.dart';
 import '../../features/recipe/models/manual_recipe.dart';
 import '../../features/result/models/analysis_result.dart';
 import '../../features/result/presentation/screens/result_screen.dart';
@@ -29,6 +30,16 @@ class AppRouter {
       GoRoute(
         path: '/upload',
         builder: (context, state) => const UploadScreen(),
+      ),
+      GoRoute(
+        path: '/serving-confirmation',
+        builder: (context, state) {
+          final extra = state.extra;
+          final payload = extra is Map
+              ? Map<String, dynamic>.from(extra)
+              : <String, dynamic>{};
+          return ServingConfirmationScreen(payload: payload);
+        },
       ),
       GoRoute(
         path: '/recipe',
