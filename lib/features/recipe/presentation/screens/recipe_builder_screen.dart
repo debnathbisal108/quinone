@@ -17,10 +17,14 @@ class RecipeBuilderScreen extends ConsumerStatefulWidget {
     super.key,
     this.initialRecipe,
     this.photoReview = false,
+    this.analysisId,
+    this.labelItems = const [],
   });
 
   final ManualRecipe? initialRecipe;
   final bool photoReview;
+  final String? analysisId;
+  final List<Map<String, dynamic>> labelItems;
 
   @override
   ConsumerState<RecipeBuilderScreen> createState() => _RecipeBuilderScreenState();
@@ -53,11 +57,20 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       _servingsEatenController.text = _format(initial.servingsEaten);
       _ingredients = [...initial.ingredients];
     }
+    for (final item in widget.labelItems) {
+      final quantity = (item['quantity'] as num?)?.toDouble() ?? 1.0;
+      _labelQuantityControllers.add(
+        TextEditingController(text: _format(quantity)),
+      );
+    }
     _loadSaved();
   }
 
   @override
   void dispose() {
+    for (final controller in _labelQuantityControllers) {
+      controller.dispose();
+    }
     _debounce?.cancel();
     _searchController.dispose();
     _nameController.dispose();
@@ -231,13 +244,44 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
     });
     try {
       final profile = ref.read(profileProvider).backendPayload;
-      final result = await _service.analyzeRecipe(
-        recipe: recipe,
-        profile: profile,
-        onProgress: (progress) {
-          if (mounted) setState(() => _progress = progress);
-        },
-      );
+      final analysisId = widget.analysisId?.trim();
+      late final Map<String, dynamic> result;
+      if (analysisId != null &&
+          analysisId.isNotEmpty &&
+          widget.labelItems.isNotEmpty) {
+        final confirmedLabels = <Map<String, dynamic>>[];
+        for (var i = 0; i < widget.labelItems.length; i++) {
+          final quantity = double.tryParse(
+            _labelQuantityControllers[i].text.trim(),
+          );
+          if (quantity == null || quantity <= 0) {
+            throw const RecipeServiceException(
+              'Enter a valid amount for every packaged food.',
+            );
+          }
+          confirmedLabels.add({
+            'food_id': widget.labelItems[i]['food_id']?.toString() ?? '',
+            'quantity': quantity,
+            'unit': widget.labelItems[i]['unit']?.toString() ?? 'serving',
+          });
+        }
+        result = await _service.analyzeConfirmedMixedMeal(
+          analysisId: analysisId,
+          recipe: recipe,
+          labelItems: confirmedLabels,
+          onProgress: (progress) {
+            if (mounted) setState(() => _progress = progress);
+          },
+        );
+      } else {
+        result = await _service.analyzeRecipe(
+          recipe: recipe,
+          profile: profile,
+          onProgress: (progress) {
+            if (mounted) setState(() => _progress = progress);
+          },
+        );
+      }
       await ref.read(analysisHistoryProvider.notifier).saveResult(result);
       if (!mounted) return;
       context.pushReplacement('/result', extra: result);
