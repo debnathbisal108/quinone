@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
+import os
 import shutil
 import tempfile
 import time
 import uuid
 from pathlib import Path
-from threading import Lock, RLock
+from threading import BoundedSemaphore, RLock
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
@@ -80,7 +82,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-analysis_lock = Lock()
+logger = logging.getLogger("quinone.server")
+
+# A global Lock serialized every Gemini request across all users. Keep a small
+# bounded limit for quota safety while allowing independent requests to run.
+MAX_CONCURRENT_ANALYSES = max(
+    1,
+    int(os.environ.get("MAX_CONCURRENT_ANALYSES", "2")),
+)
+analysis_lock = BoundedSemaphore(MAX_CONCURRENT_ANALYSES)
 
 
 @app.get("/")
@@ -241,6 +251,7 @@ def _set_job(
                 "result": None,
                 "error": None,
                 "cancel_requested": False,
+                "timings_ms": {},
             },
         )
         if status is not None:
@@ -256,6 +267,16 @@ def _set_job(
         if error is not None:
             job["error"] = error
         job["updated_at"] = time.time()
+
+
+def _record_job_timing(job_id: str, stage: str, started: float) -> None:
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+    with _jobs_lock:
+        job = _analysis_jobs.get(job_id)
+        if job is not None:
+            job.setdefault("timings_ms", {})[stage] = elapsed_ms
+            job["updated_at"] = time.time()
+    logger.info("analysis job=%s stage=%s elapsed_ms=%.1f", job_id, stage, elapsed_ms)
 
 
 def _job_cancel_requested(job_id: str) -> bool:
@@ -444,6 +465,7 @@ async def get_analysis_job(job_id: str) -> dict[str, Any]:
         "message": job["message"],
         "progress": job["progress"],
         "error": job.get("error"),
+        "timings_ms": job.get("timings_ms", {}),
     }
     if job["status"] in {
         "completed",
@@ -803,11 +825,13 @@ async def _process_initial_job(
             message="Detecting foods and estimating portions…",
             progress=0.14,
         )
+        vision_started = time.perf_counter()
         analysis_result = await asyncio.to_thread(
             _run_analysis_engine_locked,
             image_paths,
             profile_data,
         )
+        _record_job_timing(job_id, "vision", vision_started)
         _raise_if_cancelled(job_id)
         analysis_result = normalize_result(analysis_result)
         status = analysis_result.get("status")
@@ -880,7 +904,9 @@ async def _process_initial_job(
             message="Matching detected foods to nutrition database entries…",
             progress=0.72,
         )
+        resolution_started = time.perf_counter()
         resolved_result = await resolve_meal(analysis_result)
+        _record_job_timing(job_id, "usda_resolution", resolution_started)
         _raise_if_cancelled(job_id)
 
         review_result = _resolved_meal_to_review_draft(
@@ -1049,12 +1075,14 @@ async def _process_back_label_job(
             message="Reading ingredients and nutrition from the label…",
             progress=0.14,
         )
+        label_started = time.perf_counter()
         continued_result = await asyncio.to_thread(
             _run_back_label_engine_locked,
             partial_result,
             label_path,
             target_food_id,
         )
+        _record_job_timing(job_id, "back_label_vision", label_started)
         _raise_if_cancelled(job_id)
         continued_result = normalize_result(continued_result)
         status = continued_result.get("status")
@@ -1152,11 +1180,11 @@ async def analyze(
 
                 image_paths.append(str(saved_path))
 
-            with analysis_lock:
-                analysis_result = analyze_meal(
-                    image_paths=image_paths,
-                    profile=profile_data,
-                )
+            analysis_result = await asyncio.to_thread(
+                _run_analysis_engine_locked,
+                image_paths,
+                profile_data,
+            )
 
             analysis_result = normalize_result(
                 analysis_result
@@ -1278,16 +1306,12 @@ async def analyze_back_label(
                 fallback_name="nutrition_label",
             )
 
-            with analysis_lock:
-                continued_result = (
-                    continue_with_back_label(
-                        partial_result=partial_result,
-                        label_image_path=str(
-                            label_path
-                        ),
-                        target_food_id=target_food_id,
-                    )
-                )
+            continued_result = await asyncio.to_thread(
+                _run_back_label_engine_locked,
+                partial_result,
+                str(label_path),
+                target_food_id,
+            )
 
             continued_result = normalize_result(
                 continued_result
@@ -1806,27 +1830,37 @@ async def run_nutrica_pipeline(
         if progress_callback is not None:
             progress_callback(stage, message, progress)
 
+    async def timed(stage: str, awaitable: Any) -> Any:
+        started = time.perf_counter()
+        value = await awaitable
+        logger.info(
+            "pipeline stage=%s elapsed_ms=%.1f",
+            stage,
+            (time.perf_counter() - started) * 1000,
+        )
+        return value
+
     report("food_resolution", "Matching foods and ingredients to nutrition databases…", 0.28)
-    resolved_result = await resolve_meal(analysis_result)
+    resolved_result = await timed("food_resolution", resolve_meal(analysis_result))
 
     report("nutrient_calculation", "Calculating calories, macros, vitamins and minerals…", 0.45)
-    nutrient_result = await attach_nutrients(resolved_result)
+    nutrient_result = await timed("nutrient_calculation", attach_nutrients(resolved_result))
 
     report("feature_engineering", "Measuring nutrient density and meal-quality features…", 0.60)
-    feature_result = await compute_features(nutrient_result)
+    feature_result = await timed("feature_engineering", compute_features(nutrient_result))
 
     report("evidence_mapping", "Linking meal features to nutrition evidence…", 0.71)
-    evidence_result = await attach_evidence(feature_result)
+    evidence_result = await timed("evidence_mapping", attach_evidence(feature_result))
 
     report("health_scoring", "Calculating health-domain scores…", 0.83)
-    scored_result = await attach_domain_scores(evidence_result)
+    scored_result = await timed("health_scoring", attach_domain_scores(evidence_result))
 
     normalized_profile = normalize_user_profile(profile)
 
     report("personalization", "Applying your health and lifestyle profile…", 0.93)
-    personalized_result = await attach_personalization(
-        scored_result,
-        normalized_profile,
+    personalized_result = await timed(
+        "personalization",
+        attach_personalization(scored_result, normalized_profile),
     )
 
     report("nutrient_targets", "Resolving your personalized daily nutrient targets…", 0.98)
@@ -1852,21 +1886,34 @@ async def run_manual_recipe_pipeline(
         if progress_callback is not None:
             progress_callback(stage, message, progress)
 
+    async def timed(stage: str, awaitable: Any) -> Any:
+        started = time.perf_counter()
+        value = await awaitable
+        logger.info(
+            "manual pipeline stage=%s elapsed_ms=%.1f",
+            stage,
+            (time.perf_counter() - started) * 1000,
+        )
+        return value
+
     report("nutrient_calculation", "Loading USDA nutrients for your ingredients…", 0.38)
-    nutrient_result = await attach_nutrients(prepared_result)
+    nutrient_result = await timed("nutrient_calculation", attach_nutrients(prepared_result))
 
     report("feature_engineering", "Measuring nutrient density and meal-quality features…", 0.58)
-    feature_result = await compute_features(nutrient_result)
+    feature_result = await timed("feature_engineering", compute_features(nutrient_result))
 
     report("evidence_mapping", "Linking recipe features to nutrition evidence…", 0.70)
-    evidence_result = await attach_evidence(feature_result)
+    evidence_result = await timed("evidence_mapping", attach_evidence(feature_result))
 
     report("health_scoring", "Calculating health-domain scores…", 0.82)
-    scored_result = await attach_domain_scores(evidence_result)
+    scored_result = await timed("health_scoring", attach_domain_scores(evidence_result))
 
     normalized_profile = normalize_user_profile(profile)
     report("personalization", "Applying your health and lifestyle profile…", 0.92)
-    personalized_result = await attach_personalization(scored_result, normalized_profile)
+    personalized_result = await timed(
+        "personalization",
+        attach_personalization(scored_result, normalized_profile),
+    )
 
     report("nutrient_targets", "Resolving your personalized daily nutrient targets…", 0.98)
     return attach_nutrient_targets(personalized_result, normalized_profile)
