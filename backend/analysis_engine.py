@@ -2455,6 +2455,10 @@ Rules:
 - Ignore plates, cutlery, napkins and other non-food objects.
 - Keep independent foods separate. A topping/spread physically attached to a
   food is a separate object with belongs_to_food_id pointing to that food.
+- Never return a prepared meal name alongside its ingredients. In particular,
+  if rolled oats, milk, fruit, seeds or nuts are returned, do not also return
+  Oatmeal, Oatmeal Porridge or Porridge. The prepared name may be used only as
+  meal_type; it is not a nutrient-bearing food object.
 - Use DIRECT_USDA for an identifiable single food. Use one precise
   usda_food_description and zero or one fallback query; do not generate lists
   of near-duplicate searches.
@@ -3412,6 +3416,80 @@ def _reconcile_core_food_duplicates(
     return reconciled, discarded_log
 
 
+_COMPOSITE_PARENT_COMPONENT_ALIASES: dict[str, set[str]] = {
+    "oatmeal": {"oats", "rolled oats"},
+    "oatmeal porridge": {"oats", "rolled oats"},
+    "oat porridge": {"oats", "rolled oats"},
+    "porridge": {"oats", "rolled oats"},
+}
+
+
+def _suppress_redundant_composite_parents(
+    foods: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Remove a prepared-dish parent when its core food is already present.
+
+    The model occasionally returns both `Oatmeal` and `Rolled oats` despite the
+    core-food contract. They are not two edible masses: oatmeal is the prepared
+    dish name and rolled oats is its nutrient-bearing ingredient. Suppression is
+    deliberately evidence-based (known alias, explicit child link, or matching
+    nested ingredient), so an undecomposed dish is not silently deleted.
+    """
+    identities = [
+        _canonical_food_identity(food)
+        for food in foods
+    ]
+    kept: list[dict[str, Any]] = []
+    discarded: list[dict[str, Any]] = []
+
+    for index, food in enumerate(foods):
+        identity = identities[index]
+        other_identities = {
+            value
+            for other_index, value in enumerate(identities)
+            if other_index != index and value
+        }
+        parent_id = str(food.get("id") or "")
+        explicit_child_present = bool(parent_id) and any(
+            str(other.get("belongs_to_food_id") or "") == parent_id
+            for other_index, other in enumerate(foods)
+            if other_index != index
+        )
+
+        nested_names = {
+            _identity_text(
+                ingredient.get("canonical_name")
+                or ingredient.get("name")
+            )
+            for ingredient in (food.get("ingredients") or [])
+            if isinstance(ingredient, dict)
+        }
+        nested_match_present = bool(nested_names & other_identities)
+        alias_match_present = bool(
+            _COMPOSITE_PARENT_COMPONENT_ALIASES.get(identity, set())
+            & other_identities
+        )
+
+        if explicit_child_present or nested_match_present or alias_match_present:
+            discarded.append({
+                "reason": "redundant_prepared_dish_parent",
+                "discarded_name": food.get("name"),
+                "canonical_identity": identity,
+                "matching_core_foods": sorted(
+                    other_identities
+                    & (
+                        nested_names
+                        | _COMPOSITE_PARENT_COMPONENT_ALIASES.get(identity, set())
+                    )
+                ),
+            })
+            continue
+
+        kept.append(food)
+
+    return kept, discarded
+
+
 def _clean_display_core_name(food: dict[str, Any]) -> None:
     """Keep preparation in metadata; display only the core food name."""
     import re
@@ -3621,10 +3699,13 @@ def post_process(
                 continue
             core_foods.append(promoted)
 
+    core_foods, parent_log = _suppress_redundant_composite_parents(core_foods)
+
     # Reconcile alternate estimates of the same physical core food BEFORE
     # USDA lookup. This is what prevents a decomposed "Cooked Rolled Oats"
     # entry and a separate "Rolled Oats" detection from both surviving.
     core_foods, reconciliation_log = _reconcile_core_food_duplicates(core_foods)
+    reconciliation_log = [*parent_log, *reconciliation_log]
 
     # Second deterministic pass after display-name cleanup semantics. This is
     # intentionally redundant with the first pass: Gemini must not be able to
