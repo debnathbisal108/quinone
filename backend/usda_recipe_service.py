@@ -32,6 +32,12 @@ _DATA_TYPE_SCORE = {
     "Branded": 18,
 }
 
+PREFERRED_GENERIC_DATA_TYPES = [
+    "Foundation",
+    "SR Legacy",
+    "Survey (FNDDS)",
+]
+
 _PREPARATION_TERMS = {
     "raw", "fresh", "cooked", "boiled", "fried", "baked", "roasted",
     "frozen", "dried", "dry", "sweetened", "unsweetened", "canned",
@@ -126,8 +132,15 @@ def _ordered_identity_match(query: str, description: str) -> tuple[int, float]:
 def _preparation_score(query: str, description: str) -> float:
     q = {_canonical_token(t) for t in _tokens(query) if t in _PREPARATION_TERMS}
     if not q:
-        # Neutral when user did not request a preparation state. Prefer raw/fresh
-        # only very slightly over altered/sweetened forms through source/identity.
+        # For an unqualified whole-food search, the least altered form is the
+        # safest nutrition default. Users can still request cooked/frozen/etc.
+        d = {_canonical_token(t) for t in _tokens(description)}
+        if "sweetened" in d or "syrup" in d:
+            return -1.0
+        if "raw" in d or "fresh" in d:
+            return 0.35
+        if "unsweetened" in d:
+            return 0.15
         return 0.0
     d = {_canonical_token(t) for t in _tokens(description)}
     matched = len(q & d)
@@ -160,19 +173,29 @@ def _candidate_score(candidate: dict[str, Any], query: str) -> tuple:
     # above an equivalent Foundation/SR record. A brand-specific query can opt
     # back into branded priority naturally.
     branded_penalty = 0.0
-    if data_type == "Branded" and not _looks_brand_specific(query, brand_owner):
+    brand_specific = _looks_brand_specific(query, brand_owner)
+    if data_type == "Branded" and not brand_specific:
         branded_penalty = 55.0
+
+    # Source intent is the first sort key. Numeric penalties cannot enforce a
+    # policy if identity_tier is compared before them.
+    if data_type == "Branded":
+        source_policy_tier = 3 if brand_specific else 1
+    else:
+        source_policy_tier = 2
 
     compound_penalty = compound_count * 16.0
     verbosity_penalty = min(18.0, extra_tokens * 0.65)
 
     # Sort tuple intentionally reflects product policy:
-    # identity relevance -> preparation relevance -> source quality -> cleanup.
+    # source intent -> least-altered/requested preparation -> identity
+    # relevance -> source quality -> cleanup.
     cleanup_score = -(branded_penalty + compound_penalty + verbosity_penalty)
     return (
+        source_policy_tier,
+        round(prep_score, 4),
         identity_tier,
         round(coverage, 4),
-        round(prep_score, 4),
         source_score,
         cleanup_score,
     )
@@ -357,23 +380,54 @@ async def search_usda_foods(query: str, *, limit: int = 8) -> list[dict[str, Any
             # Cached search results are already detail-validated.
             return cached[1][:limit]
 
-    payload = {
+    preferred_payload = {
         "query": cleaned,
         "pageSize": 30,
         "pageNumber": 1,
-        "dataType": ["Foundation", "SR Legacy", "Survey (FNDDS)", "Branded"],
+        "dataType": PREFERRED_GENERIC_DATA_TYPES,
+    }
+    branded_payload = {
+        "query": cleaned,
+        "pageSize": 15,
+        "pageNumber": 1,
+        "dataType": ["Branded"],
     }
     params = {"api_key": USDA_API_KEY}
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(12.0)) as client:
-        response = await client.post(USDA_SEARCH_URL, params=params, json=payload)
-        response.raise_for_status()
-        body = response.json()
+        # Query core and branded datasets separately so branded products cannot
+        # crowd foundational foods out of USDA's first relevance page. The two
+        # requests run concurrently, so this does not add a serial round-trip.
+        responses = await asyncio.gather(
+            client.post(USDA_SEARCH_URL, params=params, json=preferred_payload),
+            client.post(USDA_SEARCH_URL, params=params, json=branded_payload),
+            return_exceptions=True,
+        )
+        raw_foods: list[dict[str, Any]] = []
+        successful_responses = 0
+        response_errors: list[Exception] = []
+        for response in responses:
+            if isinstance(response, Exception):
+                response_errors.append(response)
+                continue
+            try:
+                response.raise_for_status()
+                body = response.json()
+            except (httpx.HTTPStatusError, ValueError) as error:
+                response_errors.append(error)
+                continue
+            successful_responses += 1
+            foods = body.get("foods", []) if isinstance(body, dict) else []
+            if isinstance(foods, list):
+                raw_foods.extend(item for item in foods if isinstance(item, dict))
 
-        raw_foods = body.get("foods", []) if isinstance(body, dict) else []
+        if successful_responses == 0:
+            cause = response_errors[0] if response_errors else None
+            raise RuntimeError("USDA food search is temporarily unavailable.") from cause
+
         normalized: list[tuple[tuple, dict[str, Any]]] = []
         seen: set[int] = set()
-        for item in raw_foods if isinstance(raw_foods, list) else []:
+        for item in raw_foods:
             if not isinstance(item, dict):
                 continue
             candidate = _normalize_candidate(item)
