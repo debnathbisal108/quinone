@@ -2,9 +2,9 @@ import 'dart:math' as math;
 
 /// Parsed result displayed by the result screen.
 ///
-/// Meal-level totals returned by the backend are always authoritative. Food-level
-/// values are retained only for contribution details and are never allowed to
-/// overwrite an available backend total.
+/// Meal-level totals returned by the backend are preferred over food-level sums.
+/// A narrow consistency guard only raises carbohydrate or energy when a reported
+/// total is mathematically below its own reported sugar components.
 class AnalysisResult {
   const AnalysisResult({
     required this.mealName,
@@ -23,6 +23,7 @@ class AnalysisResult {
     required this.fiber,
     required this.sugars,
     required this.addedSugars,
+    required this.carbohydrateComposition,
     required this.healthScores,
     required this.micronutrients,
     required this.foods,
@@ -48,6 +49,7 @@ class AnalysisResult {
   final double fiber;
   final double? sugars;
   final double? addedSugars;
+  final Map<String, double> carbohydrateComposition;
   final List<HealthScore> healthScores;
   final List<Micronutrient> micronutrients;
   final List<FoodSummary> foods;
@@ -77,18 +79,7 @@ class AnalysisResult {
   /// meal totals. Enrichment pipelines can carry both the visible portion and
   /// a database reference row for the same food; the best portion row wins.
   List<FoodSummary> get displayFoods {
-    final bestByName = <String, FoodSummary>{};
-
-    for (final food in foods) {
-      final key = _normalizedDisplayFoodName(food.name);
-      final existing = bestByName[key];
-      if (existing == null ||
-          _foodDisplayQuality(food) > _foodDisplayQuality(existing)) {
-        bestByName[key] = food;
-      }
-    }
-
-    return List.unmodifiable(bestByName.values);
+    return List.unmodifiable(_uniqueCoreFoods(foods));
   }
 
   /// False only for legacy responses that contain no meal-level totals and
@@ -241,13 +232,16 @@ class AnalysisResult {
 
     final authoritativeNutrition = _findAuthoritativeNutrition(root, meal);
     final usedAuthoritativeTotals = authoritativeNutrition != null;
+    final repairedFoodNutrition = _aggregateFoodNutrition(foods);
 
     // The current backend may return nutrients only inside each detected food.
     // In that valid response shape, build the meal totals from the unique foods
     // instead of rejecting the completed response.
-    final nutrition = authoritativeNutrition ?? _aggregateFoodNutrition(foods);
+    final nutrition = authoritativeNutrition ?? repairedFoodNutrition;
 
     final macros = _extractMacroMap(nutrition);
+    final repairedFoodMacros = _extractMacroMap(repairedFoodNutrition);
+    final carbohydrateComposition = _aggregateCarbohydrateComposition(foods);
     final vitamins = _extractSection(nutrition, const ['vitamins']);
     final minerals = _extractSection(nutrition, const ['minerals']);
     final micronutrientValues = <String, double>{
@@ -304,6 +298,58 @@ class AnalysisResult {
         (a, b) => b.percentDailyValue.compareTo(a.percentDailyValue),
       );
 
+    final reportedSugars = _firstNullableNumber(
+      macros,
+      const ['sugars_g', 'total_sugars_g', 'sugar_g', 'sugars'],
+    );
+    final resolvedSugars =
+        reportedSugars ?? carbohydrateComposition['total_sugar_g'];
+    final reportedCarbohydrates = _firstNumber(
+      macros,
+      const ['carbohydrate_g', 'carbohydrates_g', 'carbs_g', 'carbs'],
+    );
+    final repairedFoodCarbohydrates = _firstNumber(
+      repairedFoodMacros,
+      const ['carbohydrate_g', 'carbohydrates_g', 'carbs_g', 'carbs'],
+    );
+    final carbohydrateFloor = [
+      resolvedSugars,
+      carbohydrateComposition['component_sum_g'],
+      carbohydrateComposition['total_sugar_g'],
+      repairedFoodCarbohydrates,
+    ].whereType<double>().fold<double>(0, math.max);
+    final resolvedCarbohydrates = math.max(
+      reportedCarbohydrates,
+      carbohydrateFloor,
+    );
+
+    final reportedCalories = _firstNumber(
+      macros,
+      const ['energy_kcal', 'calories', 'calories_kcal'],
+    );
+    final repairedFoodCalories = _firstNumber(
+      repairedFoodMacros,
+      const ['energy_kcal', 'calories', 'calories_kcal'],
+    );
+    final resolvedProtein =
+        _firstNumber(macros, const ['protein_g', 'protein']);
+    final resolvedFat =
+        _firstNumber(macros, const ['fat_g', 'total_fat_g', 'fat']);
+    final macroEnergy = resolvedCarbohydrates * 4 +
+        resolvedProtein * 4 +
+        resolvedFat * 9;
+    final minimumSugarEnergy = (resolvedSugars ?? 0) * 4;
+    final missingFoodCarbohydrate =
+        repairedFoodCarbohydrates > reportedCarbohydrates + 0.01;
+    final resolvedCalories = missingFoodCarbohydrate ||
+            reportedCalories + 1 < minimumSugarEnergy
+        ? [
+            reportedCalories,
+            repairedFoodCalories,
+            macroEnergy,
+          ].fold<double>(0, math.max)
+        : reportedCalories;
+
     return AnalysisResult(
       mealName: _firstText(
             meal,
@@ -312,16 +358,10 @@ class AnalysisResult {
           'Meal analysis',
       summary: _firstText(meal, const ['summary', 'description']) ??
           _firstText(root, const ['summary', 'message']),
-      calories: _firstNumber(
-        macros,
-        const ['energy_kcal', 'calories', 'calories_kcal'],
-      ),
-      protein: _firstNumber(macros, const ['protein_g', 'protein']),
-      carbohydrates: _firstNumber(
-        macros,
-        const ['carbohydrate_g', 'carbohydrates_g', 'carbs_g', 'carbs'],
-      ),
-      fat: _firstNumber(macros, const ['fat_g', 'total_fat_g', 'fat']),
+      calories: resolvedCalories,
+      protein: resolvedProtein,
+      carbohydrates: resolvedCarbohydrates,
+      fat: resolvedFat,
       saturatedFat: _firstNullableNumber(
         macros,
         const [
@@ -379,15 +419,7 @@ class AnalysisResult {
           'dietary_fiber_g',
         ],
       ),
-      sugars: _firstNullableNumber(
-        macros,
-        const [
-          'sugars_g',
-          'total_sugars_g',
-          'sugar_g',
-          'sugars',
-        ],
-      ),
+      sugars: resolvedSugars,
       addedSugars: _firstNullableNumber(
         macros,
         const [
@@ -396,6 +428,7 @@ class AnalysisResult {
           'added_sugars',
         ],
       ),
+      carbohydrateComposition: Map.unmodifiable(carbohydrateComposition),
       healthScores: List.unmodifiable(scores),
       micronutrients: List.unmodifiable(micronutrients),
       foods: List.unmodifiable(foods),
@@ -692,6 +725,7 @@ class FoodSummary {
     required this.minerals,
     required this.ingredientNames,
     required this.isComposite,
+    required this.carbohydrateComposition,
   });
 
   final String? id;
@@ -704,6 +738,7 @@ class FoodSummary {
   final Map<String, double> minerals;
   final Set<String> ingredientNames;
   final bool isComposite;
+  final Map<String, double> carbohydrateComposition;
 
   String get identity {
     final normalizedId = id?.trim();
@@ -731,6 +766,16 @@ class FoodSummary {
       ..._doubleMap(_asMap(features['macronutrients'])),
       ..._doubleMap(_asMap(features['fat_profile'])),
     };
+    final carbohydrateFeatures = _doubleMap(
+      _asMap(features['carbohydrates']),
+    );
+    final sugarFeatures = _doubleMap(
+      _asMap(features['sugars']),
+    );
+    final carbohydrateComposition = <String, double>{
+      ...carbohydrateFeatures,
+      ...sugarFeatures,
+    };
 
     final rawNutrients = _doubleMap(_asMap(json['nutrients']));
 
@@ -739,6 +784,7 @@ class FoodSummary {
       rawNutrients: rawNutrients,
       weightGrams: weightGrams,
     );
+    _repairPortionMacroConsistency(macros, carbohydrateComposition);
 
     final rawIngredients = _asList(json['ingredients']);
     final ingredientNames = <String>{};
@@ -782,6 +828,7 @@ class FoodSummary {
       isComposite: ingredientNames.isNotEmpty ||
           analysisRoute == 'DECOMPOSE' ||
           analysisRoute == 'COMPOSITE',
+      carbohydrateComposition: Map.unmodifiable(carbohydrateComposition),
     );
   }
 }
@@ -836,6 +883,48 @@ Map<String, double> _buildPortionMacronutrients({
   return result;
 }
 
+void _repairPortionMacroConsistency(
+  Map<String, double> macros,
+  Map<String, double> carbohydrateComposition,
+) {
+  final reportedCarbohydrate = _firstNumber(
+    macros,
+    const ['carbohydrate_g', 'carbohydrates_g', 'carbs_g', 'carbs'],
+  );
+  final reportedSugar = _firstNullableNumber(
+        macros,
+        const ['sugars_g', 'total_sugars_g', 'sugar_g', 'sugars'],
+      ) ??
+      carbohydrateComposition['total_sugar_g'];
+  final carbohydrateFloor = <double?>[
+    reportedSugar,
+    carbohydrateComposition['component_sum_g'],
+    carbohydrateComposition['total_carbohydrate_g'],
+  ].whereType<double>().fold<double>(0, math.max);
+
+  final resolvedCarbohydrate = math.max(
+    reportedCarbohydrate,
+    carbohydrateFloor,
+  );
+  if (resolvedCarbohydrate > reportedCarbohydrate + 0.001) {
+    macros['carbohydrate_g'] = resolvedCarbohydrate;
+  }
+
+  final reportedEnergy = _firstNumber(
+    macros,
+    const ['energy_kcal', 'calories', 'calories_kcal'],
+  );
+  final protein = _firstNumber(macros, const ['protein_g', 'protein']);
+  final fat = _firstNumber(macros, const ['fat_g', 'total_fat_g', 'fat']);
+  final minimumSugarEnergy = (reportedSugar ?? 0) * 4;
+  if (reportedEnergy + 1 < minimumSugarEnergy) {
+    macros['energy_kcal'] = math.max(
+      reportedEnergy,
+      resolvedCarbohydrate * 4 + protein * 4 + fat * 9,
+    );
+  }
+}
+
 double _foodDisplayQuality(FoodSummary food) {
   // A row with an actual portion weight is much more likely to be the visible
   // food than a USDA/reference row containing only per-100-g nutrition.
@@ -881,6 +970,33 @@ String _normalizedDisplayFoodName(String value) {
   return aliases[normalized] ?? normalized;
 }
 
+List<FoodSummary> _uniqueCoreFoods(List<FoodSummary> foods) {
+  final bestByName = <String, FoodSummary>{};
+  for (final food in foods) {
+    final key = _normalizedDisplayFoodName(food.name);
+    final existing = bestByName[key];
+    if (existing == null ||
+        _foodDisplayQuality(food) > _foodDisplayQuality(existing)) {
+      bestByName[key] = food;
+    }
+  }
+
+  const preparedParents = <String, Set<String>>{
+    'oatmeal': {'oats', 'rolled oats'},
+    'oatmeal porridge': {'oats', 'rolled oats'},
+    'oat porridge': {'oats', 'rolled oats'},
+    'porridge': {'oats', 'rolled oats'},
+  };
+  final identities = bestByName.keys.toSet();
+
+  return [
+    for (final entry in bestByName.entries)
+      if (!(preparedParents[entry.key] ?? const <String>{})
+          .any(identities.contains))
+        entry.value,
+  ];
+}
+
 class _NutrientDefinition {
   const _NutrientDefinition(this.label, this.dailyValue, this.unit);
 
@@ -919,17 +1035,6 @@ const _definitions = <String, _NutrientDefinition>{
 
 
 Map<String, dynamic> _aggregateFoodNutrition(List<FoodSummary> foods) {
-  final uniqueFoods = <String, FoodSummary>{};
-
-  for (final food in foods) {
-    final key = _normalizedDisplayFoodName(food.name);
-    final existing = uniqueFoods[key];
-    if (existing == null ||
-        _foodDisplayQuality(food) > _foodDisplayQuality(existing)) {
-      uniqueFoods[key] = food;
-    }
-  }
-
   final macros = <String, double>{};
   final vitamins = <String, double>{};
   final minerals = <String, double>{};
@@ -944,7 +1049,7 @@ Map<String, dynamic> _aggregateFoodNutrition(List<FoodSummary> foods) {
     }
   }
 
-  for (final food in uniqueFoods.values) {
+  for (final food in _uniqueCoreFoods(foods)) {
     addValues(macros, food.macronutrients);
     addValues(vitamins, food.vitamins);
     addValues(minerals, food.minerals);
@@ -955,6 +1060,22 @@ Map<String, dynamic> _aggregateFoodNutrition(List<FoodSummary> foods) {
     'vitamins': vitamins,
     'minerals': minerals,
   };
+}
+
+Map<String, double> _aggregateCarbohydrateComposition(
+  List<FoodSummary> foods,
+) {
+  final totals = <String, double>{};
+  for (final food in _uniqueCoreFoods(foods)) {
+    for (final entry in food.carbohydrateComposition.entries) {
+      totals.update(
+        entry.key,
+        (value) => value + entry.value,
+        ifAbsent: () => entry.value,
+      );
+    }
+  }
+  return totals;
 }
 
 Map<String, dynamic>? _findAuthoritativeNutrition(
