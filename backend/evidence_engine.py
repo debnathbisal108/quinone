@@ -592,8 +592,9 @@ def evaluate_threshold(rule: Rule, feature_value: Optional[Any]) -> float:
     if curve == CurveType.LINEAR:
         scale = params.get("scale", 1.0)
         cap = params.get("cap", 1.5)
+        lower_bound = params.get("lower_bound", 0.0)
         try:
-            magnitude = float(feature_value) * scale
+            magnitude = (float(feature_value) - float(lower_bound)) * scale
         except (TypeError, ValueError):
             return 0.0
         return max(0.0, min(magnitude, cap))
@@ -1072,7 +1073,7 @@ BLOOD_PRESSURE_RULES: List[Rule] = [
     Rule(
         rule_id="bp_energy_density", domain="blood_pressure", feature="energy_density",
         display_name="Energy density", coefficient=0.10,
-        curve=CurveType.LINEAR, curve_params={"scale": 0.002, "cap": 1.0},
+        curve=CurveType.LINEAR, curve_params={"lower_bound": 100.0, "scale": 0.002, "cap": 1.0},
         mechanism="Higher energy density contributes indirect BP burden through weight gain and overeating",
         pathway="Weight regulation", organ="Adipose tissue",
         confidence_label="Medium",
@@ -1258,7 +1259,7 @@ HEART_RULES: List[Rule] = [
     Rule(
         rule_id="heart_energy_density", domain="heart", feature="energy_density",
         display_name="Energy density", coefficient=-0.25,
-        curve=CurveType.LINEAR, curve_params={"scale": 0.002, "cap": 1.0},
+        curve=CurveType.LINEAR, curve_params={"lower_bound": 100.0, "scale": 0.002, "cap": 1.0},
         mechanism="High energy density promotes excess weight and cardiometabolic strain",
         pathway="Weight regulation", organ="Adipose tissue",
         confidence_label="Low-medium",
@@ -1515,7 +1516,7 @@ KIDNEY_RULES: List[Rule] = [
     Rule(
         rule_id="kidney_energy_density", domain="kidney", feature="energy_density",
         display_name="Obesity / energy density proxy", coefficient=0.20,
-        curve=CurveType.LINEAR, curve_params={"scale": 0.002, "cap": 1.0},
+        curve=CurveType.LINEAR, curve_params={"lower_bound": 100.0, "scale": 0.002, "cap": 1.0},
         mechanism="Energy density contributes indirect kidney risk via metabolic syndrome and obesity",
         pathway="Adiposity / metabolic syndrome", organ="Adipose tissue / kidneys",
         confidence_label="Medium",
@@ -1611,7 +1612,7 @@ LIVER_RULES: List[Rule] = [
     Rule(
         rule_id="liver_energy_density", domain="liver", feature="energy_density",
         display_name="Energy density", coefficient=0.35,
-        curve=CurveType.LINEAR, curve_params={"scale": 0.002, "cap": 1.0},
+        curve=CurveType.LINEAR, curve_params={"lower_bound": 100.0, "scale": 0.002, "cap": 1.0},
         mechanism="High energy density promotes adiposity, a major driver of NAFLD",
         pathway="Adiposity", organ="Adipose tissue / liver",
         confidence_label="High",
@@ -2108,7 +2109,7 @@ INFLAMMATION_RULES: List[Rule] = [
     Rule(
         rule_id="infl_energy_density", domain="inflammation", feature="energy_density",
         display_name="Energy density", coefficient=-0.25,
-        curve=CurveType.LINEAR, curve_params={"scale": 0.002, "cap": 1.0},
+        curve=CurveType.LINEAR, curve_params={"lower_bound": 100.0, "scale": 0.002, "cap": 1.0},
         mechanism="High energy density supports weight gain, which worsens osteoarthritis and inflammatory burden",
         pathway="Adiposity / joint load", organ="Adipose tissue / joints",
         confidence_label="High",
@@ -2223,7 +2224,7 @@ ARTHRITIS_RULES: List[Rule] = [
     Rule(
         rule_id="arth_energy_density", domain="arthritis", feature="energy_density",
         display_name="Energy density", coefficient=-0.35,
-        curve=CurveType.LINEAR, curve_params={"scale": 0.002, "cap": 1.0},
+        curve=CurveType.LINEAR, curve_params={"lower_bound": 100.0, "scale": 0.002, "cap": 1.0},
         mechanism="Energy density drives weight gain and joint load",
         pathway="Adiposity / joint mechanical load", organ="Joints / adipose tissue",
         confidence_label="High",
@@ -2354,7 +2355,7 @@ CANCER_RULES: List[Rule] = [
     Rule(
         rule_id="cancer_energy_density", domain="cancer", feature="energy_density",
         display_name="Energy density", coefficient=0.35,
-        curve=CurveType.LINEAR, curve_params={"scale": 0.002, "cap": 1.0},
+        curve=CurveType.LINEAR, curve_params={"lower_bound": 100.0, "scale": 0.002, "cap": 1.0},
         mechanism="High energy density supports excess weight, a major preventable cancer risk factor",
         pathway="Adiposity", organ="Adipose tissue / systemic",
         confidence_label="High",
@@ -2469,7 +2470,7 @@ WEIGHT_RULES: List[Rule] = [
     Rule(
         rule_id="weight_energy_density", domain="weight", feature="energy_density",
         display_name="Energy density", coefficient=0.75,
-        curve=CurveType.LINEAR, curve_params={"scale": 0.002, "cap": 1.5},
+        curve=CurveType.LINEAR, curve_params={"lower_bound": 100.0, "scale": 0.002, "cap": 1.5},
         mechanism="High-energy-density foods promote passive overconsumption",
         pathway="Passive overconsumption", organ="Adipose tissue",
         confidence_label="High",
