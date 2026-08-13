@@ -2717,6 +2717,13 @@ Return this shape:
 
 Rules:
 - Ignore plates, cutlery, napkins and other non-food objects.
+- Inspect the bowl or plate in layers before finalizing: underlying base first,
+  then mixed-in foods, then visible toppings. A base such as rolled oats,
+  yogurt, cereal, rice, noodles, milk or porridge must not be omitted merely
+  because fruit, seeds or nuts cover part of it.
+- If multiple toppings are visible over a substantial food mass, identify the
+  underlying nutrient-bearing base. Return the base ingredient (for example
+  Rolled oats), never the prepared parent label (for example Oatmeal).
 - Keep independent foods separate. A topping/spread physically attached to a
   food is a separate object with belongs_to_food_id pointing to that food.
 - Never return a prepared meal name alongside its ingredients. In particular,
@@ -2941,7 +2948,11 @@ def _generate_json(
         retry_config = dict(config)
 
         if attempt > 1:
-            if config.get("response_json_schema") is MEAL_RESPONSE_JSON_SCHEMA:
+            if (
+                config.get("response_json_schema") is MEAL_RESPONSE_JSON_SCHEMA
+                or config.get("response_json_schema")
+                is SIMPLE_MEAL_RESPONSE_JSON_SCHEMA
+            ):
                 retry_instruction = (
                     "Inspect this meal image and return its nutrient-bearing "
                     "core foods. Return ingredients such as rolled oats, milk, "
@@ -3104,6 +3115,183 @@ def extract_label(client, image):
         config=LABEL_GENERATION_CONFIG,
         operation="back-label extraction",
     )
+
+
+_BASE_FOOD_KEYWORDS = {
+    "oat", "oats", "rolled oats", "porridge", "cereal", "granola",
+    "muesli", "yogurt", "yoghurt", "curd", "milk", "rice", "quinoa",
+    "barley", "millet", "couscous", "pasta", "noodle", "noodles",
+    "bread", "toast", "roti", "chapati", "potato", "sweet potato",
+    "lentil", "lentils", "dal", "beans", "chickpea", "chickpeas",
+}
+_BASE_CATEGORY_KEYWORDS = {
+    "grain", "cereal", "dairy", "legume", "pasta", "noodle",
+}
+_TOPPING_CATEGORY_KEYWORDS = {
+    "fruit", "berry", "nut", "seed", "garnish", "sweetener",
+}
+_TOPPING_FOOD_KEYWORDS = {
+    "banana", "blueberry", "strawberry", "raspberry", "blackberry",
+    "apple", "mango", "grape", "raisin", "date", "fig", "fruit",
+    "almond", "walnut", "cashew", "pecan", "pistachio", "peanut",
+    "chia", "flax", "sesame", "sunflower seed", "pumpkin seed",
+    "honey", "syrup",
+}
+
+
+def _contains_any_food_keyword(text: str, keywords: set[str]) -> bool:
+    normalized = f" {_identity_text(str(text or '').replace('_', ' '))} "
+    return any(f" {keyword} " in normalized for keyword in keywords)
+
+
+def _needs_base_food_audit(result: dict[str, Any]) -> bool:
+    """Detect suspicious topping-only bowls without guessing the missing food."""
+    foods = result.get("meal", {}).get("foods", [])
+    if not isinstance(foods, list) or len(foods) < 2:
+        return False
+
+    has_base = False
+    topping_like_count = 0
+    bowl_like_count = 0
+
+    for food in foods:
+        if not isinstance(food, dict):
+            continue
+        identity = " ".join(
+            str(food.get(key) or "")
+            for key in (
+                "name", "canonical_name", "category",
+                "usda_food_description", "role",
+            )
+        )
+        category = str(food.get("category") or "")
+        if _contains_any_food_keyword(identity, _BASE_FOOD_KEYWORDS) or (
+            _contains_any_food_keyword(category, _BASE_CATEGORY_KEYWORDS)
+        ):
+            has_base = True
+        if (
+            _contains_any_food_keyword(category, _TOPPING_CATEGORY_KEYWORDS)
+            or _contains_any_food_keyword(identity, _TOPPING_FOOD_KEYWORDS)
+            or str(food.get("role") or "").lower() in {"topping", "garnish"}
+        ):
+            topping_like_count += 1
+        if str(food.get("container") or "").lower() == "bowl":
+            bowl_like_count += 1
+
+    return not has_base and topping_like_count >= 2 and (
+        topping_like_count >= 3 or bowl_like_count > 0
+    )
+
+
+def _merge_new_core_foods(
+    result: dict[str, Any],
+    audit_result: dict[str, Any],
+) -> list[str]:
+    meal = result.get("meal")
+    audit_meal = audit_result.get("meal")
+    if not isinstance(meal, dict) or not isinstance(audit_meal, dict):
+        return []
+    foods = meal.get("foods")
+    audited_foods = audit_meal.get("foods")
+    if not isinstance(foods, list) or not isinstance(audited_foods, list):
+        return []
+
+    existing_identities = {
+        _identity_text(
+            food.get("canonical_name") or food.get("name")
+        )
+        for food in foods
+        if isinstance(food, dict)
+    }
+    added: list[str] = []
+    for food in audited_foods:
+        if not isinstance(food, dict):
+            continue
+        identity = _identity_text(
+            food.get("canonical_name") or food.get("name")
+        )
+        # A visual model sometimes labels the prepared bowl as "oatmeal".
+        # Nutrition resolution must use the physical ingredient instead, and
+        # the UI must not re-introduce the duplicate prepared-meal parent.
+        if identity == "oatmeal":
+            food["name"] = "Rolled oats"
+            food["canonical_name"] = "rolled oats"
+            food["category"] = "Grain"
+            food["analysis_route"] = "DIRECT_USDA"
+            food["usda_food_description"] = (
+                "oats, regular and quick, cooked with water, without salt"
+            )
+            food["requires_back_image"] = False
+            food["brand"] = None
+            identity = "rolled oats"
+        if not identity or identity in existing_identities:
+            continue
+        # The audit is allowed to add only ordinary core foods or a clearly
+        # identified packaged product—not another prepared composite parent.
+        food.setdefault("possible_usda_queries", [])
+        food.setdefault("ingredients", [])
+        food.setdefault("spices", [])
+        foods.append(food)
+        existing_identities.add(identity)
+        added.append(str(food.get("name") or identity))
+    return added
+
+
+def _audit_and_recover_missing_base_foods(
+    image: Image.Image,
+    result: dict[str, Any],
+    *,
+    image_index: int,
+) -> dict[str, Any]:
+    if not _needs_base_food_audit(result):
+        return result
+
+    existing_foods = result.get("meal", {}).get("foods", [])
+    existing_names = [
+        str(food.get("name") or food.get("canonical_name") or "food")
+        for food in existing_foods
+        if isinstance(food, dict)
+    ]
+    audit_instruction = (
+        "This meal image was initially detected as containing: "
+        f"{', '.join(existing_names)}. Inspect the substantial food underneath "
+        "and between those toppings. Return ONLY nutrient-bearing foods that "
+        "were missed; return an empty foods array if none were missed. Pay "
+        "special attention to rolled oats, cereal, yogurt, milk, rice, grains "
+        "or another bowl base. Never return a prepared parent name such as "
+        "Oatmeal when its core ingredient is rolled oats. Do not repeat any "
+        "already detected food."
+    )
+    try:
+        audit_result = _generate_json(
+            model=GEMINI_MEAL_MODEL,
+            instruction=audit_instruction,
+            image=image,
+            config={
+                "response_mime_type": "application/json",
+                "response_json_schema": SIMPLE_MEAL_RESPONSE_JSON_SCHEMA,
+                "max_output_tokens": 2048,
+            },
+            operation=f"missing-base audit {image_index}",
+        )
+    except ModelJSONResponseError as error:
+        # This is a quality audit after a valid primary result. A failed audit
+        # must not turn a usable meal analysis into an application error.
+        logger.warning(
+            "Missing-base audit failed for image=%d; retaining primary "
+            "foods: %s",
+            image_index,
+            error,
+        )
+        return result
+    added = _merge_new_core_foods(result, audit_result)
+    logger.info(
+        "Missing-base audit image=%d existing=%s recovered=%s",
+        image_index,
+        existing_names,
+        added,
+    )
+    return result
 
 
 SEPARATORS = ["/", "&", ",", " and "]
@@ -4373,6 +4561,11 @@ def analyze_meal(
             image=image,
             config=MEAL_GENERATION_CONFIG,
             operation=f"meal image {image_index}",
+        )
+        result = _audit_and_recover_missing_base_foods(
+            image,
+            result,
+            image_index=image_index,
         )
 
         foods = (
