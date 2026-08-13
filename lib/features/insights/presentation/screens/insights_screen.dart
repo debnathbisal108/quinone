@@ -164,6 +164,12 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
                     _metricKey = key;
                     _selectedDay = null;
                   });
+                  _showNutrientDailyBreakdown(
+                    context,
+                    insights: insights,
+                    category: _category,
+                    nutrientKey: key,
+                  );
                 },
               ),
             const SizedBox(height: 28),
@@ -358,6 +364,177 @@ void _showHealthDomainDailyBreakdown(
                 );
               },
             ),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+void _showNutrientDailyBreakdown(
+  BuildContext context, {
+  required NutritionInsights insights,
+  required InsightCategory category,
+  required String nutrientKey,
+}) {
+  final days = insights.dailyInsights
+      .where((day) {
+        final value = day.metricValue(category, nutrientKey);
+        final target = insights.targetForDay(day, nutrientKey);
+        return value != null &&
+            target != null &&
+            target.classify(value) != BalanceState.unknown;
+      })
+      .toList(growable: false)
+    ..sort((a, b) => b.date.compareTo(a.date));
+  if (days.isEmpty) return;
+
+  final average = days.fold<double>(
+        0,
+        (sum, day) => sum + day.metricValue(category, nutrientKey)!,
+      ) /
+      days.length;
+  final unit = insights.targetForDay(days.first, nutrientKey)?.unit ??
+      unitForMetric(nutrientKey);
+
+  showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    useSafeArea: true,
+    isScrollControlled: true,
+    builder: (sheetContext) {
+      final theme = Theme.of(sheetContext);
+
+      return DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.72,
+        minChildSize: 0.42,
+        maxChildSize: 0.94,
+        builder: (context, controller) => ListView(
+          controller: controller,
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 30),
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        friendlyMetricName(nutrientKey),
+                        style: theme.textTheme.headlineSmall?.copyWith(
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${days.length} ${days.length == 1 ? 'tracked day' : 'tracked days'} in this period',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primaryContainer,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    '${_compactNumber(average)}${unit.isEmpty ? '' : ' $unit'} avg',
+                    style: TextStyle(
+                      color: theme.colorScheme.onPrimaryContainer,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Daily amounts are compared with the target or reference used for that day.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 18),
+            ...days.map((day) {
+              final value = day.metricValue(category, nutrientKey)!;
+              final target = insights.targetForDay(day, nutrientKey)!;
+              final state = target.classify(value);
+              final (status, color) = switch (state) {
+                BalanceState.low => ('Below target', Colors.orange),
+                BalanceState.balanced => ('In target range', Colors.green),
+                BalanceState.high =>
+                  ('Above target', theme.colorScheme.error),
+                BalanceState.unknown =>
+                  ('Target unavailable', theme.colorScheme.onSurfaceVariant),
+              };
+
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.surfaceContainerLow,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                      color: theme.colorScheme.outlineVariant,
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              _fullDate(day.date),
+                              style: theme.textTheme.titleSmall?.copyWith(
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            _metricDisplayValue(
+                              category,
+                              nutrientKey,
+                              value,
+                            ),
+                            style: theme.textTheme.titleMedium?.copyWith(
+                              color: color,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 5),
+                      Text(
+                        '$status · ${_targetDescription(target)}',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: color,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        '${day.mealCount} ${day.mealCount == 1 ? 'meal' : 'meals'} · ${day.calories.round()} kcal logged',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }),
           ],
         ),
       );
