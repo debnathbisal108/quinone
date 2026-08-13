@@ -69,6 +69,9 @@ class NutrientStatus:
 
 CANONICAL_NUTRIENT_KEYS: List[str] = [
     "energy_kcal", "protein_g", "fat_g", "carbohydrate_g", "fiber_g", "sugars_g", "added_sugars_g",
+    "carbohydrate_by_difference_g", "carbohydrate_by_summation_g",
+    "carbohydrate_component_sum_g", "starch_g", "sucrose_g", "glucose_g",
+    "fructose_g", "lactose_g", "maltose_g", "galactose_g",
     "calcium_mg", "iron_mg", "magnesium_mg", "phosphorus_mg", "potassium_mg",
     "sodium_mg", "zinc_mg", "copper_mg", "manganese_mg", "selenium_ug",
     "vitamin_a_ug", "vitamin_c_mg", "vitamin_d_ug", "vitamin_e_mg", "vitamin_k_ug",
@@ -157,11 +160,27 @@ NUTRIENT_MAP: Dict[str, List[Dict[str, Any]]] = {
         {"numbers": {"205"}, "names": {"carbohydrate, by difference"}, "target_unit": "G"},
         {"names": {"carbohydrate, by summation"}, "target_unit": "G"},
     ],
+    "carbohydrate_by_difference_g": [
+        {"numbers": {"205"}, "names": {"carbohydrate, by difference"}, "target_unit": "G"},
+    ],
+    "carbohydrate_by_summation_g": [
+        {"names": {"carbohydrate, by summation"}, "target_unit": "G"},
+    ],
     "fiber_g": [{"numbers": {"291"}, "names": {"fiber, total dietary"}, "target_unit": "G"}],
     "sugars_g": [
         {"numbers": {"269"}, "names": {"sugars, total including nlea", "sugars, total"}, "target_unit": "G"},
         {"names": {"total sugars"}, "target_unit": "G"},
     ],
+    "added_sugars_g": [
+        {"numbers": {"539"}, "names": {"sugars, added", "added sugars"}, "target_unit": "G"},
+    ],
+    "starch_g": [{"numbers": {"209"}, "names": {"starch"}, "target_unit": "G"}],
+    "sucrose_g": [{"numbers": {"210"}, "names": {"sucrose"}, "target_unit": "G"}],
+    "glucose_g": [{"numbers": {"211"}, "names": {"glucose"}, "target_unit": "G"}],
+    "fructose_g": [{"numbers": {"212"}, "names": {"fructose"}, "target_unit": "G"}],
+    "lactose_g": [{"numbers": {"213"}, "names": {"lactose"}, "target_unit": "G"}],
+    "maltose_g": [{"numbers": {"214"}, "names": {"maltose"}, "target_unit": "G"}],
+    "galactose_g": [{"numbers": {"287"}, "names": {"galactose"}, "target_unit": "G"}],
     "calcium_mg": [{"numbers": {"301"}, "names": {"calcium, ca"}, "target_unit": "MG"}],
     "iron_mg": [{"numbers": {"303"}, "names": {"iron, fe"}, "target_unit": "MG"}],
     "magnesium_mg": [{"numbers": {"304"}, "names": {"magnesium, mg"}, "target_unit": "MG"}],
@@ -288,9 +307,10 @@ def extract_canonical_nutrients(food_nutrients: List[Dict[str, Any]]) -> Dict[st
     """
     Map a raw USDA `foodNutrients` array onto the canonical Nutrica schema.
 
-    Every one of the 38 canonical keys is always present in the output.
-    A nutrient USDA didn't report for this food is left as `null` - never
-    estimated, never interpolated.
+    Every canonical key is always present in the output. Nutrients USDA did
+    not report remain `null`, except for the explicit carbohydrate and energy
+    consistency fallbacks in `_repair_missing_macro_totals`, which are derived
+    only from reported macro components.
     """
     by_number, by_name = _build_nutrient_index(food_nutrients)
 
@@ -301,7 +321,86 @@ def extract_canonical_nutrients(food_nutrients: List[Dict[str, Any]]) -> Dict[st
             if value is not None:
                 canonical[key] = value
                 break
+    _repair_missing_macro_totals(canonical)
     return canonical
+
+
+def _repair_missing_macro_totals(
+    canonical: Dict[str, Optional[float]],
+) -> None:
+    """Reconcile missing/impossible macro totals from reported components.
+
+    Some Foundation records expose sugars (and sometimes fibre/starch) while
+    omitting total carbohydrate or energy. Summing meal fields independently
+    then produces impossible output such as 21.6 g sugar inside 5.7 g total
+    carbohydrate. We never overwrite a consistent USDA total. When it is absent
+    or below its reported components, we calculate a transparent component sum.
+    """
+    sugar_components = [
+        canonical.get(key)
+        for key in (
+            "sucrose_g", "glucose_g", "fructose_g", "lactose_g",
+            "maltose_g", "galactose_g",
+        )
+    ]
+    reported_sugar_parts = [value for value in sugar_components if value is not None]
+    sugar_component_sum = (
+        round(sum(reported_sugar_parts), 4)
+        if reported_sugar_parts
+        else None
+    )
+
+    total_sugars = canonical.get("sugars_g")
+    if total_sugars is None and sugar_component_sum is not None:
+        total_sugars = sugar_component_sum
+        canonical["sugars_g"] = total_sugars
+
+    carbohydrate_parts = [
+        value
+        for value in (
+            total_sugars,
+            canonical.get("starch_g"),
+            canonical.get("fiber_g"),
+        )
+        if value is not None
+    ]
+    component_sum = round(sum(carbohydrate_parts), 4) if carbohydrate_parts else None
+    canonical["carbohydrate_component_sum_g"] = component_sum
+
+    reported_candidates = [
+        value
+        for value in (
+            canonical.get("carbohydrate_g"),
+            canonical.get("carbohydrate_by_difference_g"),
+            canonical.get("carbohydrate_by_summation_g"),
+        )
+        if value is not None
+    ]
+    reported_total = max(reported_candidates) if reported_candidates else None
+
+    minimum_total = max(
+        [value for value in (total_sugars, component_sum) if value is not None],
+        default=None,
+    )
+    if reported_total is None:
+        canonical["carbohydrate_g"] = minimum_total
+    elif minimum_total is not None and reported_total + 0.01 < minimum_total:
+        canonical["carbohydrate_g"] = minimum_total
+
+    # Only fill energy when USDA supplied no usable energy and at least one
+    # energy-bearing macro is known. This standard Atwater calculation is a
+    # fallback, not a replacement for a reported FoodData Central value.
+    if canonical.get("energy_kcal") is None:
+        carbohydrate = canonical.get("carbohydrate_g")
+        protein = canonical.get("protein_g")
+        fat = canonical.get("fat_g")
+        if any(value is not None for value in (carbohydrate, protein, fat)):
+            canonical["energy_kcal"] = round(
+                4.0 * float(carbohydrate or 0)
+                + 4.0 * float(protein or 0)
+                + 9.0 * float(fat or 0),
+                4,
+            )
 
 
 def extract_all_nutrients(food_nutrients: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
