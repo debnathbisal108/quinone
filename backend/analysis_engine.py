@@ -264,6 +264,55 @@ SIMPLE_MEAL_RESPONSE_JSON_SCHEMA = {
     "required": ["meal"],
 }
 
+# Every meal image receives a second, independent inventory pass. This schema
+# intentionally has no mixed-dish parent or nested ingredient field: each item
+# must be one atomic nutrient-bearing food. That makes it impossible for the
+# auditor to return both "sandwich" and its bread/filling, or "oatmeal" and its
+# oats/toppings, in the same accepted response.
+ATOMIC_MEAL_INVENTORY_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "meal_type": {"type": "string"},
+        "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "canonical_name": {"type": "string"},
+                    "category": {"type": "string"},
+                    "container": {"type": "string"},
+                    "role": {"type": "string"},
+                    "food_source": {
+                        "type": "string",
+                        "enum": ["Generic", "Branded", "Restaurant", "Homemade"],
+                    },
+                    "brand": _NULLABLE_STRING_SCHEMA,
+                    "quantity": {"type": "number"},
+                    "unit": {"type": "string", "enum": ["g", "ml"]},
+                    "preparation": {"type": "string"},
+                    "confidence": {"type": "number"},
+                    "analysis_route": {
+                        "type": "string",
+                        "enum": ["DIRECT_USDA", "NUTRITION_LABEL"],
+                    },
+                    "usda_food_description": _NULLABLE_STRING_SCHEMA,
+                    "requires_back_image": {"type": "boolean"},
+                    "visual_evidence": {"type": "string"},
+                },
+                "required": [
+                    "name", "canonical_name", "category", "container", "role",
+                    "food_source", "brand", "quantity", "unit", "preparation",
+                    "confidence", "analysis_route", "usda_food_description",
+                    "requires_back_image", "visual_evidence",
+                ],
+            },
+        },
+    },
+    "required": ["meal_type", "items"],
+}
+
 _LABEL_NUTRIENT_PROPERTIES = {
     key: _NULLABLE_NUMBER_SCHEMA
     for key in (
@@ -2936,7 +2985,7 @@ def _generate_json(
     *,
     model: str,
     instruction: str,
-    image: Image.Image,
+    image: Any,
     config: dict[str, Any],
     operation: str,
 ) -> dict[str, Any]:
@@ -2968,6 +3017,22 @@ def _generate_json(
                     int(retry_config.get("max_output_tokens", 8192)),
                     3072,
                 )
+            elif (
+                config.get("response_json_schema")
+                is ATOMIC_MEAL_INVENTORY_JSON_SCHEMA
+            ):
+                retry_instruction = (
+                    "Re-inspect every supplied view of this one meal. Return "
+                    "the complete atomic food inventory required by the "
+                    "schema. Each item must be one ingredient only. Split "
+                    "combined dishes into visually supportable ingredients; "
+                    "never include a dish parent, never join names with and, "
+                    "slash or ampersand, and never repeat an ingredient."
+                )
+                retry_config["max_output_tokens"] = min(
+                    int(retry_config.get("max_output_tokens", 6144)),
+                    4096,
+                )
             else:
                 retry_instruction = (
                     f"{instruction}\n\n"
@@ -2976,9 +3041,10 @@ def _generate_json(
                 )
 
         try:
+            images = list(image) if isinstance(image, (list, tuple)) else [image]
             response = client.models.generate_content(
                 model=model,
-                contents=[retry_instruction, image],
+                contents=[retry_instruction, *images],
                 config=retry_config,
             )
         except Exception as error:
@@ -3070,6 +3136,38 @@ def _validate_model_contract(
         ):
             raise ValueError("The AI response did not contain label nutrition.")
 
+    if schema is ATOMIC_MEAL_INVENTORY_JSON_SCHEMA:
+        import re
+
+        items = result.get("items")
+        if not isinstance(items, list) or not items:
+            raise ValueError("The AI returned an empty food inventory.")
+        identities: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("The AI returned an invalid inventory item.")
+            name = str(item.get("name") or "").strip()
+            canonical = str(item.get("canonical_name") or name).strip()
+            if not name or not canonical:
+                raise ValueError("The AI returned an unnamed inventory item.")
+            if re.search(r"\s(?:and|&)\s|/", canonical, re.IGNORECASE):
+                raise ValueError(
+                    f"The AI returned a combined food item: {canonical}."
+                )
+            identity = _identity_text(canonical)
+            if not identity or identity in identities:
+                raise ValueError(
+                    f"The AI returned a repeated food item: {canonical}."
+                )
+            identities.add(identity)
+            try:
+                quantity = float(item.get("quantity"))
+                confidence = float(item.get("confidence"))
+            except (TypeError, ValueError) as error:
+                raise ValueError("The AI returned invalid inventory values.") from error
+            if quantity <= 0 or not 0 <= confidence <= 1:
+                raise ValueError("The AI returned invalid inventory measurements.")
+
 
 def _model_finish_reason(response: Any) -> str:
     """Read finish metadata defensively without depending on one SDK shape."""
@@ -3117,181 +3215,171 @@ def extract_label(client, image):
     )
 
 
-_BASE_FOOD_KEYWORDS = {
-    "oat", "oats", "rolled oats", "porridge", "cereal", "granola",
-    "muesli", "yogurt", "yoghurt", "curd", "milk", "rice", "quinoa",
-    "barley", "millet", "couscous", "pasta", "noodle", "noodles",
-    "bread", "toast", "roti", "chapati", "potato", "sweet potato",
-    "lentil", "lentils", "dal", "beans", "chickpea", "chickpeas",
-}
-_BASE_CATEGORY_KEYWORDS = {
-    "grain", "cereal", "dairy", "legume", "pasta", "noodle",
-}
-_TOPPING_CATEGORY_KEYWORDS = {
-    "fruit", "berry", "nut", "seed", "garnish", "sweetener",
-}
-_TOPPING_FOOD_KEYWORDS = {
-    "banana", "blueberry", "strawberry", "raspberry", "blackberry",
-    "apple", "mango", "grape", "raisin", "date", "fig", "fruit",
-    "almond", "walnut", "cashew", "pecan", "pistachio", "peanut",
-    "chia", "flax", "sesame", "sunflower seed", "pumpkin seed",
-    "honey", "syrup",
-}
+def _meal_inventory_views(image: Image.Image) -> list[Image.Image]:
+    """Return a full view plus overlapping detail crops of the same meal."""
+    width, height = image.size
+    if width < 640 or height < 640:
+        return [image]
+
+    x_mid = width // 2
+    y_mid = height // 2
+    overlap_x = max(40, round(width * 0.08))
+    overlap_y = max(40, round(height * 0.08))
+    boxes = [
+        (0, 0, min(width, x_mid + overlap_x), min(height, y_mid + overlap_y)),
+        (max(0, x_mid - overlap_x), 0, width, min(height, y_mid + overlap_y)),
+        (0, max(0, y_mid - overlap_y), min(width, x_mid + overlap_x), height),
+        (max(0, x_mid - overlap_x), max(0, y_mid - overlap_y), width, height),
+    ]
+    return [image, *(image.crop(box) for box in boxes)]
 
 
-def _contains_any_food_keyword(text: str, keywords: set[str]) -> bool:
-    normalized = f" {_identity_text(str(text or '').replace('_', ' '))} "
-    return any(f" {keyword} " in normalized for keyword in keywords)
+def _atomic_inventory_food(
+    item: dict[str, Any],
+    *,
+    index: int,
+) -> dict[str, Any]:
+    name = str(item.get("name") or "").strip()
+    canonical_name = str(item.get("canonical_name") or name).strip()
+    identity = _identity_text(canonical_name or name)
 
-
-def _needs_base_food_audit(result: dict[str, Any]) -> bool:
-    """Detect suspicious topping-only bowls without guessing the missing food."""
-    foods = result.get("meal", {}).get("foods", [])
-    if not isinstance(foods, list) or len(foods) < 2:
-        return False
-
-    has_base = False
-    topping_like_count = 0
-    bowl_like_count = 0
-
-    for food in foods:
-        if not isinstance(food, dict):
-            continue
-        identity = " ".join(
-            str(food.get(key) or "")
-            for key in (
-                "name", "canonical_name", "category",
-                "usda_food_description", "role",
-            )
-        )
-        category = str(food.get("category") or "")
-        if _contains_any_food_keyword(identity, _BASE_FOOD_KEYWORDS) or (
-            _contains_any_food_keyword(category, _BASE_CATEGORY_KEYWORDS)
-        ):
-            has_base = True
-        if (
-            _contains_any_food_keyword(category, _TOPPING_CATEGORY_KEYWORDS)
-            or _contains_any_food_keyword(identity, _TOPPING_FOOD_KEYWORDS)
-            or str(food.get("role") or "").lower() in {"topping", "garnish"}
-        ):
-            topping_like_count += 1
-        if str(food.get("container") or "").lower() == "bowl":
-            bowl_like_count += 1
-
-    return not has_base and topping_like_count >= 2 and (
-        topping_like_count >= 3 or bowl_like_count > 0
-    )
-
-
-def _merge_new_core_foods(
-    result: dict[str, Any],
-    audit_result: dict[str, Any],
-) -> list[str]:
-    meal = result.get("meal")
-    audit_meal = audit_result.get("meal")
-    if not isinstance(meal, dict) or not isinstance(audit_meal, dict):
-        return []
-    foods = meal.get("foods")
-    audited_foods = audit_meal.get("foods")
-    if not isinstance(foods, list) or not isinstance(audited_foods, list):
-        return []
-
-    existing_identities = {
-        _identity_text(
-            food.get("canonical_name") or food.get("name")
-        )
-        for food in foods
-        if isinstance(food, dict)
-    }
-    added: list[str] = []
-    for food in audited_foods:
-        if not isinstance(food, dict):
-            continue
-        identity = _identity_text(
-            food.get("canonical_name") or food.get("name")
-        )
-        # A visual model sometimes labels the prepared bowl as "oatmeal".
-        # Nutrition resolution must use the physical ingredient instead, and
-        # the UI must not re-introduce the duplicate prepared-meal parent.
-        if identity == "oatmeal":
-            food["name"] = "Rolled oats"
-            food["canonical_name"] = "rolled oats"
-            food["category"] = "Grain"
-            food["analysis_route"] = "DIRECT_USDA"
-            food["usda_food_description"] = (
+    # This alias correction is not the scope of the audit. It is a final
+    # deterministic safeguard against one especially common prepared-parent
+    # label surviving as though it were a separate ingredient.
+    if identity == "oatmeal":
+        name = "Rolled oats"
+        canonical_name = "rolled oats"
+        identity = "rolled oats"
+        item = {
+            **item,
+            "category": "Grain",
+            "usda_food_description": (
                 "oats, regular and quick, cooked with water, without salt"
-            )
-            food["requires_back_image"] = False
-            food["brand"] = None
-            identity = "rolled oats"
-        if not identity or identity in existing_identities:
-            continue
-        # The audit is allowed to add only ordinary core foods or a clearly
-        # identified packaged product—not another prepared composite parent.
-        food.setdefault("possible_usda_queries", [])
-        food.setdefault("ingredients", [])
-        food.setdefault("spices", [])
-        foods.append(food)
-        existing_identities.add(identity)
-        added.append(str(food.get("name") or identity))
-    return added
+            ),
+        }
+
+    quantity = float(item.get("quantity"))
+    confidence = max(0.0, min(float(item.get("confidence")), 1.0))
+    route = str(item.get("analysis_route") or "DIRECT_USDA")
+    is_label = route == "NUTRITION_LABEL"
+    usda_description = item.get("usda_food_description")
+    if not is_label and not str(usda_description or "").strip():
+        usda_description = canonical_name
+
+    return {
+        "id": f"audited_food_{index:04d}",
+        "name": name,
+        "canonical_name": canonical_name,
+        "ingredient_type": None,
+        "canonical_variants": {"legume": None, "oil": None},
+        "category": str(item.get("category") or "Food"),
+        "container": str(item.get("container") or "other"),
+        "cuisine": None,
+        "food_source": str(item.get("food_source") or "Generic"),
+        "brand": item.get("brand"),
+        "role": str(item.get("role") or "ingredient"),
+        "served_separately": True,
+        "belongs_to_food_id": None,
+        "preparation": str(item.get("preparation") or "unknown"),
+        "preparation_confidence": confidence,
+        "quantity": round(quantity, 3),
+        "quantity_confidence": confidence,
+        "unit": str(item.get("unit") or "g"),
+        "edible_fraction": 1.0,
+        "detection_confidence": confidence,
+        "analysis_route": route,
+        "usda_food_description": None if is_label else str(usda_description),
+        "possible_usda_queries": [] if is_label else [canonical_name],
+        "requires_back_image": bool(item.get("requires_back_image")) if is_label else False,
+        "ingredients": [],
+        "spices": [],
+        "recovered_by": "complete_atomic_inventory_audit",
+        "visual_evidence": str(item.get("visual_evidence") or ""),
+    }
 
 
-def _audit_and_recover_missing_base_foods(
+def _audit_and_correct_complete_food_inventory(
     image: Image.Image,
     result: dict[str, Any],
     *,
     image_index: int,
 ) -> dict[str, Any]:
-    if not _needs_base_food_audit(result):
-        return result
+    """Replace the provisional detection with a universally audited inventory."""
+    provisional_foods = result.get("meal", {}).get("foods", [])
+    provisional = []
+    for food in provisional_foods if isinstance(provisional_foods, list) else []:
+        if not isinstance(food, dict):
+            continue
+        provisional.append({
+            "name": food.get("name"),
+            "canonical_name": food.get("canonical_name"),
+            "quantity": food.get("quantity"),
+            "unit": food.get("unit"),
+            "route": food.get("analysis_route"),
+        })
 
-    existing_foods = result.get("meal", {}).get("foods", [])
-    existing_names = [
-        str(food.get("name") or food.get("canonical_name") or "food")
-        for food in existing_foods
-        if isinstance(food, dict)
-    ]
     audit_instruction = (
-        "This meal image was initially detected as containing: "
-        f"{', '.join(existing_names)}. Inspect the substantial food underneath "
-        "and between those toppings. Return ONLY nutrient-bearing foods that "
-        "were missed; return an empty foods array if none were missed. Pay "
-        "special attention to rolled oats, cereal, yogurt, milk, rice, grains "
-        "or another bowl base. Never return a prepared parent name such as "
-        "Oatmeal when its core ingredient is rolled oats. Do not repeat any "
-        "already detected food."
+        "You are the final completeness auditor for one meal photograph. The "
+        "first image is the full meal; any additional images are overlapping "
+        "detail crops of that same meal and must never create duplicates. "
+        f"The provisional detector returned: {json.dumps(provisional)}. Treat "
+        "that list only as a checklist: preserve items verified in the image, "
+        "remove false positives, and recover every missed edible component.\n\n"
+        "Perform a complete visual sweep: every container; left-to-right and "
+        "top-to-bottom; then each item from underlying base through mixed-in "
+        "ingredients, fillings, spreads, sauces, toppings and garnishes. "
+        "Return ONE flat inventory of atomic nutrient-bearing foods. Split "
+        "sandwiches into bread/fillings/spreads, salads into their visible "
+        "ingredients, bowls into base/mix-ins/toppings, and mixed dishes into "
+        "the smallest ingredients the visual evidence can support. Never "
+        "return the complete dish or meal parent when its ingredients are "
+        "listed. Never join two foods in one item. Never repeat the same "
+        "ingredient because it appears in multiple crops or locations, has a "
+        "synonym, or has both a prepared and ingredient name; aggregate its "
+        "mass into one item unless the foods are different branded products. "
+        "Oatmeal is a meal label, "
+        "not an extra food when rolled oats and toppings are present.\n\n"
+        "Do not fabricate an ingredient that is fully hidden and has no "
+        "defensible visual evidence. When exact seasoning cannot be seen, do "
+        "not guess it. Quantities must represent each ingredient's own edible "
+        "mass so totals do not double count. Use DIRECT_USDA for generic "
+        "ingredients and NUTRITION_LABEL only for a clearly branded packaged "
+        "product. Return only the required atomic inventory JSON."
     )
-    try:
-        audit_result = _generate_json(
-            model=GEMINI_MEAL_MODEL,
-            instruction=audit_instruction,
-            image=image,
-            config={
-                "response_mime_type": "application/json",
-                "response_json_schema": SIMPLE_MEAL_RESPONSE_JSON_SCHEMA,
-                "max_output_tokens": 2048,
-            },
-            operation=f"missing-base audit {image_index}",
-        )
-    except ModelJSONResponseError as error:
-        # This is a quality audit after a valid primary result. A failed audit
-        # must not turn a usable meal analysis into an application error.
-        logger.warning(
-            "Missing-base audit failed for image=%d; retaining primary "
-            "foods: %s",
-            image_index,
-            error,
-        )
-        return result
-    added = _merge_new_core_foods(result, audit_result)
+    audited = _generate_json(
+        model=GEMINI_MEAL_MODEL,
+        instruction=audit_instruction,
+        image=_meal_inventory_views(image),
+        config={
+            "response_mime_type": "application/json",
+            "response_json_schema": ATOMIC_MEAL_INVENTORY_JSON_SCHEMA,
+            "max_output_tokens": 6144,
+        },
+        operation=f"complete food inventory audit {image_index}",
+    )
+    items = audited.get("items", [])
+    foods = [
+        _atomic_inventory_food(item, index=index)
+        for index, item in enumerate(items, start=1)
+        if isinstance(item, dict)
+    ]
     logger.info(
-        "Missing-base audit image=%d existing=%s recovered=%s",
+        "Complete inventory audit image=%d provisional=%s corrected=%s",
         image_index,
-        existing_names,
-        added,
+        [entry.get("name") for entry in provisional],
+        [food.get("name") for food in foods],
     )
-    return result
+    return {
+        "meal": {
+            "meal_type": str(audited.get("meal_type") or "Mixed"),
+            "estimated_visible_food_weight_g": sum(
+                float(food.get("quantity", 0) or 0)
+                for food in foods
+                if food.get("unit") == "g"
+            ),
+            "foods": foods,
+        },
+    }
 
 
 SEPARATORS = ["/", "&", ",", " and "]
@@ -4562,7 +4650,7 @@ def analyze_meal(
             config=MEAL_GENERATION_CONFIG,
             operation=f"meal image {image_index}",
         )
-        result = _audit_and_recover_missing_base_foods(
+        result = _audit_and_correct_complete_food_inventory(
             image,
             result,
             image_index=image_index,
