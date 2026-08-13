@@ -54,6 +54,11 @@ _COMPOUND_TERMS = {
     "sandwich", "pizza", "casserole", "meal", "mix", "filling",
 }
 
+_COMPLETION_IGNORED_WORDS = _PREPARATION_TERMS | _COMPOUND_TERMS | {
+    "food", "foods", "organic", "natural", "flavor", "flavored",
+    "protein", "style", "type", "with", "without",
+}
+
 
 def _clean_query(value: str) -> str:
     value = re.sub(r"[^a-zA-Z0-9\s\-']+", " ", value or "")
@@ -85,6 +90,89 @@ def _token_matches(query_token: str, candidate_token: str) -> bool:
         return True
     if len(c) >= 4 and q.startswith(c) and len(q) - len(c) <= 2:
         return True
+    return False
+
+
+def _pluralize_food_token(token: str) -> str:
+    """Return one conservative English plural used only as a search variant."""
+    value = token.lower().strip()
+    if len(value) < 3 or value.endswith("s"):
+        return value
+    if value.endswith("y") and len(value) > 2 and value[-2] not in "aeiou":
+        return value[:-1] + "ies"
+    if value.endswith(("ch", "sh", "x", "z")):
+        return value + "es"
+    return value + "s"
+
+
+def _prefix_completion_queries(
+    query: str,
+    candidates: list[dict[str, Any]],
+    *,
+    limit: int = 2,
+) -> list[str]:
+    """Expand only a strongly evidenced unfinished final token.
+
+    This is not general spell correction. A completion is allowed only when a
+    word actually returned by USDA starts with the user's final token. For
+    example a result containing "blueberry" provides evidence for
+    `blueberr -> blueberry`; its common plural is also tried because USDA core
+    foods are frequently named in plural form ("Blueberries, raw").
+    """
+    cleaned = _clean_query(query).lower()
+    query_words = _tokens(cleaned)
+    if not query_words:
+        return []
+
+    prefix = query_words[-1]
+    if len(prefix) < 4:
+        return []
+
+    observed: set[str] = set()
+    for candidate in candidates:
+        description = str(candidate.get("description") or "")
+        for word in _tokens(description):
+            normalized = word.lower()
+            if (
+                normalized != prefix
+                and normalized.startswith(prefix)
+                and len(normalized) - len(prefix) <= 5
+                and normalized not in _COMPLETION_IGNORED_WORDS
+            ):
+                observed.add(normalized)
+
+    if not observed:
+        return []
+
+    # Prefer the shortest completion: it is normally the core food word rather
+    # than a longer derivative found in a product description.
+    stem = sorted(observed, key=lambda value: (len(value), value))[0]
+    variants = [_pluralize_food_token(stem), stem]
+    leading_words = query_words[:-1]
+    completed: list[str] = []
+    for variant in variants:
+        full_query = " ".join([*leading_words, variant]).strip()
+        if full_query and full_query != cleaned and full_query not in completed:
+            completed.append(full_query)
+        if len(completed) >= limit:
+            break
+    return completed
+
+
+def _has_strong_generic_prefix_match(
+    query: str,
+    candidates: list[dict[str, Any]],
+) -> bool:
+    for candidate in candidates:
+        description = str(candidate.get("description") or "")
+        description_tokens = set(_tokens(description))
+        tier, coverage = _ordered_identity_match(query, description)
+        if (
+            tier >= 3
+            and coverage >= 1.0
+            and not (description_tokens & _COMPOUND_TERMS)
+        ):
+            return True
     return False
 
 
@@ -403,10 +491,11 @@ async def search_usda_foods(query: str, *, limit: int = 8) -> list[dict[str, Any
             client.post(USDA_SEARCH_URL, params=params, json=branded_payload),
             return_exceptions=True,
         )
-        raw_foods: list[dict[str, Any]] = []
+        preferred_foods: list[dict[str, Any]] = []
+        branded_foods: list[dict[str, Any]] = []
         successful_responses = 0
         response_errors: list[Exception] = []
-        for response in responses:
+        for response_index, response in enumerate(responses):
             if isinstance(response, Exception):
                 response_errors.append(response)
                 continue
@@ -419,11 +508,54 @@ async def search_usda_foods(query: str, *, limit: int = 8) -> list[dict[str, Any
             successful_responses += 1
             foods = body.get("foods", []) if isinstance(body, dict) else []
             if isinstance(foods, list):
-                raw_foods.extend(item for item in foods if isinstance(item, dict))
+                target = preferred_foods if response_index == 0 else branded_foods
+                target.extend(item for item in foods if isinstance(item, dict))
 
         if successful_responses == 0:
             cause = response_errors[0] if response_errors else None
             raise RuntimeError("USDA food search is temporarily unavailable.") from cause
+
+        # USDA's search often treats the final word as complete. If the user
+        # stops at `blueberr`, the generic dataset may return nothing while a
+        # branded product exposes the token `blueberry`. Use that observed word
+        # only as a completion clue, then query the preferred datasets again.
+        if not _has_strong_generic_prefix_match(cleaned, preferred_foods):
+            completion_queries = _prefix_completion_queries(
+                cleaned,
+                [*preferred_foods, *branded_foods],
+            )
+            if completion_queries:
+                completion_responses = await asyncio.gather(
+                    *[
+                        client.post(
+                            USDA_SEARCH_URL,
+                            params=params,
+                            json={
+                                "query": completion_query,
+                                "pageSize": 30,
+                                "pageNumber": 1,
+                                "dataType": PREFERRED_GENERIC_DATA_TYPES,
+                            },
+                        )
+                        for completion_query in completion_queries
+                    ],
+                    return_exceptions=True,
+                )
+                for response in completion_responses:
+                    if isinstance(response, Exception):
+                        continue
+                    try:
+                        response.raise_for_status()
+                        body = response.json()
+                    except (httpx.HTTPStatusError, ValueError):
+                        continue
+                    foods = body.get("foods", []) if isinstance(body, dict) else []
+                    if isinstance(foods, list):
+                        preferred_foods.extend(
+                            item for item in foods if isinstance(item, dict)
+                        )
+
+        raw_foods = [*preferred_foods, *branded_foods]
 
         normalized: list[tuple[tuple, dict[str, Any]]] = []
         seen: set[int] = set()
