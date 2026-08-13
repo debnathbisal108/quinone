@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from rapidfuzz import fuzz
+from usda_detail_cache import set_food_detail
 
 # =========================================================================
 # LOGGING
@@ -837,6 +838,12 @@ async def _candidate_is_accessible(
                 )
 
             if response.status_code == 200:
+                try:
+                    detail = response.json()
+                except json.JSONDecodeError:
+                    detail = None
+                if isinstance(detail, dict):
+                    set_food_detail(numeric_id, detail)
                 _fdc_accessibility_cache[numeric_id] = True
                 return True
 
