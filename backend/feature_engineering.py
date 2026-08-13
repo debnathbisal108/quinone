@@ -24,7 +24,7 @@ if not logger.handlers:
 logger.setLevel(os.environ.get("NUTRICA_LOG_LEVEL", "INFO"))
 logger.propagate = False
 
-FEATURE_VERSION = "1.1"
+FEATURE_VERSION = "1.2"
 _ROUND_DP = 6
 _VALID_ENTITY_TYPES = {"food", "ingredient", "spice"}
 _GRAM_UNITS = {"g", "gram", "grams"}
@@ -221,12 +221,33 @@ def _build_sugars(nutrients, raw_index):
             numbers=("539",),
             names=("sugars, added", "added sugars"),
         ),
-        "fructose_g": get_raw_nutrient(raw_index, numbers=("212",), names=("fructose",)),
-        "glucose_g": get_raw_nutrient(raw_index, numbers=("211",), names=("glucose",)),
-        "sucrose_g": get_raw_nutrient(raw_index, numbers=("210",), names=("sucrose",)),
-        "lactose_g": get_raw_nutrient(raw_index, numbers=("213",), names=("lactose",)),
-        "maltose_g": get_raw_nutrient(raw_index, numbers=("214",), names=("maltose",)),
-        "galactose_g": get_raw_nutrient(raw_index, numbers=("287",), names=("galactose",)),
+        "fructose_g": get_nutrient(nutrients, raw_index, "fructose_g", numbers=("212",), names=("fructose",)),
+        "glucose_g": get_nutrient(nutrients, raw_index, "glucose_g", numbers=("211",), names=("glucose",)),
+        "sucrose_g": get_nutrient(nutrients, raw_index, "sucrose_g", numbers=("210",), names=("sucrose",)),
+        "lactose_g": get_nutrient(nutrients, raw_index, "lactose_g", numbers=("213",), names=("lactose",)),
+        "maltose_g": get_nutrient(nutrients, raw_index, "maltose_g", numbers=("214",), names=("maltose",)),
+        "galactose_g": get_nutrient(nutrients, raw_index, "galactose_g", numbers=("287",), names=("galactose",)),
+    }
+
+
+def _build_carbohydrates(nutrients, raw_index):
+    return {
+        "total_carbohydrate_g": get_nutrient(nutrients, raw_index, "carbohydrate_g"),
+        "carbohydrate_by_difference_g": get_nutrient(
+            nutrients, raw_index, "carbohydrate_by_difference_g",
+            numbers=("205",), names=("carbohydrate, by difference",),
+        ),
+        "carbohydrate_by_summation_g": get_nutrient(
+            nutrients, raw_index, "carbohydrate_by_summation_g",
+            names=("carbohydrate, by summation",),
+        ),
+        "component_sum_g": get_nutrient(
+            nutrients, raw_index, "carbohydrate_component_sum_g",
+        ),
+        "fiber_g": get_nutrient(nutrients, raw_index, "fiber_g"),
+        "starch_g": get_nutrient(
+            nutrients, raw_index, "starch_g", numbers=("209",), names=("starch",),
+        ),
     }
 
 
@@ -526,6 +547,7 @@ def build_features(entity: Dict[str, Any], entity_type: str = "food") -> Dict[st
     amino_acids = _build_amino_acids(raw_index)
     fatty_acids = _build_fatty_acids(raw_index)
     sugars = _build_sugars(nutrients, raw_index)
+    carbohydrates = _build_carbohydrates(nutrients, raw_index)
     sterols = _build_sterols(nutrients, raw_index)
     bioactives = _build_bioactives(nutrients, raw_index)
     densities = _build_densities(macronutrients, _resolve_weight_g(entity))
@@ -535,8 +557,8 @@ def build_features(entity: Dict[str, Any], entity_type: str = "food") -> Dict[st
     ingredient_structure = _build_ingredient_structure(entity, sugars, entity_type)
     physical = _build_physical(entity, macronutrients)
     presence_flags = _build_presence_flags(macronutrients, minerals, vitamins, fat_profile, bioactives)
-    metadata = _build_completeness_metadata(nutrients, all_nutrients, (macronutrients, fat_profile, vitamins, minerals, amino_acids, fatty_acids, sugars, sterols, bioactives))
-    return {"macronutrients": macronutrients, "fat_profile": fat_profile, "vitamins": vitamins, "minerals": minerals, "amino_acids": amino_acids, "fatty_acids": fatty_acids, "sugars": sugars, "sterols": sterols, "bioactives": bioactives, "densities": densities, "ratios": ratios, "food_matrix": food_matrix, "processing": cooking, "ingredient_structure": ingredient_structure, "physical": physical, "presence_flags": presence_flags, "metadata": metadata}
+    metadata = _build_completeness_metadata(nutrients, all_nutrients, (macronutrients, carbohydrates, fat_profile, vitamins, minerals, amino_acids, fatty_acids, sugars, sterols, bioactives))
+    return {"macronutrients": macronutrients, "carbohydrates": carbohydrates, "fat_profile": fat_profile, "vitamins": vitamins, "minerals": minerals, "amino_acids": amino_acids, "fatty_acids": fatty_acids, "sugars": sugars, "sterols": sterols, "bioactives": bioactives, "densities": densities, "ratios": ratios, "food_matrix": food_matrix, "processing": cooking, "ingredient_structure": ingredient_structure, "physical": physical, "presence_flags": presence_flags, "metadata": metadata}
 
 
 def _featurize_entity_tree(entity: Dict[str, Any], entity_type: str = "food") -> Dict[str, Any]:
