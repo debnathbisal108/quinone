@@ -1,9 +1,11 @@
 from google import genai
 # from google.colab import files
-from PIL import Image
+from PIL import Image, ImageOps
 import json
 import copy
 import math
+import logging
+import time
 from pathlib import Path
 from typing import Any
 from difflib import SequenceMatcher
@@ -26,6 +28,36 @@ if not API_KEY:
 client = genai.Client(
     api_key=API_KEY
 )
+
+logger = logging.getLogger("quinone.analysis_engine")
+
+GEMINI_MEAL_MODEL = os.environ.get(
+    "GEMINI_MEAL_MODEL",
+    "gemini-3-flash-preview",
+)
+GEMINI_LABEL_MODEL = os.environ.get(
+    "GEMINI_LABEL_MODEL",
+    GEMINI_MEAL_MODEL,
+)
+
+# Phone cameras commonly produce 12-50 MP files. Gemini does not need the
+# original pixels for ordinary food recognition, and transmitting them adds a
+# large fixed cost. Labels keep a larger edge because small printed text needs
+# more detail than a meal photograph.
+MEAL_IMAGE_MAX_EDGE = int(os.environ.get("MEAL_IMAGE_MAX_EDGE", "1280"))
+LABEL_IMAGE_MAX_EDGE = int(os.environ.get("LABEL_IMAGE_MAX_EDGE", "2048"))
+
+MEAL_GENERATION_CONFIG = {
+    "response_mime_type": "application/json",
+    "temperature": 0.1,
+    "max_output_tokens": 8192,
+}
+
+LABEL_GENERATION_CONFIG = {
+    "response_mime_type": "application/json",
+    "temperature": 0.0,
+    "max_output_tokens": 4096,
+}
 
 # =============================================================================
 # MAIN VISION PROMPT (unchanged)
@@ -2361,6 +2393,101 @@ Return ONLY valid JSON that exactly conforms to the schema.
 """
 
 # =============================================================================
+# LOW-LATENCY MEAL PROMPT
+# =============================================================================
+#
+# The legacy prompt above is deliberately retained as a reference for the
+# domain rules accumulated during development. It is not sent to Gemini: at
+# roughly 49k characters it made every request expensive, including a photo
+# containing one obvious food. This compact contract keeps the fields consumed
+# by post_process(), food_resolver.py and the review UI without the repeated
+# prose and large worked examples.
+optimized_meal_prompt = """
+You are Quinone's food-vision extraction engine. Inspect ONE meal photograph
+and return one JSON object only. Do not add markdown or commentary.
+
+Goal: identify the physical edible items and estimate the amount actually
+visible. One physical ingredient must appear once. Never return both a mixed
+dish parent and the same ingredients as separate nutrition entities.
+
+Return this shape:
+{
+  "meal": {
+    "meal_type": "short meal description",
+    "estimated_visible_food_weight_g": 0,
+    "foods": [
+      {
+        "id": "food_0001",
+        "name": "core food name",
+        "canonical_name": "USDA-friendly core name",
+        "ingredient_type": "Legume|Cooking Oil|null",
+        "canonical_variants": {
+          "legume": null,
+          "oil": null
+        },
+        "category": "food category",
+        "container": "plate|bowl|cup|wrapper|other",
+        "cuisine": null,
+        "food_source": "Generic|Branded|Restaurant|Homemade",
+        "brand": null,
+        "role": "main|side|topping|ingredient|beverage|snack",
+        "served_separately": true,
+        "belongs_to_food_id": null,
+        "preparation": "raw/cooked/baked/fried/etc.",
+        "preparation_confidence": 0.0,
+        "quantity": 0,
+        "quantity_confidence": 0.0,
+        "unit": "g|ml|piece|slice|cup|tbsp|tsp",
+        "edible_fraction": 1.0,
+        "detection_confidence": 0.0,
+        "analysis_route": "DIRECT_USDA|DECOMPOSE|NUTRITION_LABEL",
+        "usda_food_description": "one precise USDA search phrase or null",
+        "possible_usda_queries": ["at most one useful fallback"],
+        "requires_back_image": false,
+        "ingredients": [],
+        "spices": []
+      }
+    ]
+  }
+}
+
+Rules:
+- Ignore plates, cutlery, napkins and other non-food objects.
+- Keep independent foods separate. A topping/spread physically attached to a
+  food is a separate object with belongs_to_food_id pointing to that food.
+- Use DIRECT_USDA for an identifiable single food. Use one precise
+  usda_food_description and zero or one fallback query; do not generate lists
+  of near-duplicate searches.
+- Set ingredient_type only for legumes and visible cooking oils/fats. For a
+  legume, populate canonical_variants.legume with the specific variety and set
+  oil to null. For a cooking oil, ghee or butter, populate
+  canonical_variants.oil and set legume to null. Otherwise ingredient_type and
+  both variants are null. Do not infer a specific variant at low confidence.
+- For homemade/restaurant mixed dishes whose components cannot be represented
+  as visible independent foods, use DECOMPOSE. Its quantity must be grams and
+  its ingredients must cover the whole edible mass. Each ingredient object
+  contains: name, canonical_name, ingredient_category,
+  usda_food_description, possible_usda_queries (zero or one fallback),
+  estimated_percentage, estimated_weight_g, confidence. Percentages sum to
+  100 and ingredient weights sum to the parent quantity. Each spice contains:
+  name, canonical_name, usda_food_description, possible_usda_queries (zero or
+  one fallback), estimated_weight_g, confidence. Do not also emit the parent
+  and its ingredients as separate top-level foods.
+- For clearly branded packaged products use NUTRITION_LABEL, set brand,
+  requires_back_image=true, usda_food_description=null,
+  possible_usda_queries=[], ingredients=[], spices=[]. Do not invent printed
+  nutrition values from the front package.
+- Use sequential IDs in visual order. All quantities and confidence values
+  must be positive. Use only the allowed units. Prefer grams or millilitres
+  when the visual estimate supports them.
+- estimated_visible_food_weight_g is the sum of top-level gram quantities that
+  represent distinct visible masses. Do not include ml or double-count a
+  DECOMPOSE parent and its ingredients.
+- If nothing edible is visible, return an empty foods list and weight 0.
+- Be concise: output only fields in the schema and only one USDA fallback.
+"""
+
+# =============================================================================
 # LABEL EXTRACTION PROMPT
 # =============================================================================
 label_prompt = """
@@ -2504,11 +2631,62 @@ def similarity(a, b):
     return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
 
 
+def prepare_image_for_model(
+    image: Image.Image,
+    *,
+    max_edge: int,
+) -> Image.Image:
+    """Auto-orient and downscale an image without mutating the caller's copy."""
+    prepared = ImageOps.exif_transpose(image)
+    if prepared.mode != "RGB":
+        prepared = prepared.convert("RGB")
+    else:
+        prepared = prepared.copy()
+
+    width, height = prepared.size
+    longest_edge = max(width, height)
+    if longest_edge > max_edge:
+        scale = max_edge / float(longest_edge)
+        prepared = prepared.resize(
+            (
+                max(1, round(width * scale)),
+                max(1, round(height * scale)),
+            ),
+            Image.Resampling.LANCZOS,
+        )
+    return prepared
+
+
+def _generate_json(
+    *,
+    model: str,
+    instruction: str,
+    image: Image.Image,
+    config: dict[str, Any],
+    operation: str,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    response = client.models.generate_content(
+        model=model,
+        contents=[instruction, image],
+        config=config,
+    )
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+    logger.info("Gemini %s completed in %.1f ms", operation, elapsed_ms)
+    return parse_model_json(response.text or "")
+
+
 def classify_image(client, image):
+    """Legacy compatibility helper; normal uploads no longer call it."""
     try:
         response = client.models.generate_content(
-            model="gemini-3-flash-preview",
-            contents=[classify_prompt, image]
+            model=GEMINI_MEAL_MODEL,
+            contents=[classify_prompt, image],
+            config={
+                "response_mime_type": "application/json",
+                "temperature": 0.0,
+                "max_output_tokens": 256,
+            },
         )
         text = response.text.strip()
         if text.startswith("```"):
@@ -2519,14 +2697,17 @@ def classify_image(client, image):
 
 
 def extract_label(client, image):
-    response = client.models.generate_content(
-        model="gemini-3-flash-preview",
-        contents=[label_prompt, image]
+    prepared = prepare_image_for_model(
+        image,
+        max_edge=LABEL_IMAGE_MAX_EDGE,
     )
-    txt = response.text.strip()
-    if txt.startswith("```"):
-        txt = txt.replace("```json", "").replace("```", "").strip()
-    return json.loads(txt)
+    return _generate_json(
+        model=GEMINI_LABEL_MODEL,
+        instruction=label_prompt,
+        image=prepared,
+        config=LABEL_GENERATION_CONFIG,
+        operation="back-label extraction",
+    )
 
 
 SEPARATORS = ["/", "&", ",", " and "]
@@ -3682,7 +3863,10 @@ def analyze_meal(
             all_images.append(
                 (
                     image_path,
-                    image.copy(),
+                    prepare_image_for_model(
+                        image,
+                        max_edge=MEAL_IMAGE_MAX_EDGE,
+                    ),
                 )
             )
 
@@ -3693,64 +3877,13 @@ def analyze_meal(
                 f"{Path(image_path).name}: {error}"
             ) from error
 
-    available_labels: list[dict[str, Any]] = []
-    food_images: list[tuple[str, Image.Image]] = []
-
-    # ---------------------------------------------------------
-    # Classify every uploaded image
-    # ---------------------------------------------------------
-
-    for image_path, image in all_images:
-        classification = classify_image(
-            client,
-            image,
-        )
-
-        confidence = float(
-            classification.get(
-                "confidence",
-                0,
-            )
-            or 0
-        )
-
-        image_type = classification.get(
-            "type",
-            "food",
-        )
-
-        if (
-            image_type == "nutrition_label"
-            and confidence > 0.55
-        ):
-            try:
-                label_result = extract_label(
-                    client,
-                    image,
-                )
-
-                available_labels.append(
-                    label_result
-                )
-            except Exception:
-                # If label extraction fails, analyse it
-                # as a normal food image.
-                food_images.append(
-                    (
-                        image_path,
-                        image,
-                    )
-                )
-        else:
-            food_images.append(
-                (
-                    image_path,
-                    image,
-                )
-            )
+    # Initial uploads are meal photographs by API contract. Nutrition labels
+    # are uploaded through /analyze/back-label/start, so classifying every meal
+    # photo with a separate Gemini request was pure fixed latency. Each image
+    # now goes directly to the meal extractor.
+    food_images = all_images
 
     all_foods: list[dict[str, Any]] = []
-    used_label_indices: set[int] = set()
 
     # ---------------------------------------------------------
     # Analyse food photographs
@@ -3761,16 +3894,12 @@ def analyze_meal(
           food_images,
           start=1,
     ):
-        response = client.models.generate_content(
-            model="gemini-3-flash-preview",
-            contents=[
-                prompt,
-                image,
-            ],
-        )
-
-        result = parse_model_json(
-            response.text
+        result = _generate_json(
+            model=GEMINI_MEAL_MODEL,
+            instruction=optimized_meal_prompt,
+            image=image,
+            config=MEAL_GENERATION_CONFIG,
+            operation=f"meal image {image_index}",
         )
 
         foods = (
@@ -3788,75 +3917,14 @@ def analyze_meal(
         )
 
         for food in foods:
-          if (
-              food.get("analysis_route")
-              == "NUTRITION_LABEL"
-          ):
-              food.setdefault(
-                  "requires_back_image",
-                  True,
-              )
-
-              food.setdefault(
-                  "back_image_received",
-                  bool(
-                      food.get(
-                          "nutrition_label"
-                      )
-                  ),
-              )
-
-
-        foods_needing_labels = [
-            food
-            for food in foods
-            if food.get("analysis_route")
-            == "NUTRITION_LABEL"
-        ]
-
-        for food in foods_needing_labels:
-            match = find_matching_label(
-                food=food,
-                labels=available_labels,
-                used_indices=used_label_indices,
-            )
-
-            if match is None:
-                continue
-
-            label_index, label, score = match
-
-            # food["nutrition_label"] = label
-            # food["requires_back_image"] = False
-            # food["label_match_confidence"] = score
-
-            # food["nutrition_label"] = label
-            # food["requires_back_image"] = True
-            # food["back_image_received"] = True
-            # food["label_match_confidence"] = score
-
-            attach_label_to_food(
-                food=food,
-                label=label,
-            )
-            
-            food["label_match_confidence"] = score
-
-            used_label_indices.add(
-                label_index
-            )
+            if food.get("analysis_route") == "NUTRITION_LABEL":
+                food.setdefault("requires_back_image", True)
+                food.setdefault(
+                    "back_image_received",
+                    bool(food.get("nutrition_label")),
+                )
 
         all_foods.extend(foods)
-
-    # ---------------------------------------------------------
-    # Nutrition-label-only upload
-    # ---------------------------------------------------------
-
-    if not all_foods and available_labels:
-        for label in available_labels:
-            all_foods.append(
-                create_food_from_label(label)
-            )
 
     if not all_foods:
         return {
