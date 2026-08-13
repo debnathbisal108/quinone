@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
+import 'core/api/dio_client.dart';
+import 'core/config/api_config.dart';
 import 'core/preferences/app_preferences_repository.dart';
 import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
@@ -20,6 +24,23 @@ Future<void> main() async {
       child: QuinoneApp(),
     ),
   );
+
+  // Render's free service may be asleep. Wake it while the user is browsing
+  // the home screen or choosing a photograph instead of making the analysis
+  // button pay the entire cold-start delay. This is best-effort and never
+  // blocks app startup.
+  unawaited(_warmAnalysisBackend());
+}
+
+Future<void> _warmAnalysisBackend() async {
+  try {
+    await DioClient.instance.get<dynamic>(
+      ApiConfig.healthEndpoint,
+    );
+  } catch (_) {
+    // The real upload flow still reports connectivity errors. A warm-up
+    // failure must not interrupt onboarding or home-screen navigation.
+  }
 }
 
 class QuinoneApp extends ConsumerWidget {
