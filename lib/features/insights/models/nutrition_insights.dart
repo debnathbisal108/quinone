@@ -204,6 +204,12 @@ class NutritionInsights {
 
   bool get isEmpty => mealCount == 0;
 
+  NutrientTargetBand? targetForDay(
+    DailyNutritionInsight day,
+    String nutrientKey,
+  ) =>
+      day.targetFor(nutrientKey) ?? _genericTargetFor(nutrientKey);
+
   List<String> get healthDomainKeys {
     final keys = <String>{};
     for (final day in dailyInsights) {
