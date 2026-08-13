@@ -55,6 +55,16 @@ LOW_CONFIDENCE_THRESHOLD = 40.0  # below RESOLVED but at/above this -> "resolved
 
 CACHE_FILE_PATH = os.environ.get("NUTRICA_USDA_CACHE_PATH", "")  # optional disk persistence
 
+# Automatic photo analysis resolves generic/core foods. Packaged branded foods
+# take the NUTRITION_LABEL route and must not be guessed from an incomplete
+# branded USDA record. Restricting the search itself also prevents the first
+# USDA page from being crowded by products before ranking can see raw foods.
+AUTOMATIC_RESOLVER_DATA_TYPES = [
+    "Foundation",
+    "SR Legacy",
+    "Survey (FNDDS)",
+]
+
 # Cache candidate accessibility so the same FDC ID is not validated repeatedly.
 _fdc_accessibility_cache: Dict[int, bool] = {}
 
@@ -226,8 +236,11 @@ async def search_food(
 
     params = {
         "api_key": USDA_API_KEY,
+    }
+    payload = {
         "query": query,
         "pageSize": page_size,
+        "dataType": AUTOMATIC_RESOLVER_DATA_TYPES,
     }
 
     last_exc: Optional[Exception] = None
@@ -240,9 +253,10 @@ async def search_food(
             async with _semaphore:
                 await _throttle()
 
-                response = await client.get(
+                response = await client.post(
                     USDA_SEARCH_URL,
                     params=params,
+                    json=payload,
                     timeout=REQUEST_TIMEOUT_S,
                 )
 
@@ -488,6 +502,19 @@ def _db_priority_score(data_type: str, food_source: str) -> float:
     return table.get(data_type, 10.0)  # unrecognized data types get low nonzero priority
 
 
+def _source_policy_tier(data_type: str, food_source: str) -> int:
+    """Put nutritionally complete generic databases ahead of branded data.
+
+    This tier must be evaluated before textual identity. Otherwise an exact
+    branded description such as "Blueberries" beats "Blueberries, raw" even
+    after receiving a large numeric penalty, because identity was previously
+    the first lexicographic sort key.
+    """
+    if food_source == "Branded":
+        return 2 if data_type == "Branded" else 1
+    return 0 if data_type == "Branded" else 2
+
+
 _GENERIC_QUERY_WORDS = {
     "raw",
     "cooked",
@@ -666,6 +693,10 @@ def rank_candidates(
             data_type,
             food_source,
         )
+        source_policy_tier = _source_policy_tier(
+            data_type,
+            food_source,
+        )
 
         token_coverage = (
             _query_token_coverage(
@@ -771,6 +802,7 @@ def rank_candidates(
                 "db_priority_score": (
                     db_priority
                 ),
+                "source_policy_tier": source_policy_tier,
                 "identity_tier": identity_tier,
                 "identity_coverage": round(identity_coverage, 4),
                 "query_token_coverage": round(
@@ -786,6 +818,7 @@ def rank_candidates(
 
     ranked.sort(
         key=lambda candidate: (
+            candidate.get("source_policy_tier", 0),
             candidate.get("identity_tier", 0),
             candidate.get("identity_coverage", 0.0),
             candidate.get("query_token_coverage", 0.0),
