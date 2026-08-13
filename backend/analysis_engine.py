@@ -46,16 +46,280 @@ GEMINI_LABEL_MODEL = os.environ.get(
 # more detail than a meal photograph.
 MEAL_IMAGE_MAX_EDGE = int(os.environ.get("MEAL_IMAGE_MAX_EDGE", "1280"))
 LABEL_IMAGE_MAX_EDGE = int(os.environ.get("LABEL_IMAGE_MAX_EDGE", "2048"))
+GEMINI_JSON_MAX_ATTEMPTS = max(
+    1,
+    int(os.environ.get("GEMINI_JSON_MAX_ATTEMPTS", "3")),
+)
+
+
+class ModelJSONResponseError(RuntimeError):
+    """Raised after Gemini repeatedly returns unusable structured output."""
+
+
+_NULLABLE_STRING_SCHEMA = {
+    "anyOf": [{"type": "string"}, {"type": "null"}],
+}
+_NULLABLE_NUMBER_SCHEMA = {
+    "anyOf": [{"type": "number"}, {"type": "null"}],
+}
+_NULLABLE_BOOLEAN_SCHEMA = {
+    "anyOf": [{"type": "boolean"}, {"type": "null"}],
+}
+
+_VARIANT_SCHEMA = {
+    "anyOf": [
+        {
+            "type": "object",
+            "properties": {
+                "canonical_name": {"type": "string"},
+                "confidence": {"type": "number"},
+            },
+            "required": ["canonical_name", "confidence"],
+        },
+        {"type": "null"},
+    ],
+}
+
+_INGREDIENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "canonical_name": {"type": "string"},
+        "ingredient_category": {"type": "string"},
+        "usda_food_description": {"type": "string"},
+        "possible_usda_queries": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "estimated_percentage": {"type": "number"},
+        "estimated_weight_g": {"type": "number"},
+        "confidence": {"type": "number"},
+    },
+    "required": [
+        "name", "canonical_name", "ingredient_category",
+        "usda_food_description", "possible_usda_queries",
+        "estimated_percentage", "estimated_weight_g", "confidence",
+    ],
+}
+
+_SPICE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "canonical_name": {"type": "string"},
+        "usda_food_description": {"type": "string"},
+        "possible_usda_queries": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "estimated_weight_g": {"type": "number"},
+        "confidence": {"type": "number"},
+    },
+    "required": [
+        "name", "canonical_name", "usda_food_description",
+        "possible_usda_queries", "estimated_weight_g", "confidence",
+    ],
+}
+
+_MEAL_FOOD_PROPERTIES = {
+    "id": {"type": "string"},
+    "name": {"type": "string"},
+    "canonical_name": {"type": "string"},
+    "ingredient_type": _NULLABLE_STRING_SCHEMA,
+    "canonical_variants": {
+        "type": "object",
+        "properties": {
+            "legume": _VARIANT_SCHEMA,
+            "oil": _VARIANT_SCHEMA,
+        },
+        "required": ["legume", "oil"],
+    },
+    "category": {"type": "string"},
+    "container": {"type": "string"},
+    "cuisine": _NULLABLE_STRING_SCHEMA,
+    "food_source": {
+        "type": "string",
+        "enum": ["Generic", "Branded", "Restaurant", "Homemade"],
+    },
+    "brand": _NULLABLE_STRING_SCHEMA,
+    "role": {"type": "string"},
+    "served_separately": {"type": "boolean"},
+    "belongs_to_food_id": _NULLABLE_STRING_SCHEMA,
+    "preparation": {"type": "string"},
+    "preparation_confidence": {"type": "number"},
+    "quantity": {"type": "number"},
+    "quantity_confidence": {"type": "number"},
+    "unit": {
+        "type": "string",
+        "enum": ["g", "ml", "piece", "slice", "cup", "tbsp", "tsp"],
+    },
+    "edible_fraction": {"type": "number"},
+    "detection_confidence": {"type": "number"},
+    "analysis_route": {
+        "type": "string",
+        "enum": ["DIRECT_USDA", "DECOMPOSE", "NUTRITION_LABEL"],
+    },
+    "usda_food_description": _NULLABLE_STRING_SCHEMA,
+    "possible_usda_queries": {
+        "type": "array",
+        "items": {"type": "string"},
+    },
+    "requires_back_image": {"type": "boolean"},
+    "ingredients": {
+        "type": "array",
+        "items": _INGREDIENT_SCHEMA,
+    },
+    "spices": {
+        "type": "array",
+        "items": _SPICE_SCHEMA,
+    },
+}
+
+_MEAL_FOOD_REQUIRED = list(_MEAL_FOOD_PROPERTIES.keys())
+
+MEAL_RESPONSE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "meal": {
+            "type": "object",
+            "properties": {
+                "meal_type": {"type": "string"},
+                "estimated_visible_food_weight_g": {"type": "number"},
+                "foods": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": _MEAL_FOOD_PROPERTIES,
+                        "required": _MEAL_FOOD_REQUIRED,
+                    },
+                },
+            },
+            "required": [
+                "meal_type", "estimated_visible_food_weight_g", "foods",
+            ],
+        },
+    },
+    "required": ["meal"],
+}
+
+# Last-resort structured extraction remains sufficient for USDA lookup. It
+# deliberately returns only core nutrient-bearing foods and disallows a mixed
+# dish parent, so analysis can continue without accepting incomplete JSON.
+SIMPLE_MEAL_RESPONSE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "meal": {
+            "type": "object",
+            "properties": {
+                "meal_type": {"type": "string"},
+                "estimated_visible_food_weight_g": {"type": "number"},
+                "foods": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "name": {"type": "string"},
+                            "canonical_name": {"type": "string"},
+                            "category": {"type": "string"},
+                            "food_source": {
+                                "type": "string",
+                                "enum": [
+                                    "Generic", "Branded", "Restaurant", "Homemade",
+                                ],
+                            },
+                            "brand": _NULLABLE_STRING_SCHEMA,
+                            "quantity": {"type": "number"},
+                            "quantity_confidence": {"type": "number"},
+                            "unit": {
+                                "type": "string",
+                                "enum": [
+                                    "g", "ml", "piece", "slice", "cup", "tbsp", "tsp",
+                                ],
+                            },
+                            "preparation": {"type": "string"},
+                            "detection_confidence": {"type": "number"},
+                            "analysis_route": {
+                                "type": "string",
+                                "enum": ["DIRECT_USDA", "NUTRITION_LABEL"],
+                            },
+                            "usda_food_description": _NULLABLE_STRING_SCHEMA,
+                            "requires_back_image": {"type": "boolean"},
+                        },
+                        "required": [
+                            "id", "name", "canonical_name", "category",
+                            "food_source", "brand", "quantity",
+                            "quantity_confidence", "unit", "preparation",
+                            "detection_confidence", "analysis_route",
+                            "usda_food_description", "requires_back_image",
+                        ],
+                    },
+                },
+            },
+            "required": [
+                "meal_type", "estimated_visible_food_weight_g", "foods",
+            ],
+        },
+    },
+    "required": ["meal"],
+}
+
+_LABEL_NUTRIENT_PROPERTIES = {
+    key: _NULLABLE_NUMBER_SCHEMA
+    for key in (
+        "energy_kcal", "protein_g", "fat_g", "saturated_fat_g",
+        "trans_fat_g", "carbohydrate_g", "sugars_g", "added_sugars_g",
+        "fiber_g", "sodium_mg", "cholesterol_mg", "potassium_mg",
+        "calcium_mg", "iron_mg", "caffeine_mg",
+    )
+}
+_LABEL_NUTRIENT_SCHEMA = {
+    "type": "object",
+    "properties": _LABEL_NUTRIENT_PROPERTIES,
+    "required": list(_LABEL_NUTRIENT_PROPERTIES.keys()),
+}
+_LABEL_QUANTITY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "value": _NULLABLE_NUMBER_SCHEMA,
+        "unit": _NULLABLE_STRING_SCHEMA,
+    },
+    "required": ["value", "unit"],
+}
+LABEL_RESPONSE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "brand": _NULLABLE_STRING_SCHEMA,
+        "product_name": {"type": "string"},
+        "barcode": _NULLABLE_STRING_SCHEMA,
+        "net_weight": _LABEL_QUANTITY_SCHEMA,
+        "serving_size": _LABEL_QUANTITY_SCHEMA,
+        "nutrition_basis": _LABEL_QUANTITY_SCHEMA,
+        "servings_per_container": _NULLABLE_NUMBER_SCHEMA,
+        "nutrition_per_serving": _LABEL_NUTRIENT_SCHEMA,
+        "nutrition_per_100g": _LABEL_NUTRIENT_SCHEMA,
+        "ingredients": {"type": "array", "items": {"type": "string"}},
+        "allergens": {"type": "array", "items": {"type": "string"}},
+        "claims": {"type": "array", "items": {"type": "string"}},
+        "ocr_confidence": {"type": "number"},
+    },
+    "required": [
+        "brand", "product_name", "barcode", "net_weight", "serving_size",
+        "nutrition_basis", "servings_per_container",
+        "nutrition_per_serving", "nutrition_per_100g", "ingredients",
+        "allergens", "claims", "ocr_confidence",
+    ],
+}
 
 MEAL_GENERATION_CONFIG = {
     "response_mime_type": "application/json",
-    "temperature": 0.1,
+    "response_json_schema": MEAL_RESPONSE_JSON_SCHEMA,
     "max_output_tokens": 8192,
 }
 
 LABEL_GENERATION_CONFIG = {
     "response_mime_type": "application/json",
-    "temperature": 0.0,
+    "response_json_schema": LABEL_RESPONSE_JSON_SCHEMA,
     "max_output_tokens": 4096,
 }
 
@@ -2669,15 +2933,143 @@ def _generate_json(
     config: dict[str, Any],
     operation: str,
 ) -> dict[str, Any]:
-    started = time.perf_counter()
-    response = client.models.generate_content(
-        model=model,
-        contents=[instruction, image],
-        config=config,
-    )
-    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-    logger.info("Gemini %s completed in %.1f ms", operation, elapsed_ms)
-    return parse_model_json(response.text or "")
+    last_error: Exception | None = None
+
+    for attempt in range(1, GEMINI_JSON_MAX_ATTEMPTS + 1):
+        started = time.perf_counter()
+        retry_instruction = instruction
+        retry_config = dict(config)
+
+        if attempt > 1:
+            if config.get("response_json_schema") is MEAL_RESPONSE_JSON_SCHEMA:
+                retry_instruction = (
+                    "Inspect this meal image and return its nutrient-bearing "
+                    "core foods. Return ingredients such as rolled oats, milk, "
+                    "fruit, nuts, and seeds—not a parent name such as oatmeal. "
+                    "Use DIRECT_USDA for ordinary foods. Use NUTRITION_LABEL "
+                    "only for clearly branded packaged foods. Keep every name "
+                    "and USDA description short."
+                )
+                retry_config["response_json_schema"] = (
+                    SIMPLE_MEAL_RESPONSE_JSON_SCHEMA
+                )
+                retry_config["max_output_tokens"] = min(
+                    int(retry_config.get("max_output_tokens", 8192)),
+                    3072,
+                )
+            else:
+                retry_instruction = (
+                    f"{instruction}\n\n"
+                    "Read the label again and return every field required by "
+                    "the supplied schema. Keep text fields concise."
+                )
+
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=[retry_instruction, image],
+                config=retry_config,
+            )
+        except Exception as error:
+            last_error = error
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+            logger.warning(
+                "Gemini %s request failed on attempt %d/%d "
+                "(elapsed_ms=%.1f): %s",
+                operation,
+                attempt,
+                GEMINI_JSON_MAX_ATTEMPTS,
+                elapsed_ms,
+                error,
+            )
+            continue
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        response_text = response.text or ""
+
+        try:
+            result = parse_model_json(response_text)
+            _validate_model_contract(
+                result,
+                retry_config.get("response_json_schema"),
+            )
+        except (json.JSONDecodeError, ValueError) as error:
+            last_error = error
+            finish_reason = _model_finish_reason(response)
+            logger.warning(
+                "Gemini %s returned invalid JSON on attempt %d/%d "
+                "(elapsed_ms=%.1f, chars=%d, finish_reason=%s): %s",
+                operation,
+                attempt,
+                GEMINI_JSON_MAX_ATTEMPTS,
+                elapsed_ms,
+                len(response_text),
+                finish_reason,
+                error,
+            )
+            continue
+
+        logger.info(
+            "Gemini %s completed in %.1f ms on attempt %d",
+            operation,
+            elapsed_ms,
+            attempt,
+        )
+        return result
+
+    raise ModelJSONResponseError(
+        "The AI could not complete a structured analysis response. "
+        "Please retry the same image."
+    ) from last_error
+
+
+def _validate_model_contract(
+    result: dict[str, Any],
+    schema: Any,
+) -> None:
+    """Defensive validation in case an SDK/model ignores response schema."""
+    if (
+        schema is MEAL_RESPONSE_JSON_SCHEMA
+        or schema is SIMPLE_MEAL_RESPONSE_JSON_SCHEMA
+    ):
+        meal = result.get("meal")
+        if not isinstance(meal, dict):
+            raise ValueError("The AI response did not contain a meal object.")
+        foods = meal.get("foods")
+        if not isinstance(foods, list):
+            raise ValueError("The AI response did not contain a foods array.")
+        for food in foods:
+            if not isinstance(food, dict):
+                raise ValueError("The AI returned an invalid food item.")
+            if not str(food.get("name") or "").strip():
+                raise ValueError("The AI returned a food without a name.")
+            try:
+                quantity = float(food.get("quantity"))
+            except (TypeError, ValueError) as error:
+                raise ValueError("The AI returned an invalid food quantity.") from error
+            if quantity <= 0:
+                raise ValueError("The AI returned a non-positive food quantity.")
+        return
+
+    if schema is LABEL_RESPONSE_JSON_SCHEMA:
+        if not str(result.get("product_name") or "").strip():
+            raise ValueError("The AI response did not identify the product.")
+        if not any(
+            isinstance(result.get(key), dict)
+            for key in ("nutrition_per_serving", "nutrition_per_100g")
+        ):
+            raise ValueError("The AI response did not contain label nutrition.")
+
+
+def _model_finish_reason(response: Any) -> str:
+    """Read finish metadata defensively without depending on one SDK shape."""
+    try:
+        candidates = getattr(response, "candidates", None) or []
+        if not candidates:
+            return "unknown"
+        reason = getattr(candidates[0], "finish_reason", None)
+        return str(reason or "unknown")
+    except Exception:
+        return "unknown"
 
 
 def classify_image(client, image):
@@ -4066,18 +4458,22 @@ def analyze_meal(
 def parse_model_json(
     response_text: str,
 ) -> dict[str, Any]:
-    text = response_text.strip()
+    text = response_text.lstrip("\ufeff").strip()
 
     if text.startswith("```"):
-        text = (
-            text
-            .replace("```json", "")
-            .replace("```JSON", "")
-            .replace("```", "")
-            .strip()
-        )
+        first_line_end = text.find("\n")
+        text = text[first_line_end + 1:] if first_line_end >= 0 else ""
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3].rstrip()
 
-    result = json.loads(text)
+    object_start = text.find("{")
+    if object_start < 0:
+        raise ValueError("The AI response did not contain a JSON object.")
+
+    # raw_decode accepts harmless trailing whitespace/commentary while still
+    # rejecting incomplete strings, arrays, or objects. Incomplete output is
+    # retried by `_generate_json`; it is never silently patched into data.
+    result, _ = json.JSONDecoder().raw_decode(text[object_start:])
 
     if not isinstance(result, dict):
         raise ValueError(
