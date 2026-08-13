@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from usda_detail_cache import get_food_detail, set_food_detail
 
 USDA_API_KEY = os.getenv("USDA_API_KEY", "DEMO_KEY")
 USDA_SEARCH_URL = "https://api.nal.usda.gov/fdc/v1/foods/search"
@@ -219,6 +220,10 @@ async def get_usda_food_detail(
     except (TypeError, ValueError):
         return None
 
+    shared = get_food_detail(numeric_id)
+    if shared is not None:
+        return shared
+
     async with _detail_cache_lock:
         if numeric_id in _detail_cache:
             return _detail_cache[numeric_id]
@@ -240,6 +245,7 @@ async def get_usda_food_detail(
                 if response.status_code == 200:
                     body = response.json()
                     if isinstance(body, dict):
+                        set_food_detail(numeric_id, body)
                         async with _detail_cache_lock:
                             _detail_cache[numeric_id] = body
                         return body
