@@ -9,6 +9,7 @@ import time
 from typing import Any, Dict, List, Optional, Set
 
 import httpx
+from usda_detail_cache import get_food_detail, set_food_detail
 
 # =========================================================================
 # LOGGING
@@ -477,7 +478,13 @@ async def _get_nutrient_profile(fdc_id: int, client: httpx.AsyncClient) -> Dict[
         logger.debug("Nutrient cache hit for fdcId=%s", fdc_id)
         return cached
 
-    raw = await fetch_food_detail(fdc_id, client)
+    raw = get_food_detail(fdc_id)
+    if raw is not None:
+        logger.debug("Shared USDA detail cache hit for fdcId=%s", fdc_id)
+    else:
+        raw = await fetch_food_detail(fdc_id, client)
+        if raw is not None:
+            set_food_detail(fdc_id, raw)
     if raw is None:
         return {
             "nutrient_status": NutrientStatus.DOWNLOAD_FAILED,
