@@ -315,6 +315,70 @@ class ResultScreen extends StatelessWidget {
   double _unclassifiedFat() =>
       (result.fat - _reportedMajorFatTotal()).clamp(0, result.fat).toDouble();
 
+  List<_NutrientDetailItem> _carbohydrateDetails() {
+    final items = <_NutrientDetailItem>[
+      _NutrientDetailItem(
+        label: 'Total carbohydrate',
+        value: result.carbohydrates,
+        unit: 'g',
+        available: true,
+      ),
+    ];
+
+    void addReported(String label, String key, {bool nested = false}) {
+      final value = result.carbohydrateComposition[key];
+      if (value == null) return;
+      items.add(
+        _NutrientDetailItem(
+          label: nested ? '  ↳ $label' : label,
+          value: value,
+          unit: 'g',
+          available: true,
+        ),
+      );
+    }
+
+    addReported(
+      'Carbohydrate, by difference',
+      'carbohydrate_by_difference_g',
+    );
+    addReported(
+      'Carbohydrate, by summation',
+      'carbohydrate_by_summation_g',
+    );
+    addReported('Dietary fiber', 'fiber_g');
+
+    items.add(
+      _NutrientDetailItem(
+        label: 'Total sugars',
+        value: result.sugars ?? 0,
+        unit: 'g',
+        available: result.sugars != null,
+      ),
+    );
+    if (result.addedSugars != null) {
+      items.add(
+        _NutrientDetailItem(
+          label: '  ↳ Added sugars',
+          value: result.addedSugars!,
+          unit: 'g',
+          available: true,
+        ),
+      );
+    }
+
+    addReported('Sucrose', 'sucrose_g', nested: true);
+    addReported('Glucose', 'glucose_g', nested: true);
+    addReported('Fructose', 'fructose_g', nested: true);
+    addReported('Lactose', 'lactose_g', nested: true);
+    addReported('Maltose', 'maltose_g', nested: true);
+    addReported('Galactose', 'galactose_g', nested: true);
+    addReported('Starch', 'starch_g');
+    addReported('Component-derived carbohydrate', 'component_sum_g');
+
+    return items;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -527,33 +591,9 @@ class ResultScreen extends StatelessWidget {
                                         unit: 'g',
                                         breakdownTitle: 'Carbohydrate composition',
                                         breakdownNote:
-                                            'Sugars are included within total carbohydrate; they are not added on top. Added sugars, when available, are a subset of total sugars. Dietary fiber is shown separately as part of the carbohydrate profile.',
-                                        relatedValues: [
-                                          _NutrientDetailItem(
-                                            label: 'Total carbohydrates',
-                                            value: result.carbohydrates,
-                                            unit: 'g',
-                                            available: true,
-                                          ),
-                                          _NutrientDetailItem(
-                                            label: '↳ of which total sugars',
-                                            value: result.sugars ?? 0,
-                                            unit: 'g',
-                                            available: result.sugars != null,
-                                          ),
-                                          _NutrientDetailItem(
-                                            label: '   ↳ of which added sugars',
-                                            value: result.addedSugars ?? 0,
-                                            unit: 'g',
-                                            available: result.addedSugars != null,
-                                          ),
-                                          _NutrientDetailItem(
-                                            label: 'Dietary fiber',
-                                            value: result.fiber,
-                                            unit: 'g',
-                                            available: result.fiber > 0,
-                                          ),
-                                        ],
+                                            'Sugars, starch, and dietary fiber are components of total carbohydrate, not extra amounts to add on top. Only components reported by the nutrition source are shown.',
+                                        relatedValues:
+                                            _carbohydrateDetails(),
                                       );
 
                                       return;
