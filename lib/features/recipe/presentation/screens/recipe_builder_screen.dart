@@ -19,12 +19,18 @@ class RecipeBuilderScreen extends ConsumerStatefulWidget {
     this.photoReview = false,
     this.analysisId,
     this.labelItems = const [],
+    this.recommendationQuery,
+    this.recommendationName,
+    this.recommendationQuantity,
   });
 
   final ManualRecipe? initialRecipe;
   final bool photoReview;
   final String? analysisId;
   final List<Map<String, dynamic>> labelItems;
+  final String? recommendationQuery;
+  final String? recommendationName;
+  final double? recommendationQuantity;
 
   @override
   ConsumerState<RecipeBuilderScreen> createState() => _RecipeBuilderScreenState();
@@ -63,6 +69,17 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       _labelQuantityControllers.add(
         TextEditingController(text: _format(quantity)),
       );
+    }
+    final recommendationQuery = widget.recommendationQuery?.trim() ?? '';
+    if (recommendationQuery.isNotEmpty) {
+      _searchController.text = recommendationQuery;
+      final recommendationName = widget.recommendationName?.trim() ?? '';
+      if (recommendationName.isNotEmpty) {
+        _nameController.text = 'Meal with $recommendationName';
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _search(recommendationQuery);
+      });
     }
     _loadSaved();
   }
@@ -119,7 +136,12 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
   }
 
   Future<void> _chooseSuggestion(UsdaFoodSuggestion food) async {
-    final controller = TextEditingController(text: '100');
+    final recommended = widget.recommendationQuantity;
+    final controller = TextEditingController(
+      text: recommended != null && recommended > 0
+          ? _format(recommended)
+          : '100',
+    );
     final grams = await showDialog<double>(
       context: context,
       builder: (dialogContext) => AlertDialog(
