@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../../history/providers/analysis_history_provider.dart';
+import '../../../profile/providers/profile_provider.dart';
+import '../../../recommendation/models/post_analysis_recommendations.dart';
+import '../../../recommendation/services/recommendation_service.dart';
 import '../../models/analysis_result.dart';
 import '../widgets/food_card.dart';
 import '../widgets/health_score_card.dart';
@@ -18,13 +23,86 @@ import '../widgets/score_gauge.dart';
 // import '../widgets/micronutrient_bar.dart';
 // import '../widgets/score_gauge.dart';
 
-class ResultScreen extends StatelessWidget {
+class ResultScreen extends ConsumerStatefulWidget {
   const ResultScreen({
     super.key,
     required this.result,
+    required this.rawResult,
   });
 
   final AnalysisResult result;
+  final Map<String, dynamic> rawResult;
+
+  @override
+  ConsumerState<ResultScreen> createState() => _ResultScreenState();
+}
+
+class _ResultScreenState extends ConsumerState<ResultScreen> {
+  final _recommendationService = RecommendationService();
+  PostAnalysisRecommendations? _recommendations;
+  bool _recommendationsLoading = true;
+  String? _recommendationError;
+
+  AnalysisResult get result => widget.result;
+
+  @override
+  void initState() {
+    super.initState();
+    Future<void>.microtask(_loadRecommendations);
+  }
+
+  Future<void> _loadRecommendations() async {
+    if (!mounted) return;
+    setState(() {
+      _recommendationsLoading = true;
+      _recommendationError = null;
+    });
+
+    final now = DateTime.now();
+    final history = ref.read(analysisHistoryProvider);
+    final currentId = _analysisId(widget.rawResult);
+    final matchingRecords = history
+        .where((record) => currentId != null && record.analysisId == currentId)
+        .toList();
+    final matchingRecord = matchingRecords.isEmpty ? null : matchingRecords.first;
+    if (matchingRecord != null && !_sameLocalDay(matchingRecord.createdAt, now)) {
+      if (mounted) {
+        setState(() {
+          _recommendationsLoading = false;
+          _recommendationError = null;
+        });
+      }
+      return;
+    }
+
+    final todayResults = history
+        .where((record) => _sameLocalDay(record.createdAt, now))
+        .where((record) => currentId == null || record.analysisId != currentId)
+        .map((record) => record.rawResult)
+        .where((result) => result.isNotEmpty)
+        .map(Map<String, dynamic>.from)
+        .toList(growable: false);
+
+    try {
+      final recommendations = await _recommendationService.afterAnalysis(
+        currentResult: widget.rawResult,
+        todayResults: todayResults,
+        profile: ref.read(profileProvider).backendPayload,
+        localHour: now.hour,
+      );
+      if (!mounted) return;
+      setState(() {
+        _recommendations = recommendations;
+        _recommendationsLoading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _recommendationsLoading = false;
+        _recommendationError = error.toString();
+      });
+    }
+  }
 
   void _showNutrientDetails(
     BuildContext context, {
@@ -461,6 +539,13 @@ class ResultScreen extends StatelessWidget {
                       ],
                       const SizedBox(height: 24),
                       _OverviewCard(result: result),
+                      const SizedBox(height: 24),
+                      _RecommendationSection(
+                        loading: _recommendationsLoading,
+                        recommendations: _recommendations,
+                        error: _recommendationError,
+                        onRetry: _loadRecommendations,
+                      ),
                       if (result.displayFoods.isNotEmpty) ...[
                         const SizedBox(height: 28),
                         const _SectionTitle('Detected foods'),
@@ -712,6 +797,304 @@ class ResultScreen extends StatelessWidget {
 
   String _formatNumber(double value) {
     return value >= 10 ? value.toStringAsFixed(1) : value.toStringAsFixed(2);
+  }
+}
+
+String? _analysisId(Map<String, dynamic> result) {
+  final direct = result['analysis_id']?.toString().trim();
+  if (direct != null && direct.isNotEmpty) return direct;
+  for (final key in const ['final_result', 'meal_analysis', 'data', 'result']) {
+    final nested = result[key];
+    if (nested is! Map) continue;
+    final value = nested['analysis_id']?.toString().trim();
+    if (value != null && value.isNotEmpty) return value;
+  }
+  return null;
+}
+
+bool _sameLocalDay(DateTime a, DateTime b) {
+  final left = a.toLocal();
+  final right = b.toLocal();
+  return left.year == right.year &&
+      left.month == right.month &&
+      left.day == right.day;
+}
+
+class _RecommendationSection extends StatelessWidget {
+  const _RecommendationSection({
+    required this.loading,
+    required this.recommendations,
+    required this.error,
+    required this.onRetry,
+  });
+
+  final bool loading;
+  final PostAnalysisRecommendations? recommendations;
+  final String? error;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    if (!loading && recommendations == null && error == null) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: scheme.primaryContainer.withOpacity(0.45),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: scheme.primary.withOpacity(0.22)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: scheme.primary,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(Icons.auto_awesome_rounded, color: scheme.onPrimary),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Improve today’s score',
+                      style: theme.textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    Text(
+                      loading
+                          ? 'Simulating useful changes after this analysis…'
+                          : recommendations == null
+                              ? 'Recommendations could not be loaded.'
+                              : '${recommendations!.mealsIncluded} '
+                                  '${recommendations!.mealsIncluded == 1 ? 'meal' : 'meals'} '
+                                  'included · ${recommendations!.context}',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (!loading)
+                IconButton(
+                  tooltip: 'Recalculate',
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.refresh_rounded),
+                ),
+            ],
+          ),
+          if (loading) ...[
+            const SizedBox(height: 18),
+            const LinearProgressIndicator(),
+          ] else if (error != null) ...[
+            const SizedBox(height: 14),
+            Text(
+              error!,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: scheme.error,
+              ),
+            ),
+          ] else if (recommendations != null) ...[
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: _RecommendationScoreTile(
+                    label: 'Today so far',
+                    value: recommendations!.currentDayScore,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _RecommendationScoreTile(
+                    label: 'Nutrient balance',
+                    value: recommendations!.nutritionBalanceScore,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            if (recommendations!.items.isEmpty)
+              Text(
+                recommendations!.message,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  height: 1.4,
+                ),
+              )
+            else
+              ...recommendations!.items.map(
+                (item) => Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: _FoodRecommendationCard(item: item),
+                ),
+              ),
+            if (recommendations!.disclaimer.trim().isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                recommendations!.disclaimer,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  height: 1.35,
+                ),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _RecommendationScoreTile extends StatelessWidget {
+  const _RecommendationScoreTile({required this.label, required this.value});
+
+  final String label;
+  final double value;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface.withOpacity(0.72),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            value.toStringAsFixed(0),
+            style: theme.textTheme.headlineSmall?.copyWith(
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          Text(label, style: theme.textTheme.bodySmall),
+        ],
+      ),
+    );
+  }
+}
+
+class _FoodRecommendationCard extends StatelessWidget {
+  const _FoodRecommendationCard({required this.item});
+
+  final FoodRecommendation item;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                decoration: BoxDecoration(
+                  color: scheme.secondaryContainer,
+                  borderRadius: BorderRadius.circular(99),
+                ),
+                child: Text(
+                  item.actionLabel,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: scheme.onSecondaryContainer,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              const Spacer(),
+              Icon(Icons.trending_up_rounded, color: scheme.primary, size: 18),
+              const SizedBox(width: 4),
+              Text(
+                '+${item.scoreDelta.toStringAsFixed(1)}',
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: scheme.primary,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            item.title,
+            style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            item.reason,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: scheme.onSurfaceVariant,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Predicted current-day score: '
+            '${item.baselineScore.toStringAsFixed(0)} → '
+            '${item.predictedScore.toStringAsFixed(0)} '
+            '(${item.predictedScoreLow.toStringAsFixed(0)}–'
+            '${item.predictedScoreHigh.toStringAsFixed(0)})',
+            style: theme.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w700),
+          ),
+          if (item.nutrientEffects.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: item.nutrientEffects.take(3).map((effect) {
+                return Chip(
+                  visualDensity: VisualDensity.compact,
+                  label: Text(effect.label),
+                );
+              }).toList(growable: false),
+            ),
+          ],
+          if (item.action == 'add' && item.searchQuery.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: () => context.push(
+                  '/recipe',
+                  extra: {
+                    'recommendation_query': item.searchQuery,
+                    'recommendation_quantity': item.quantity,
+                    'recommendation_name': item.foodName,
+                  },
+                ),
+                icon: const Icon(Icons.add_rounded),
+                label: const Text('Add and analyze'),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 }
 
