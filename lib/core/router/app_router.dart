@@ -61,9 +61,18 @@ class AppRouter {
             }
           }
           String? analysisId;
+          String? recommendationQuery;
+          String? recommendationName;
+          double? recommendationQuantity;
           List<Map<String, dynamic>> labelItems = const [];
           if (extra is Map) {
             analysisId = extra['analysis_id']?.toString();
+            recommendationQuery = extra['recommendation_query']?.toString();
+            recommendationName = extra['recommendation_name']?.toString();
+            final quantity = extra['recommendation_quantity'];
+            recommendationQuantity = quantity is num
+                ? quantity.toDouble()
+                : double.tryParse(quantity?.toString() ?? '');
             final rawLabels = extra['label_items'];
             if (rawLabels is List) {
               labelItems = rawLabels
@@ -77,6 +86,9 @@ class AppRouter {
             photoReview: photoReview,
             analysisId: analysisId,
             labelItems: labelItems,
+            recommendationQuery: recommendationQuery,
+            recommendationName: recommendationName,
+            recommendationQuantity: recommendationQuantity,
           );
         },
       ),
@@ -89,7 +101,10 @@ class AppRouter {
         builder: (context, state) {
           final result = _normalizeResult(state.extra);
           if (result == null) return const _MissingResultScreen();
-          return ResultScreen(result: AnalysisResult.fromJson(result));
+          return ResultScreen(
+            result: AnalysisResult.fromJson(result),
+            rawResult: result,
+          );
         },
       ),
     ],
