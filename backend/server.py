@@ -19,6 +19,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from analysis_engine import (
+    ModelJSONResponseError,
     analyze_meal,
     continue_with_back_label,
 )
@@ -41,6 +42,7 @@ from personalization_engine import (
 from nutrient_target_engine import (
     attach_nutrient_targets,
 )
+from recommendation_engine import recommend_after_analysis
 
 
 APP_NAME = "Quinone API"
@@ -83,6 +85,33 @@ app.add_middleware(
 )
 
 logger = logging.getLogger("quinone.server")
+
+
+def _public_job_error(error: Exception) -> str:
+    """Keep parser internals out of mobile UI while retaining useful errors."""
+    if isinstance(error, (ModelJSONResponseError, json.JSONDecodeError)):
+        return (
+            "The AI returned an incomplete analysis response. "
+            "Please retry the same image."
+        )
+
+    message = str(error).strip()
+    lowered = message.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "unterminated string",
+            "expecting property name",
+            "expecting value: line",
+            "json object",
+        )
+    ):
+        return (
+            "The AI returned an incomplete analysis response. "
+            "Please retry the same image."
+        )
+
+    return message or "The analysis could not be completed."
 
 # A global Lock serialized every Gemini request across all users. Keep a small
 # bounded limit for quota safety while allowing independent requests to run.
@@ -145,6 +174,38 @@ class ManualRecipeRequest(BaseModel):
     servings_made: float = Field(default=1.0, gt=0, le=10000)
     servings_eaten: float = Field(default=1.0, gt=0, le=10000)
     profile: dict[str, Any] | None = None
+
+
+class PostAnalysisRecommendationRequest(BaseModel):
+    current_result: dict[str, Any]
+    today_results: list[dict[str, Any]] = Field(default_factory=list)
+    profile: dict[str, Any] | None = None
+    local_hour: int = Field(default=12, ge=0, le=23)
+    maximum_results: int = Field(default=5, ge=1, le=8)
+
+
+@app.post("/recommendations/after-analysis")
+@app.post("/api/v1/recommendations/after-analysis", include_in_schema=False)
+async def post_analysis_recommendations(
+    request: PostAnalysisRecommendationRequest,
+) -> dict[str, Any]:
+    """Recommend an immediate meal change using everything logged today."""
+    try:
+        return await recommend_after_analysis(
+            current_result=request.current_result,
+            today_results=request.today_results,
+            profile=request.profile,
+            local_hour=request.local_hour,
+            maximum_results=request.maximum_results,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Post-analysis recommendation failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Recommendations could not be calculated for this meal.",
+        ) from error
 
 
 @app.get("/recipes/usda/search")
@@ -615,7 +676,7 @@ async def _process_mixed_meal_confirmation_job(
             status="failed",
             stage="failed",
             message="The confirmed mixed meal could not be analyzed.",
-            error=str(error),
+            error=_public_job_error(error),
         )
 
 
@@ -740,7 +801,7 @@ async def _process_label_serving_confirmation_job(
             status="failed",
             stage="failed",
             message="The serving confirmation could not be completed.",
-            error=str(error),
+            error=_public_job_error(error),
         )
 
 
@@ -935,7 +996,7 @@ async def _process_initial_job(
             status="failed",
             stage="failed",
             message="The meal analysis could not be completed.",
-            error=str(error),
+            error=_public_job_error(error),
         )
     finally:
         shutil.rmtree(job_directory, ignore_errors=True)
@@ -1053,7 +1114,7 @@ async def _process_manual_recipe_job(
             status="failed",
             stage="failed",
             message="The recipe analysis could not be completed.",
-            error=str(error),
+            error=_public_job_error(error),
         )
 
 
@@ -1139,7 +1200,7 @@ async def _process_back_label_job(
             status="failed",
             stage="failed",
             message="The nutrition-label analysis could not be completed.",
-            error=str(error),
+            error=_public_job_error(error),
         )
     finally:
         shutil.rmtree(job_directory, ignore_errors=True)
