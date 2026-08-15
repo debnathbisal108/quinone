@@ -52,7 +52,7 @@ GEMINI_JSON_MAX_ATTEMPTS = max(
 )
 ENABLE_MEAL_INVENTORY_AUDIT = os.environ.get(
     "ENABLE_MEAL_INVENTORY_AUDIT",
-    "false",
+    "true",
 ).strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -2721,7 +2721,11 @@ Return ONLY valid JSON that exactly conforms to the schema.
 # prose and large worked examples.
 optimized_meal_prompt = """
 You are Quinone's food-vision extraction engine. Inspect ONE meal photograph
-and return one JSON object only. Do not add markdown or commentary.
+and return one JSON object only. The first image is the complete photograph;
+any later images are overlapping detail crops of that SAME photograph. Use the
+crops to find partially covered bases and small components, but never count an
+item twice because it occurs in more than one view. Do not add markdown or
+commentary.
 
 Goal: identify the physical edible items and estimate the amount actually
 visible. One physical ingredient must appear once. Never return both a mixed
@@ -2774,6 +2778,10 @@ Rules:
   then mixed-in foods, then visible toppings. A base such as rolled oats,
   yogurt, cereal, rice, noodles, milk or porridge must not be omitted merely
   because fruit, seeds or nuts cover part of it.
+- Before returning, perform a coverage check for every occupied container:
+  identify what supplies the majority of its edible mass. If toppings are
+  listed but the visible base beneath them is missing, the response is
+  incomplete and must be corrected.
 - If multiple toppings are visible over a substantial food mass, identify the
   underlying nutrient-bearing base. Return the base ingredient (for example
   Rolled oats), never the prepared parent label (for example Oatmeal).
@@ -3019,6 +3027,7 @@ def _generate_plain_meal_json(
 ) -> dict[str, Any]:
     """Generate meal JSON without the failing nested SDK response schema."""
     last_error: Exception | None = None
+    views = _meal_inventory_views(image)
     for attempt in range(1, GEMINI_JSON_MAX_ATTEMPTS + 1):
         if attempt == GEMINI_JSON_MAX_ATTEMPTS:
             # Compatibility fallback: this is the original full prompt from
@@ -3037,7 +3046,7 @@ def _generate_plain_meal_json(
         try:
             response = client.models.generate_content(
                 model=GEMINI_MEAL_MODEL,
-                contents=[instruction, image],
+                contents=[instruction, *views],
             )
             result = parse_model_json(response.text or "")
             _validate_model_contract(
@@ -3450,7 +3459,11 @@ def extract_label(client, image):
 def _meal_inventory_views(image: Image.Image) -> list[Image.Image]:
     """Return a full view plus overlapping detail crops of the same meal."""
     width, height = image.size
-    if width < 640 or height < 640:
+    # The reported missed-oats image is 598x442. The former 640px cutoff sent
+    # only the full frame, even though a focused bowl crop materially improves
+    # recognition of the partially covered base. Avoid crops only when the
+    # source is genuinely too small to provide useful local detail.
+    if width < 320 or height < 320:
         return [image]
 
     x_mid = width // 2
@@ -3536,7 +3549,12 @@ def _audit_and_correct_complete_food_inventory(
     *,
     image_index: int,
 ) -> dict[str, Any]:
-    """Replace the provisional detection with a universally audited inventory."""
+    """Recover omissions with a compact, schema-free second visual pass.
+
+    The previous auditor forced a large SDK response schema, which could make
+    the entire analysis fail. This pass requests a small JSON object in the
+    prompt, retries locally, and is still non-fatal to the primary result.
+    """
     provisional_foods = result.get("meal", {}).get("foods", [])
     provisional = []
     for food in provisional_foods if isinstance(provisional_foods, list) else []:
@@ -3576,30 +3594,88 @@ def _audit_and_correct_complete_food_inventory(
         "not guess it. Quantities must represent each ingredient's own edible "
         "mass so totals do not double count. Use DIRECT_USDA for generic "
         "ingredients and NUTRITION_LABEL only for a clearly branded packaged "
-        "product. Return only the required atomic inventory JSON."
+        "product. Return only one JSON object in this exact compact shape: "
+        '{"meal_type":"...","items":[{"name":"...",'
+        '"canonical_name":"...","category":"...","container":"...",'
+        '"role":"...","food_source":"Generic","brand":null,'
+        '"quantity":1,"unit":"g","preparation":"...",'
+        '"confidence":0.8,"analysis_route":"DIRECT_USDA",'
+        '"usda_food_description":"...","requires_back_image":false,'
+        '"visual_evidence":"..."}]}. '
+        "The items list is the complete corrected inventory, not merely the "
+        "newly found foods. Keep text concise."
     )
-    audited = _generate_json(
-        model=GEMINI_MEAL_MODEL,
-        instruction=audit_instruction,
-        image=_meal_inventory_views(image),
-        config={
-            "response_mime_type": "application/json",
-            "response_json_schema": ATOMIC_MEAL_INVENTORY_JSON_SCHEMA,
-            "max_output_tokens": 6144,
-        },
-        operation=f"complete food inventory audit {image_index}",
-    )
+    views = _meal_inventory_views(image)
+    audited: dict[str, Any] | None = None
+    last_error: Exception | None = None
+    for attempt in range(1, 3):
+        instruction = audit_instruction
+        if attempt > 1:
+            instruction = (
+                f"{audit_instruction}\n\nYour previous response was invalid or "
+                "incomplete. Return the complete compact JSON object only."
+            )
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MEAL_MODEL,
+                contents=[instruction, *views],
+            )
+            candidate = parse_model_json(response.text or "")
+            _validate_model_contract(
+                candidate,
+                ATOMIC_MEAL_INVENTORY_JSON_SCHEMA,
+            )
+            audited = candidate
+            break
+        except Exception as error:
+            last_error = error
+            logger.warning(
+                "Compact inventory audit image %d failed on attempt %d/2: %s",
+                image_index,
+                attempt,
+                error,
+            )
+
+    if audited is None:
+        raise ModelJSONResponseError(
+            "The compact inventory audit could not return valid JSON."
+        ) from last_error
+
     items = audited.get("items", [])
-    foods = [
+    audited_foods = [
         _atomic_inventory_food(item, index=index)
         for index, item in enumerate(items, start=1)
         if isinstance(item, dict)
     ]
+
+    # The auditor is allowed to recover omissions but not to erase a valid
+    # primary detection. Start with its corrected inventory, then preserve any
+    # primary item it did not represent. post_process() performs the final
+    # alias-aware duplicate reconciliation.
+    foods = list(audited_foods)
+    for primary_food in provisional_foods if isinstance(provisional_foods, list) else []:
+        if not isinstance(primary_food, dict):
+            continue
+        if any(_same_core_food(primary_food, audited_food) for audited_food in foods):
+            continue
+        foods.append(copy.deepcopy(primary_food))
+
+    primary_identities = {
+        _canonical_food_identity(food)
+        for food in provisional_foods
+        if isinstance(food, dict)
+    }
+    recovered = [
+        food.get("name")
+        for food in audited_foods
+        if _canonical_food_identity(food) not in primary_identities
+    ]
     logger.info(
-        "Complete inventory audit image=%d provisional=%s corrected=%s",
+        "Complete inventory audit image=%d provisional=%s corrected=%s recovered=%s",
         image_index,
         [entry.get("name") for entry in provisional],
         [food.get("name") for food in foods],
+        recovered,
     )
     return {
         "meal": {
@@ -3612,6 +3688,26 @@ def _audit_and_correct_complete_food_inventory(
             "foods": foods,
         },
     }
+
+
+def _should_audit_complete_food_inventory(result: dict[str, Any]) -> bool:
+    """Use the second pass for visually compound meals, not isolated foods."""
+    meal = result.get("meal")
+    if not isinstance(meal, dict):
+        return False
+    foods = meal.get("foods")
+    if not isinstance(foods, list):
+        return False
+    valid_foods = [food for food in foods if isinstance(food, dict)]
+    if len(valid_foods) >= 2:
+        return True
+    if any(food.get("analysis_route") == "DECOMPOSE" for food in valid_foods):
+        return True
+    meal_type = _identity_text(meal.get("meal_type"))
+    return any(
+        token in meal_type
+        for token in ("mixed", "bowl", "salad", "sandwich", "curry", "porridge")
+    )
 
 
 SEPARATORS = ["/", "&", ",", " and "]
@@ -4911,7 +5007,10 @@ def analyze_meal(
 
         # This second Gemini pass was the other shared failure point. It is
         # opt-in and non-fatal; the complete primary result remains usable.
-        if ENABLE_MEAL_INVENTORY_AUDIT:
+        if (
+            ENABLE_MEAL_INVENTORY_AUDIT
+            and _should_audit_complete_food_inventory(result)
+        ):
             try:
                 result = _audit_and_correct_complete_food_inventory(
                     image,
