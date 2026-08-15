@@ -119,7 +119,9 @@ _DB_PRIORITY_ORDER_BRANDED = list(DB_PRIORITY_BRANDED.keys())
 CANDIDATE_REJECT_TERMS = [
     "bread", "burger", "pizza", "soup", "dip", "sandwich", "cracker",
     "frozen meal", "prepared meal", "salad", "casserole", "lasagna",
-    "pasta dish", "mixed dish", "meal kit", "snack",
+    "pasta dish", "mixed dish", "meal kit", "snack", "oatmeal",
+    "instant", "fat added", "sweetened", "flavored", "flavoured",
+    "seasoned", "ready to eat", "ready-to-eat", "with sauce", "in sauce",
 ]
 _CANDIDATE_REJECT_PATTERNS = [
     (term, re.compile(rf"\b{re.escape(term)}\b")) for term in CANDIDATE_REJECT_TERMS
@@ -813,6 +815,21 @@ def rank_candidates(
             _normalize_text(description)
         )
 
+        # Enforce the compound/modifier rejection policy declared above. A
+        # plain foundational query must not resolve to a prepared dish or to
+        # unrequested instant/fat-added/sweetened/flavoured variants.
+        rejected_modifier = next(
+            (
+                term
+                for term, pattern in _CANDIDATE_REJECT_PATTERNS
+                if pattern.search(normalized_description)
+                and not pattern.search(normalized_query)
+            ),
+            None,
+        )
+        if rejected_modifier is not None:
+            continue
+
         (
             preparation_compatible,
             preparation_bonus,
@@ -1289,7 +1306,10 @@ async def resolve_food(client: httpx.AsyncClient, food: Dict[str, Any]) -> Dict[
     # Preparation is nutritionally material for foods that absorb water. If
     # the model's USDA phrase contradicts (or omits) its own preparation
     # classification, make the preparation field authoritative before search.
-    food_state = _preparation_state(food.get("preparation"))
+    food_state = _preparation_state(
+        food.get("usda_preparation_basis")
+        or food.get("preparation")
+    )
     primary_state = _preparation_state(primary)
     if food_state and primary_state != food_state:
         identity = (
