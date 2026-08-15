@@ -3483,11 +3483,6 @@ def _same_packaged_product(
     ):
         return False
 
-    first_brand = _identity_text(first.get("brand"))
-    second_brand = _identity_text(second.get("brand"))
-    if first_brand and second_brand and first_brand != second_brand:
-        return False
-
     first_name = _identity_text(
         first.get("canonical_name") or first.get("name")
     )
@@ -4606,6 +4601,13 @@ def continue_with_back_label(
         label=label_result,
     )
 
+    label_product = {
+        "name": label_result.get("product_name"),
+        "canonical_name": label_result.get("product_name"),
+        "brand": label_result.get("brand"),
+        "analysis_route": "NUTRITION_LABEL",
+    }
+
     # One label is sufficient for repeated detections or multiple visible
     # units of the same exact packaged formulation. Without this propagation,
     # a duplicate such as "Coca-Cola" / "Coca-Cola soft drink" can make the
@@ -4615,7 +4617,10 @@ def continue_with_back_label(
             continue
         if (
             not _nutrition_label_is_attached(food)
-            and _same_packaged_product(target_food, food)
+            and (
+                _same_packaged_product(target_food, food)
+                or _same_packaged_product(label_product, food)
+            )
         ):
             attach_label_to_food(
                 food=food,
