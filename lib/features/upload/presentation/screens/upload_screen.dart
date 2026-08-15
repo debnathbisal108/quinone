@@ -6,7 +6,7 @@ import '../../../profile/providers/profile_provider.dart';
 import '../../../recipe/models/manual_recipe.dart';
 import '../../providers/upload_provider.dart';
 import '../widgets/analyze_button.dart';
-import '../services/image_picker_service.dart';
+import '../../services/image_picker_service.dart';
 import '../widgets/back_label_request_card.dart';
 import '../widgets/image_grid.dart';
 import '../widgets/upload_progress_card.dart';
