@@ -2785,6 +2785,19 @@ Rules:
 - If multiple toppings are visible over a substantial food mass, identify the
   underlying nutrient-bearing base. Return the base ingredient (for example
   Rolled oats), never the prepared parent label (for example Oatmeal).
+- Hydration-expanded staple ingredients must use their dry foundational
+  reference basis when they are recovered from a prepared dish. This includes
+  oats, rice, barley, quinoa, couscous, bulgur, millet, pasta/noodles,
+  buckwheat, semolina/cornmeal, lentils, beans and chickpeas. Return the
+  ingredient itself (not the prepared dish), preparation="dry",
+  served_preparation="cooked" when applicable,
+  usda_preparation_basis="dry", and
+  quantity_basis="dry_ingredient_equivalent". Estimate quantity as the dry
+  ingredient grams before absorbed cooking water, and request a dry/raw/
+  uncooked USDA record. Never substitute an instant, ready-to-eat, fat-added,
+  seasoned, sweetened or flavoured prepared product. This rule does not apply
+  to meat, eggs, vegetables, bread, or other foods whose actual cooked state
+  should be matched as served.
 - Keep independent foods separate. A topping/spread physically attached to a
   food is a separate object with belongs_to_food_id pointing to that food.
 - Never return a prepared meal name alongside its ingredients. In particular,
@@ -3487,21 +3500,11 @@ def _atomic_inventory_food(
     name = str(item.get("name") or "").strip()
     canonical_name = str(item.get("canonical_name") or name).strip()
     identity = _identity_text(canonical_name or name)
-
-    # This alias correction is not the scope of the audit. It is a final
-    # deterministic safeguard against one especially common prepared-parent
-    # label surviving as though it were a separate ingredient.
-    if identity == "oatmeal":
-        name = "Rolled oats"
-        canonical_name = "rolled oats"
-        identity = "rolled oats"
-        item = {
-            **item,
-            "category": "Grain",
-            "usda_food_description": (
-                "oats, regular and quick, cooked with water, without salt"
-            ),
-        }
+    served_preparation = str(
+        item.get("served_preparation")
+        or item.get("preparation")
+        or "unknown"
+    )
 
     quantity = float(item.get("quantity"))
     confidence = max(0.0, min(float(item.get("confidence")), 1.0))
@@ -3511,7 +3514,7 @@ def _atomic_inventory_food(
     if not is_label and not str(usda_description or "").strip():
         usda_description = canonical_name
 
-    return {
+    food = {
         "id": f"audited_food_{index:04d}",
         "name": name,
         "canonical_name": canonical_name,
@@ -3526,6 +3529,9 @@ def _atomic_inventory_food(
         "served_separately": True,
         "belongs_to_food_id": None,
         "preparation": str(item.get("preparation") or "unknown"),
+        "served_preparation": served_preparation,
+        "usda_preparation_basis": item.get("usda_preparation_basis"),
+        "quantity_basis": item.get("quantity_basis") or "as_served",
         "preparation_confidence": confidence,
         "quantity": round(quantity, 3),
         "quantity_confidence": confidence,
@@ -3541,6 +3547,8 @@ def _atomic_inventory_food(
         "recovered_by": "complete_atomic_inventory_audit",
         "visual_evidence": str(item.get("visual_evidence") or ""),
     }
+    _enforce_core_reference_basis(food)
+    return food
 
 
 def _audit_and_correct_complete_food_inventory(
@@ -3587,8 +3595,18 @@ def _audit_and_correct_complete_food_inventory(
         "ingredient because it appears in multiple crops or locations, has a "
         "synonym, or has both a prepared and ingredient name; aggregate its "
         "mass into one item unless the foods are different branded products. "
-        "Oatmeal is a meal label, "
-        "not an extra food when rolled oats and toppings are present.\n\n"
+        "A prepared dish name is not an extra food when its constituent "
+        "ingredients are present. For hydration-expanded staple bases such "
+        "as oats, rice, barley, quinoa, couscous, bulgur, millet, pasta, "
+        "noodles, buckwheat, semolina, cornmeal, lentils, beans or chickpeas, "
+        "return the dry foundational ingredient and estimate its dry grams "
+        "before absorbed cooking water. Set preparation='dry', preserve the "
+        "observed state in served_preparation, set usda_preparation_basis="
+        "'dry' and quantity_basis='dry_ingredient_equivalent', and request a "
+        "dry/raw/uncooked USDA record. Never select an instant, ready-to-eat, "
+        "fat-added, seasoned, sweetened or flavoured prepared variant. Do not "
+        "apply this conversion to meat, eggs, vegetables, bread, or ordinary "
+        "foods whose cooked state should be matched as served.\n\n"
         "Do not fabricate an ingredient that is fully hidden and has no "
         "defensible visual evidence. When exact seasoning cannot be seen, do "
         "not guess it. Quantities must represent each ingredient's own edible "
@@ -3599,6 +3617,8 @@ def _audit_and_correct_complete_food_inventory(
         '"canonical_name":"...","category":"...","container":"...",'
         '"role":"...","food_source":"Generic","brand":null,'
         '"quantity":1,"unit":"g","preparation":"...",'
+        '"served_preparation":"...","usda_preparation_basis":"...",'
+        '"quantity_basis":"as_served|dry_ingredient_equivalent",'
         '"confidence":0.8,"analysis_route":"DIRECT_USDA",'
         '"usda_food_description":"...","requires_back_image":false,'
         '"visual_evidence":"..."}]}. '
@@ -4090,6 +4110,181 @@ def _normalize_core_food_name(value: Any) -> str:
         "urad dal": "Black gram",
     }
     return aliases.get(lowered, name)
+
+
+def _is_oat_core_identity(identity: str) -> bool:
+    normalized = _identity_text(identity)
+    tokens = set(normalized.split())
+    return bool(tokens & {"oat", "oats", "oatmeal"}) or normalized in {
+        "oat porridge",
+        "oatmeal porridge",
+    }
+
+
+_HYDRATION_EXPANDED_CATEGORIES = {
+    "grain",
+    "cereal",
+    "legume",
+    "pulse",
+    "pasta",
+    "noodle",
+}
+
+_HYDRATION_EXPANDED_TOKENS = {
+    "oat",
+    "oats",
+    "oatmeal",
+    "rice",
+    "barley",
+    "quinoa",
+    "couscous",
+    "bulgur",
+    "millet",
+    "pasta",
+    "noodle",
+    "noodles",
+    "lentil",
+    "lentils",
+    "bean",
+    "beans",
+    "chickpea",
+    "chickpeas",
+    "buckwheat",
+    "semolina",
+    "cornmeal",
+    "polenta",
+}
+
+_HYDRATED_PREPARATION_TOKENS = {
+    "cooked",
+    "boiled",
+    "simmered",
+    "steamed",
+    "hydrated",
+    "porridge",
+    "prepared",
+}
+
+_DRY_PREPARATION_TOKENS = {
+    "dry",
+    "raw",
+    "uncooked",
+    "unprepared",
+}
+
+_DRY_REFERENCE_STOP_TOKENS = (
+    _HYDRATED_PREPARATION_TOKENS
+    | _DRY_PREPARATION_TOKENS
+    | {"instant", "ready", "to", "eat", "with", "water", "fat", "added"}
+)
+
+
+def _is_hydration_expanded_core(food: dict[str, Any]) -> bool:
+    # A mixed-dish parent must first be decomposed; a packaged-label item must
+    # retain its printed nutrition. Only atomic generic ingredients are
+    # eligible for foundational dry-reference enforcement.
+    if food.get("analysis_route") in {"DECOMPOSE", "NUTRITION_LABEL"}:
+        return False
+
+    identity = _identity_text(
+        food.get("canonical_name")
+        or food.get("name")
+        or ""
+    )
+    identity_tokens = set(identity.split())
+    category = _identity_text(food.get("category") or "")
+    preparation = str(
+        food.get("served_preparation")
+        or food.get("preparation")
+        or ""
+    ).lower().replace("_", " ").replace("-", " ")
+    preparation_tokens = set(preparation.split())
+
+    # Avoid treating vegetables such as green/string beans and bean sprouts as
+    # dry pulses merely because their names contain "bean".
+    excluded_vegetable = (
+        "sprout" in identity_tokens
+        or "sprouts" in identity_tokens
+        or "green beans" in identity
+        or "string beans" in identity
+        or "wax beans" in identity
+    )
+    if excluded_vegetable:
+        return False
+
+    is_staple = (
+        category in _HYDRATION_EXPANDED_CATEGORIES
+        or bool(identity_tokens & _HYDRATION_EXPANDED_TOKENS)
+    )
+    has_relevant_state = bool(
+        preparation_tokens
+        & (_HYDRATED_PREPARATION_TOKENS | _DRY_PREPARATION_TOKENS)
+    )
+    usda_basis = str(food.get("usda_preparation_basis") or "").lower().strip()
+    quantity_basis = (
+        str(food.get("quantity_basis") or "")
+        .lower()
+        .replace("_", " ")
+        .replace("-", " ")
+        .strip()
+    )
+    already_explicit = (
+        usda_basis == "dry"
+        or quantity_basis == "dry ingredient equivalent"
+    )
+    return is_staple and (has_relevant_state or already_explicit)
+
+
+def _dry_reference_identity(food: dict[str, Any]) -> str:
+    identity = _identity_text(
+        food.get("canonical_name")
+        or food.get("name")
+        or ""
+    )
+    tokens = [
+        token
+        for token in identity.split()
+        if token not in _DRY_REFERENCE_STOP_TOKENS
+    ]
+    return " ".join(tokens).strip() or identity
+
+
+def _enforce_core_reference_basis(food: dict[str, Any]) -> None:
+    identity = _identity_text(
+        food.get("canonical_name")
+        or food.get("name")
+        or ""
+    )
+    if not _is_hydration_expanded_core(food):
+        return
+
+    served_preparation = str(
+        food.get("served_preparation")
+        or food.get("preparation")
+        or "unknown"
+    )
+    dry_identity = _dry_reference_identity(food)
+    if _is_oat_core_identity(identity):
+        food["name"] = "Rolled oats"
+        food["canonical_name"] = "rolled oats"
+        dry_identity = "rolled oats"
+        usda_description = "oats, regular and quick, not fortified, dry"
+        fallback_query = "rolled oats dry raw"
+        food["category"] = "Grain"
+    else:
+        food["name"] = dry_identity.title() if dry_identity else food.get("name")
+        food["canonical_name"] = dry_identity
+        usda_description = f"{dry_identity} dry raw"
+        fallback_query = usda_description
+
+    food["served_preparation"] = served_preparation
+    food["preparation"] = "dry"
+    food["usda_preparation_basis"] = "dry"
+    food["quantity_basis"] = "dry_ingredient_equivalent"
+    food["usda_food_description"] = usda_description
+    food["possible_usda_queries"] = [fallback_query]
+    food["analysis_route"] = "DIRECT_USDA"
+    food["requires_back_image"] = False
 
 
 def _category_from_ingredient(value: Any) -> str:
@@ -4650,9 +4845,10 @@ def post_process(
         if not isinstance(food, dict):
             continue
         food["name"] = _normalize_core_food_name(food.get("name"))
-        # Photo quantities describe the edible mass visible in the submitted
-        # meal. For a cooked bowl this is prepared/as-served weight, not the
-        # unknown dry ingredient weight used before water absorption.
+        _enforce_core_reference_basis(food)
+        # Most photo quantities are as served. Hydration-expanded staple bases
+        # are the exception: _enforce_core_reference_basis marks their model-
+        # estimated pre-hydration ingredient grams explicitly.
         food.setdefault("quantity_basis", "as_served")
         unit = str(food.get("unit", "g")).lower().strip()
         food["unit"] = unit_map.get(unit, unit)
@@ -4700,6 +4896,13 @@ def post_process(
             core_foods.append(promoted)
 
     core_foods, parent_log = _suppress_redundant_composite_parents(core_foods)
+
+    # DECOMPOSE ingredients are promoted only after the first normalization
+    # loop, so apply the same staple-basis policy to the complete flattened
+    # inventory before any USDA resolution or duplicate reconciliation.
+    for food in core_foods:
+        _enforce_core_reference_basis(food)
+        food.setdefault("quantity_basis", "as_served")
 
     # Reconcile alternate estimates of the same physical core food BEFORE
     # USDA lookup. This is what prevents a decomposed "Cooked Rolled Oats"
