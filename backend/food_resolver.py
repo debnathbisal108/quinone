@@ -650,6 +650,35 @@ _COMPOUND_RESULT_TERMS = {
     "sandwich", "pizza", "casserole", "meal", "mix", "filling",
 }
 
+def _preparation_state(text: Any) -> str | None:
+    normalized = _normalize_text(str(text or ""))
+    if not normalized:
+        return None
+    tokens = set(normalized.split())
+    # Check dry first and use whole tokens: substring matching previously read
+    # "uncooked" as "cooked" and "unprepared" as "prepared".
+    if tokens & {"dry", "uncooked", "unprepared", "raw"}:
+        return "dry"
+    if (
+        tokens & {"cooked", "boiled", "prepared", "porridge"}
+        or "with water" in normalized
+    ):
+        return "cooked"
+    return None
+
+
+def _preparation_compatibility(
+    query: str,
+    candidate_description: str,
+) -> tuple[bool, float, str | None, str | None]:
+    """Reject an explicit cooked-vs-dry USDA state mismatch."""
+    query_state = _preparation_state(query)
+    candidate_state = _preparation_state(candidate_description)
+    if query_state and candidate_state and query_state != candidate_state:
+        return False, 0.0, query_state, candidate_state
+    bonus = 8.0 if query_state and query_state == candidate_state else 0.0
+    return True, bonus, query_state, candidate_state
+
 
 def _canonical_identity_token(token: str) -> str:
     token = token.lower().strip()
@@ -784,6 +813,22 @@ def rank_candidates(
             _normalize_text(description)
         )
 
+        (
+            preparation_compatible,
+            preparation_bonus,
+            query_preparation_state,
+            candidate_preparation_state,
+        ) = _preparation_compatibility(query, description)
+
+        if not preparation_compatible:
+            continue
+        preparation_tier = (
+            2
+            if query_preparation_state
+            and query_preparation_state == candidate_preparation_state
+            else 1
+        )
+
         description_tokens = (
             _meaningful_tokens(description)
         )
@@ -862,6 +907,7 @@ def rank_candidates(
             FUZZY_WEIGHT * fuzzy
             + DB_PRIORITY_WEIGHT * db_priority
             + exact_match_bonus
+            + preparation_bonus
             - specificity_penalty
             - compound_penalty
             - branded_penalty
@@ -916,6 +962,9 @@ def rank_candidates(
                 "missing_query_tokens": (
                     missing_tokens
                 ),
+                "query_preparation_state": query_preparation_state,
+                "candidate_preparation_state": candidate_preparation_state,
+                "preparation_tier": preparation_tier,
                 "final_score": final_score,
             }
         )
@@ -923,6 +972,7 @@ def rank_candidates(
     ranked.sort(
         key=lambda candidate: (
             candidate.get("source_policy_tier", 0),
+            candidate.get("preparation_tier", 0),
             candidate.get("identity_tier", 0),
             candidate.get("identity_coverage", 0.0),
             candidate.get("query_token_coverage", 0.0),
@@ -1223,6 +1273,8 @@ async def _resolve_single(
         "data_type": best["data_type"] if found else None,
         "match_query": best_query,
         "match_score": round(best["final_score"] / 100.0, 4),
+        "query_preparation_state": best.get("query_preparation_state") if found else None,
+        "matched_preparation_state": best.get("candidate_preparation_state") if found else None,
     }
 
 
@@ -1233,6 +1285,36 @@ async def resolve_food(client: httpx.AsyncClient, food: Dict[str, Any]) -> Dict[
     fallbacks = list(food.get("possible_usda_queries") or [])
     if not primary and not fallbacks:
         fallbacks = [food.get("name", "")]
+
+    # Preparation is nutritionally material for foods that absorb water. If
+    # the model's USDA phrase contradicts (or omits) its own preparation
+    # classification, make the preparation field authoritative before search.
+    food_state = _preparation_state(food.get("preparation"))
+    primary_state = _preparation_state(primary)
+    if food_state and primary_state != food_state:
+        identity = (
+            food.get("canonical_name")
+            or food.get("name")
+            or primary
+            or ""
+        )
+        qualifier = "cooked" if food_state == "cooked" else "dry raw"
+        primary = f"{identity} {qualifier}".strip()
+
+    if food_state:
+        qualifier = "cooked" if food_state == "cooked" else "dry raw"
+        aligned_fallbacks: list[str] = []
+        for fallback in fallbacks:
+            fallback_state = _preparation_state(fallback)
+            if fallback_state and fallback_state != food_state:
+                continue
+            aligned_fallbacks.append(
+                str(fallback)
+                if fallback_state == food_state
+                else f"{fallback} {qualifier}".strip()
+            )
+        fallbacks = aligned_fallbacks
+
     food_source = food.get("food_source") or "Generic"
     return await _resolve_single(client, primary, fallbacks, food_source)
 
@@ -1303,6 +1385,7 @@ async def _resolve_one_food(client: httpx.AsyncClient, food: Dict[str, Any]) -> 
 
     if route == "DIRECT_USDA":
         food["resolver"] = await resolve_food(client, food)
+        _log_food_resolution(food)
         return
 
     if route == "DECOMPOSE":
@@ -1386,6 +1469,28 @@ async def _resolve_one_food(client: httpx.AsyncClient, food: Dict[str, Any]) -> 
         "Unknown analysis_route %r for food %r; defaulting to DIRECT_USDA", route, name
     )
     food["resolver"] = await resolve_food(client, food)
+    _log_food_resolution(food)
+
+
+def _log_food_resolution(food: Dict[str, Any]) -> None:
+    resolver = food.get("resolver") or {}
+    logger.info(
+        "USDA resolution food=%r preparation=%r quantity=%s%s "
+        "fdcId=%s matched=%r query=%r query_state=%r matched_state=%r "
+        "data_type=%r score=%s status=%s",
+        food.get("name"),
+        food.get("preparation"),
+        food.get("quantity"),
+        food.get("unit") or "",
+        resolver.get("fdc_id"),
+        resolver.get("matched_name"),
+        resolver.get("match_query"),
+        resolver.get("query_preparation_state"),
+        resolver.get("matched_preparation_state"),
+        resolver.get("data_type"),
+        resolver.get("match_score"),
+        resolver.get("status"),
+    )
 
 
 async def resolve_meal(
