@@ -27,19 +27,24 @@ class UploadService {
     final analysisId = request.analysisId?.trim();
     final isBackLabel = analysisId != null && analysisId.isNotEmpty;
 
-    final jobId = isBackLabel
-        ? await _startBackLabelJob(
+    final jobId = request.isLabelOnly
+        ? await _startLabelOnlyJob(
             request: request,
-            analysisId: analysisId,
             onSendProgress: onSendProgress,
             cancelToken: cancelToken,
           )
-        : await _startMealJob(
-            request: request,
-            onSendProgress: onSendProgress,
-            cancelToken: cancelToken,
-          );
-
+        : isBackLabel
+            ? await _startBackLabelJob(
+                request: request,
+                analysisId: analysisId,
+                onSendProgress: onSendProgress,
+                cancelToken: cancelToken,
+              )
+            : await _startMealJob(
+                request: request,
+                onSendProgress: onSendProgress,
+                cancelToken: cancelToken,
+              );
     return _pollJob(
       jobId: jobId,
       onAnalysisProgress: onAnalysisProgress,
@@ -86,6 +91,45 @@ class UploadService {
     return _extractJobId(response.data);
   }
 
+  Future<String> _startLabelOnlyJob({
+    required UploadRequest request,
+    ProgressCallback? onSendProgress,
+    CancelToken? cancelToken,
+  }) async {
+    if (request.imagePaths.isEmpty) {
+      throw const UploadServiceException('Select a nutrition-label image.');
+    }
+
+    final imagePath = request.imagePaths.first;
+    final file = File(imagePath);
+    if (!await file.exists()) {
+      throw UploadServiceException('The nutrition-label image could not be found: $imagePath');
+    }
+
+    final formData = FormData();
+    formData.files.add(MapEntry(
+      'label',
+      await MultipartFile.fromFile(
+        imagePath,
+        filename: _fileName(file, fallback: 'nutrition_label.jpg'),
+      ),
+    ));
+
+    final profile = request.userProfile;
+    if (profile != null && profile.isNotEmpty) {
+      formData.fields.add(MapEntry('profile', jsonEncode(profile)));
+    }
+
+    final response = await _dio.post<dynamic>(
+      ApiConfig.labelOnlyStartEndpoint,
+      data: formData,
+      cancelToken: cancelToken,
+      onSendProgress: onSendProgress,
+      options: _jsonMultipartOptions,
+    );
+    return _extractJobId(response.data);
+  }
+  
   Future<String> _startBackLabelJob({
     required UploadRequest request,
     required String analysisId,
