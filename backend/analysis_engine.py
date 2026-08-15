@@ -407,6 +407,48 @@ COMPACT_LABEL_RESPONSE_JSON_SCHEMA = {
     ],
 }
 
+# Split label extraction into two small responses. A package with a long
+# ingredients paragraph can no longer truncate and discard already-readable
+# nutrition numbers, and a nutrition-table response cannot be bloated by OCR
+# of addresses or marketing copy.
+LABEL_NUTRITION_RESPONSE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "brand": _NULLABLE_STRING_SCHEMA,
+        "product_name": {"type": "string"},
+        "serving_size": _LABEL_QUANTITY_SCHEMA,
+        "nutrition_basis": _LABEL_QUANTITY_SCHEMA,
+        "servings_per_container": _NULLABLE_NUMBER_SCHEMA,
+        "nutrition_per_serving": _COMPACT_LABEL_NUTRIENT_SCHEMA,
+        "nutrition_per_100g": _COMPACT_LABEL_NUTRIENT_SCHEMA,
+        "ocr_confidence": {"type": "number"},
+    },
+    "required": [
+        "product_name", "serving_size", "nutrition_basis",
+        "servings_per_container", "nutrition_per_serving",
+        "nutrition_per_100g", "ocr_confidence",
+    ],
+}
+
+LABEL_TEXT_RESPONSE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "brand": _NULLABLE_STRING_SCHEMA,
+        "product_name": {"type": "string"},
+        "barcode": _NULLABLE_STRING_SCHEMA,
+        "net_weight": _LABEL_QUANTITY_SCHEMA,
+        "serving_size": _LABEL_QUANTITY_SCHEMA,
+        "ingredients": {"type": "array", "items": {"type": "string"}},
+        "allergens": {"type": "array", "items": {"type": "string"}},
+        "claims": {"type": "array", "items": {"type": "string"}},
+        "ocr_confidence": {"type": "number"},
+    },
+    "required": [
+        "product_name", "barcode", "net_weight", "serving_size",
+        "ingredients", "allergens", "claims", "ocr_confidence",
+    ],
+}
+
 MEAL_GENERATION_CONFIG = {
     "response_mime_type": "application/json",
     "response_json_schema": MEAL_RESPONSE_JSON_SCHEMA,
@@ -418,6 +460,20 @@ LABEL_GENERATION_CONFIG = {
     "response_json_schema": LABEL_RESPONSE_JSON_SCHEMA,
     "temperature": 0.0,
     "max_output_tokens": 8192,
+}
+
+LABEL_NUTRITION_GENERATION_CONFIG = {
+    "response_mime_type": "application/json",
+    "response_json_schema": LABEL_NUTRITION_RESPONSE_JSON_SCHEMA,
+    "temperature": 0.0,
+    "max_output_tokens": 2048,
+}
+
+LABEL_TEXT_GENERATION_CONFIG = {
+    "response_mime_type": "application/json",
+    "response_json_schema": LABEL_TEXT_RESPONSE_JSON_SCHEMA,
+    "temperature": 0.0,
+    "max_output_tokens": 4096,
 }
 
 # =============================================================================
@@ -2912,6 +2968,27 @@ Rules
 - Return valid JSON only.
 """
 
+label_nutrition_prompt = """
+The supplied images are the same packaged-food back photograph followed by
+enlarged crops. Read ONLY the printed nutrition table and its basis. Return the
+small JSON object required by the response schema. Include the product name and
+brand only to identify the label. Do not transcribe ingredients, addresses,
+directions, legal text, or marketing copy. Do not calculate missing values;
+omit unprinted nutrient keys from the nutrient objects. Values printed per
+100 ml still belong in nutrition_per_100g with nutrition_basis.unit = "ml".
+Return JSON only.
+"""
+
+label_text_prompt = """
+The supplied images are the same packaged-food back photograph followed by
+enlarged crops. Read ONLY product identity, net weight, serving size, barcode,
+the printed ingredients list, allergens, and short explicit claims. Return the
+small JSON object required by the response schema. Keep every ingredient as a
+concise separate array item in printed order. Do not copy nutrition numbers,
+addresses, customer-care details, directions, legal text, or marketing
+paragraphs. Return JSON only.
+"""
+
 # =============================================================================
 # CLASSIFIER PROMPT
 # =============================================================================
@@ -2920,10 +2997,9 @@ You are checking whether a user has ALREADY supplied usable packaged-food
 label information. The supplied images are views of the SAME user photo: the
 first is the complete photo and later images are enlarged detail crops.
 
-Return booleans for:
-- has_readable_nutrition_information: a printed nutrition table, nutrient
-  quantities, serving information, or per-100-g/ml values can be read.
-- has_readable_ingredients: a printed ingredient list can be read.
+Choose NUTRITION_LABEL when a printed nutrition table, nutrient quantities,
+serving information, per-100-g/ml values, OR an ingredients list can be read.
+Otherwise choose FOOD.
 
 Important nutrition-label rules:
 - The image may show the ENTIRE back of a bottle, box, pouch, can, wrapper, or
@@ -2933,22 +3009,15 @@ Important nutrition-label rules:
   other package text.
 - If nutrition quantities, a Nutrition Facts/Nutrition Information table,
   serving information, values per 100 g/ml, OR an ingredients list is clearly
-  visible and readable, set the corresponding boolean true.
+  visible and readable, choose NUTRITION_LABEL.
 - When both the package/product and readable nutrition or ingredient text are
-  visible, report the label evidence. Do not report both booleans false merely
-  because the complete package, branding, product photo, or barcode is visible.
+  visible, choose NUTRITION_LABEL. Do not choose FOOD merely because the
+  complete package, branding, product photo, or barcode is visible.
 - For a front-only package photo or barcode-only photo without readable
-  nutrition values or ingredients, report both booleans false.
-
-Return ONLY valid JSON:
-{
-  "has_readable_nutrition_information": true or false,
-  "has_readable_ingredients": true or false,
-  "confidence": 0.0 to 1.0,
-  "evidence": "the short visible phrase or panel that determined the answer"
-}
+  nutrition values or ingredients, choose FOOD.
 
 Use the visible information, not how tightly the user cropped the photograph.
+Return exactly one token with no JSON and no explanation: NUTRITION_LABEL or FOOD.
 """
 
 # =============================================================================
@@ -3088,6 +3157,30 @@ def _generate_json(
                 )
                 retry_config["temperature"] = 0.0
                 retry_config["max_output_tokens"] = 8192
+            elif (
+                config.get("response_json_schema")
+                is LABEL_NUTRITION_RESPONSE_JSON_SCHEMA
+            ):
+                retry_instruction = (
+                    "Read only the printed nutrition table from these views "
+                    "of one package. Return product_name, serving/basis fields, "
+                    "and the numeric nutrients in the supplied small schema. "
+                    "Do not return ingredients or other package text. JSON only."
+                )
+                retry_config["temperature"] = 0.0
+                retry_config["max_output_tokens"] = 2048
+            elif (
+                config.get("response_json_schema")
+                is LABEL_TEXT_RESPONSE_JSON_SCHEMA
+            ):
+                retry_instruction = (
+                    "Read only product identity and the printed ingredients "
+                    "section from these views of one package. Exclude addresses, "
+                    "directions, legal text and marketing copy. Keep array items "
+                    "concise and return only the supplied small-schema JSON."
+                )
+                retry_config["temperature"] = 0.0
+                retry_config["max_output_tokens"] = 4096
             else:
                 retry_instruction = (
                     f"{instruction}\n\n"
@@ -3219,6 +3312,29 @@ def _validate_model_contract(
                 "The AI response did not contain printed nutrition or ingredients."
             )
 
+    if schema is LABEL_NUTRITION_RESPONSE_JSON_SCHEMA:
+        if not str(result.get("product_name") or "").strip():
+            raise ValueError("The nutrition response did not identify the product.")
+        numeric_values = []
+        for key in ("nutrition_per_serving", "nutrition_per_100g"):
+            nutrient_map = result.get(key)
+            if isinstance(nutrient_map, dict):
+                numeric_values.extend(
+                    value for value in nutrient_map.values()
+                    if isinstance(value, (int, float)) and not isinstance(value, bool)
+                )
+        if not numeric_values:
+            raise ValueError("The nutrition response contained no printed values.")
+
+    if schema is LABEL_TEXT_RESPONSE_JSON_SCHEMA:
+        if not str(result.get("product_name") or "").strip():
+            raise ValueError("The label-text response did not identify the product.")
+        ingredients = result.get("ingredients")
+        if not isinstance(ingredients, list) or not any(
+            str(item or "").strip() for item in ingredients
+        ):
+            raise ValueError("The label-text response contained no ingredients.")
+
     if schema is ATOMIC_MEAL_INVENTORY_JSON_SCHEMA:
         import re
 
@@ -3277,28 +3393,31 @@ def classify_image(client, image):
         try:
             response = client.models.generate_content(
                 model=GEMINI_MEAL_MODEL,
-                contents=[classify_prompt, *views],
+                contents=[
+                    classify_prompt,
+                    "Return exactly one token: NUTRITION_LABEL or FOOD.",
+                    *views,
+                ],
                 config={
-                    "response_mime_type": "application/json",
-                    "response_json_schema": CLASSIFICATION_RESPONSE_JSON_SCHEMA,
                     "temperature": 0.0,
-                    "max_output_tokens": 256,
+                    "max_output_tokens": 128,
                 },
             )
-            result = parse_model_json(response.text or "")
-            has_nutrition = result.get("has_readable_nutrition_information")
-            has_ingredients = result.get("has_readable_ingredients")
-            if not isinstance(has_nutrition, bool) or not isinstance(
-                has_ingredients,
-                bool,
-            ):
-                raise ValueError("Image route response omitted label booleans.")
-            result["type"] = (
-                "nutrition_label"
-                if has_nutrition or has_ingredients
-                else "food"
-            )
-            return result
+            decision = str(response.text or "").strip().upper()
+            decision = decision.replace("-", "_").replace(" ", "_")
+            if "NUTRITION_LABEL" in decision or decision == "LABEL":
+                return {
+                    "type": "nutrition_label",
+                    "confidence": 1.0,
+                    "reason": "readable nutrition or ingredient label",
+                }
+            if decision == "FOOD" or decision.endswith("_FOOD"):
+                return {
+                    "type": "food",
+                    "confidence": 1.0,
+                    "reason": "no readable nutrition or ingredient label",
+                }
+            raise ValueError(f"Unsupported image route token: {decision[:80]}")
         except Exception as error:
             last_error = error
             logger.warning(
@@ -3356,14 +3475,62 @@ def _normalize_label_result(label: dict[str, Any]) -> dict[str, Any]:
 
 
 def extract_label(client, image):
-    result = _generate_json(
-        model=GEMINI_LABEL_MODEL,
-        instruction=label_prompt,
-        image=_label_detail_views(image),
-        config=LABEL_GENERATION_CONFIG,
-        operation="back-label extraction",
-    )
-    return _normalize_label_result(result)
+    views = _label_detail_views(image)
+    nutrition_result: dict[str, Any] | None = None
+    text_result: dict[str, Any] | None = None
+    nutrition_error: Exception | None = None
+    text_error: Exception | None = None
+
+    try:
+        nutrition_result = _generate_json(
+            model=GEMINI_LABEL_MODEL,
+            instruction=label_nutrition_prompt,
+            image=views,
+            config=LABEL_NUTRITION_GENERATION_CONFIG,
+            operation="back-label nutrition extraction",
+        )
+    except ModelJSONResponseError as error:
+        nutrition_error = error
+        logger.warning("Nutrition-table extraction exhausted retries: %s", error)
+
+    try:
+        text_result = _generate_json(
+            model=GEMINI_LABEL_MODEL,
+            instruction=label_text_prompt,
+            image=views,
+            config=LABEL_TEXT_GENERATION_CONFIG,
+            operation="back-label ingredients extraction",
+        )
+    except ModelJSONResponseError as error:
+        text_error = error
+        logger.warning("Ingredient-text extraction exhausted retries: %s", error)
+
+    if nutrition_result is None and text_result is None:
+        raise ModelJSONResponseError(
+            "The label could not be read after independent nutrition and "
+            "ingredients extraction attempts."
+        ) from (nutrition_error or text_error)
+
+    # Text fields come from their focused pass. Nutrition identity/basis then
+    # fills missing fields and always owns the numeric nutrient maps.
+    merged: dict[str, Any] = dict(text_result or {})
+    if nutrition_result:
+        for key in (
+            "brand", "product_name", "serving_size", "nutrition_basis",
+            "servings_per_container", "nutrition_per_serving",
+            "nutrition_per_100g",
+        ):
+            value = nutrition_result.get(key)
+            if value not in (None, "", {}, []):
+                merged[key] = value
+        merged["ocr_confidence"] = min(
+            float(nutrition_result.get("ocr_confidence") or 0.0),
+            float((text_result or {}).get("ocr_confidence") or 1.0),
+        )
+
+    result = _normalize_label_result(merged)
+    _validate_model_contract(result, LABEL_RESPONSE_JSON_SCHEMA)
+    return result
 
 
 def _meal_inventory_views(image: Image.Image) -> list[Image.Image]:
