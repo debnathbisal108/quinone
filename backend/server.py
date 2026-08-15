@@ -90,7 +90,12 @@ logger = logging.getLogger("quinone.server")
 
 def _public_job_error(error: Exception) -> str:
     """Keep parser internals out of mobile UI while retaining useful errors."""
-    if isinstance(error, (ModelJSONResponseError, json.JSONDecodeError)):
+    if isinstance(error, ModelJSONResponseError):
+        # These messages are sanitized by analysis_engine and identify the
+        # failed operation. Preserve that distinction for the mobile app.
+        return str(error).strip() or "The AI analysis could not be completed."
+
+    if isinstance(error, json.JSONDecodeError):
         return (
             "The AI returned an incomplete analysis response. "
             "Please retry the same image."
