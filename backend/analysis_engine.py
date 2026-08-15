@@ -66,6 +66,19 @@ _NULLABLE_BOOLEAN_SCHEMA = {
     "anyOf": [{"type": "boolean"}, {"type": "null"}],
 }
 
+CLASSIFICATION_RESPONSE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "type": {
+            "type": "string",
+            "enum": ["food", "nutrition_label"],
+        },
+        "confidence": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["type", "confidence", "reason"],
+}
+
 _VARIANT_SCHEMA = {
     "anyOf": [
         {
@@ -2932,10 +2945,26 @@ Rules
 classify_prompt = """
 You are an image classifier for a nutrition app.
 
-Determine if this image is primarily:
+Determine which analysis route this image requires:
 
 - A photo of prepared food, meal, ingredients, dish, or edible items (type: "food")
-- OR a close-up photo of a packaged food's Nutrition Facts panel / nutrition label / back of package showing nutritional information, ingredients list, or barcode area (type: "nutrition_label")
+- OR an image that contains readable packaged-food nutrition information or a
+  readable printed ingredients list anywhere in the frame (type: "nutrition_label")
+
+Important nutrition-label rules:
+- The image may show the ENTIRE back of a bottle, box, pouch, can, wrapper, or
+  other package. It does NOT need to be a close-up or tight crop of the panel.
+- The panel may occupy only part of the image and may be photographed at an
+  angle, rotated, surrounded by branding, directions, warnings, a barcode, or
+  other package text.
+- If nutrition quantities, a Nutrition Facts/Nutrition Information table,
+  serving information, values per 100 g/ml, OR an ingredients list is clearly
+  visible and readable, choose "nutrition_label".
+- When both the package/product and readable nutrition or ingredient text are
+  visible, nutrition-label evidence takes priority. Do not choose "food" merely
+  because the complete package is visible.
+- A front-only package photo or barcode-only photo without readable nutrition
+  values or ingredients remains "food".
 
 Return ONLY valid JSON:
 {
@@ -2944,8 +2973,7 @@ Return ONLY valid JSON:
   "reason": "one short sentence"
 }
 
-If the image is ambiguous or mostly packaging without a clear Nutrition Facts panel, prefer "food".
-If you can clearly read nutrient numbers / "Nutrition Facts" / "per 100g" / "Serving Size", choose "nutrition_label".
+Use the visible information, not how tightly the user cropped the photograph.
 """
 
 # =============================================================================
@@ -3182,23 +3210,43 @@ def _model_finish_reason(response: Any) -> str:
 
 
 def classify_image(client, image):
-    """Legacy compatibility helper; normal uploads no longer call it."""
-    try:
-        response = client.models.generate_content(
-            model=GEMINI_MEAL_MODEL,
-            contents=[classify_prompt, image],
-            config={
-                "response_mime_type": "application/json",
-                "temperature": 0.0,
-                "max_output_tokens": 256,
-            },
-        )
-        text = response.text.strip()
-        if text.startswith("```"):
-            text = text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
-    except Exception:
-        return {"type": "food", "confidence": 0.5, "reason": "classification failed"}
+    """Choose the meal or label route before either extraction pipeline runs."""
+    last_error: Exception | None = None
+    for attempt in range(1, 3):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MEAL_MODEL,
+                contents=[classify_prompt, image],
+                config={
+                    "response_mime_type": "application/json",
+                    "response_json_schema": CLASSIFICATION_RESPONSE_JSON_SCHEMA,
+                    "temperature": 0.0,
+                    "max_output_tokens": 256,
+                },
+            )
+            result = parse_model_json(response.text or "")
+            image_type = str(result.get("type") or "").strip().lower()
+            image_type = image_type.replace("-", "_").replace(" ", "_")
+            if image_type in {"nutrition_label", "back_label", "label"}:
+                result["type"] = "nutrition_label"
+                return result
+            if image_type == "food":
+                result["type"] = "food"
+                return result
+            raise ValueError(f"Unsupported image classification: {image_type}")
+        except Exception as error:
+            last_error = error
+            logger.warning(
+                "Image classification failed on attempt %d/2: %s",
+                attempt,
+                error,
+            )
+
+    return {
+        "type": "food",
+        "confidence": 0.0,
+        "reason": f"classification failed: {last_error}",
+    }
 
 
 def extract_label(client, image):
@@ -4696,7 +4744,13 @@ def analyze_meal(
                     image_path,
                     prepare_image_for_model(
                         image,
-                        max_edge=MEAL_IMAGE_MAX_EDGE,
+                        # Preserve label-sized text for the route classifier.
+                        # Meal images are reduced to MEAL_IMAGE_MAX_EDGE only
+                        # after they have been classified as food.
+                        max_edge=max(
+                            MEAL_IMAGE_MAX_EDGE,
+                            LABEL_IMAGE_MAX_EDGE,
+                        ),
                     ),
                 )
             )
@@ -4721,18 +4775,23 @@ def analyze_meal(
     # ---------------------------------------------------------
 
     # for _, image in food_images:
-    for image_index, (_, image) in enumerate(
+    for image_index, (_, classification_image) in enumerate(
           food_images,
           start=1,
     ):
-        classification = classify_image(client, image)
+        classification = classify_image(client, classification_image)
         image_type = str(classification.get("type") or "").strip().lower()
         if image_type in {"nutrition_label", "back_label", "label"}:
-            label_result = extract_label(client, image)
+            label_result = extract_label(client, classification_image)
             label_food = create_food_from_label(label_result)
             label_food["id"] = f"img_{image_index:03d}_food_0001"
             all_foods.append(label_food)
             continue
+
+        image = prepare_image_for_model(
+            classification_image,
+            max_edge=MEAL_IMAGE_MAX_EDGE,
+        )
 
         result = _generate_json(
             model=GEMINI_MEAL_MODEL,
