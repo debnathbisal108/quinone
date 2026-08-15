@@ -136,6 +136,23 @@ class ResolverStatus:
     ERROR = "error"
 
 
+# USDA uses several canonical descriptions that differ substantially from
+# everyday food names. These are query aliases, never fixed FDC IDs: every
+# result still passes the normal source-priority ranking and live Food Details
+# validation before it is accepted.
+_FOUNDATIONAL_QUERY_ALIASES = {
+    "ghee": ["butter oil anhydrous", "clarified butter"],
+    "clarified butter": ["butter oil anhydrous"],
+    "cinnamon": ["spices cinnamon ground"],
+    # FoodData Central does not consistently expose "raita" as a generic
+    # food. Plain yogurt is the conservative nutrient-bearing base; the
+    # original food remains named Raita in the review UI and the matched USDA
+    # description makes this approximation visible rather than pretending it
+    # was an exact raita record.
+    "raita": ["yogurt plain whole milk", "yogurt plain low fat"],
+}
+
+
 # =========================================================================
 # CACHE
 # =========================================================================
@@ -639,6 +656,8 @@ _GENERIC_QUERY_WORDS = {
     "the",
     "dry",
     "dried",
+    "uncooked",
+    "unprepared",
     "frozen",
     "sliced",
     "chopped",
@@ -1303,13 +1322,22 @@ async def resolve_food(client: httpx.AsyncClient, food: Dict[str, Any]) -> Dict[
     if not primary and not fallbacks:
         fallbacks = [food.get("name", "")]
 
-    # Preparation is nutritionally material for foods that absorb water. If
-    # the model's USDA phrase contradicts (or omits) its own preparation
-    # classification, make the preparation field authoritative before search.
-    food_state = _preparation_state(
-        food.get("usda_preparation_basis")
-        or food.get("preparation")
+    identity = _normalize_text(
+        str(food.get("canonical_name") or food.get("name") or "")
     )
+    aliases = list(_FOUNDATIONAL_QUERY_ALIASES.get(identity, []))
+    if aliases:
+        # Prefer deterministic USDA vocabulary over model-generated fallback
+        # phrases while retaining the model's primary query as the first try.
+        fallbacks = [*aliases, *fallbacks]
+
+    # Only an explicit USDA basis may rewrite search queries. `preparation`
+    # describes how the item was served and is often inherited by every
+    # component of a mixed dish; using it universally produced invalid queries
+    # such as "ghee cooked", "cinnamon cooked" and "raita dry raw". The
+    # analysis engine sets usda_preparation_basis only for foods where a
+    # cooked-vs-dry reference is deliberately required.
+    food_state = _preparation_state(food.get("usda_preparation_basis"))
     primary_state = _preparation_state(primary)
     if food_state and primary_state != food_state:
         identity = (
