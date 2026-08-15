@@ -210,6 +210,70 @@ class UploadNotifier extends StateNotifier<UploadState> {
     }
   }
 
+  Future<void> uploadLabelOnly({
+    required String imagePath,
+    Map<String, dynamic>? userProfile,
+  }) async {
+    if (state.isUploading) {
+      return;
+    }
+
+    if (imagePath.trim().isEmpty) {
+      state = state.copyWith(
+        error: 'Select a nutrition-label image.',
+      );
+      return;
+    }
+
+    state = state.copyWith(
+      isUploading: true,
+      uploadProgress: 0.02,
+      progressMessage: 'Uploading nutrition label…',
+      progressStage: 'uploading_label',
+      clearError: true,
+      clearResponse: true,
+      clearAnalysisId: true,
+      clearFoodId: true,
+    );
+
+    try {
+      final request = UploadRequest(
+        imagePaths: [imagePath],
+        userProfile: userProfile,
+        isLabelOnly: true,
+      );
+
+      final response = await _repository.uploadImages(
+        request: request,
+        onSendProgress: _handleProgress,
+        onAnalysisProgress: _handleAnalysisProgress,
+      );
+
+      final responseData =
+          _normalizeResponseData(response.data);
+
+      if (responseData != null && _isCompletedResult(responseData)) {
+        await _historySaver(responseData);
+      }
+
+      state = state.copyWith(
+        isUploading: false,
+        uploadProgress: 1,
+        progressMessage: 'Analysis complete',
+        response: response,
+        analysisId: _extractAnalysisId(responseData),
+        foodId: _extractFoodId(responseData),
+      );
+    } catch (error) {
+      state = state.copyWith(
+        isUploading: false,
+        uploadProgress: 0,
+        error: _readableError(error),
+        clearResponse: true,
+      );
+    }
+  }
+  
   // -------------------------------------------------------
   // Nutrition-label continuation
   // -------------------------------------------------------
