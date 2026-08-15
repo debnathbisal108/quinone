@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from analysis_engine import (
     ModelJSONResponseError,
     analyze_meal,
+    analyze_label_only,
     continue_with_back_label,
 )
 from evidence_engine import attach_evidence
@@ -381,6 +382,19 @@ def _run_analysis_engine_locked(
         )
 
 
+# def _run_back_label_engine_locked(
+#     partial_result: dict[str, Any],
+#     label_path: str,
+#     target_food_id: str | None,
+# ) -> dict[str, Any]:
+#     with analysis_lock:
+#         return continue_with_back_label(
+#             partial_result=partial_result,
+#             label_image_path=label_path,
+#             target_food_id=target_food_id,
+#         )
+
+
 def _run_back_label_engine_locked(
     partial_result: dict[str, Any],
     label_path: str,
@@ -391,6 +405,15 @@ def _run_back_label_engine_locked(
             partial_result=partial_result,
             label_image_path=label_path,
             target_food_id=target_food_id,
+        )
+
+
+def _run_label_only_engine_locked(
+    label_path: str,
+) -> dict[str, Any]:
+    with analysis_lock:
+        return analyze_label_only(
+            image_path=label_path,
         )
 
 
@@ -511,6 +534,54 @@ async def start_back_label_job(
         "progress": 0.08,
     }
 
+@app.post("/analyze/label-only/start")
+async def start_label_only_job(
+    label: UploadFile = File(...),
+    profile: str | None = Form(default=None),
+) -> dict[str, Any]:
+    """Entry point for a back-label image uploaded on its own — no prior
+    meal photo and no existing analysis_id. This must never route through
+    analyze_meal / _run_analysis_engine_locked, which would misread the
+    label as a meal photo and ask for the same label again."""
+    _cleanup_expired_jobs()
+    job_id = str(uuid.uuid4())
+    profile_data = parse_profile(profile)
+    job_directory = JOB_DIR / job_id
+    job_directory.mkdir(parents=True, exist_ok=False)
+
+    try:
+        label_path = await save_upload(
+            upload=label,
+            destination_directory=job_directory,
+            fallback_name="nutrition_label",
+        )
+    except Exception:
+        shutil.rmtree(job_directory, ignore_errors=True)
+        raise
+
+    _set_job(
+        job_id,
+        status="queued",
+        stage="label_upload_complete",
+        message="Nutrition label uploaded. Reading the label…",
+        progress=0.08,
+    )
+    asyncio.create_task(
+        _process_label_only_job(
+            job_id=job_id,
+            label_path=str(label_path),
+            profile_data=profile_data,
+            job_directory=job_directory,
+        )
+    )
+
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "stage": "label_upload_complete",
+        "message": "Nutrition label uploaded. Reading the label…",
+        "progress": 0.08,
+    }
 
 @app.get("/analyze/jobs/{job_id}")
 @app.get("/api/v1/analyze/jobs/{job_id}", include_in_schema=False)
@@ -1001,6 +1072,73 @@ async def _process_initial_job(
     finally:
         shutil.rmtree(job_directory, ignore_errors=True)
 
+
+async def _process_label_only_job(
+    *,
+    job_id: str,
+    label_path: str,
+    profile_data: dict[str, Any] | None,
+    job_directory: Path,
+) -> None:
+    try:
+        _set_job(
+            job_id,
+            status="running",
+            stage="analysis_engine",
+            message="Reading the nutrition label…",
+            progress=0.30,
+        )
+        vision_started = time.perf_counter()
+        analysis_result = await asyncio.to_thread(
+            _run_label_only_engine_locked,
+            label_path,
+        )
+        _record_job_timing(job_id, "label_vision", vision_started)
+        _raise_if_cancelled(job_id)
+        analysis_result = normalize_result(analysis_result)
+        status = analysis_result.get("status")
+
+        if status != "completed":
+            raise ValueError(f"Unsupported analysis status: {status}")
+
+        next_status, confirmation, session_data = (
+            await _confirmation_after_label_analysis(
+                analysis_result,
+                analysis_id=job_id,
+                profile=profile_data,
+            )
+        )
+        save_session(analysis_id=job_id, data=session_data)
+        _set_job(
+            job_id,
+            status=next_status,
+            stage=(
+                "meal_confirmation"
+                if next_status == "waiting_for_meal_confirmation"
+                else "serving_confirmation"
+            ),
+            message=str(confirmation.get("message") or "Review the detected label."),
+            progress=1.0,
+            result=confirmation,
+        )
+    except asyncio.CancelledError:
+        _set_job(
+            job_id,
+            status="cancelled",
+            stage="cancelled",
+            message="Analysis cancelled.",
+            progress=0.0,
+        )
+    except Exception as error:
+        _set_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            message="The label analysis could not be completed.",
+            error=str(error),
+        )
+    finally:
+        shutil.rmtree(job_directory, ignore_errors=True)
 
 async def _process_manual_recipe_job(
     *,
