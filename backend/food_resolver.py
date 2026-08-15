@@ -55,6 +55,13 @@ LOW_CONFIDENCE_THRESHOLD = 40.0  # below RESOLVED but at/above this -> "resolved
 
 CACHE_FILE_PATH = os.environ.get("NUTRICA_USDA_CACHE_PATH", "")  # optional disk persistence
 
+# Increment whenever the USDA search request policy changes.  Older cache
+# files used only the human query as the key, so results produced before the
+# Foundation/SR/FNDDS-only policy could be replayed indefinitely after a
+# deploy.  A namespaced key makes those legacy entries unreachable without
+# requiring operators to delete a persistent cache file manually.
+SEARCH_CACHE_VERSION = "v2-generic-source-policy"
+
 # Automatic photo analysis resolves generic/core foods. Packaged branded foods
 # take the NUTRITION_LABEL route and must not be guessed from an incomplete
 # branded USDA record. Restricting the search itself also prevents the first
@@ -67,6 +74,12 @@ AUTOMATIC_RESOLVER_DATA_TYPES = [
 
 # Cache candidate accessibility so the same FDC ID is not validated repeatedly.
 _fdc_accessibility_cache: Dict[int, bool] = {}
+
+# Runtime-only diagnostics for explaining exactly how an FDC ID entered the
+# resolver.  This metadata is deliberately kept out of public API responses
+# and nutrient objects; it exists solely to make a stale USDA record traceable
+# to either a fresh upstream response or Quinone's search cache.
+_fdc_candidate_provenance: Dict[int, Dict[str, str]] = {}
 
 FUZZY_WEIGHT = 0.82
 DB_PRIORITY_WEIGHT = 0.18
@@ -167,14 +180,55 @@ class SearchCache:
         key = self._normalize(query)
         async with self._lock:
             self._store[key] = results
-            if self._disk_path:
-                try:
-                    with open(self._disk_path, "w", encoding="utf-8") as f:
-                        json.dump(self._store, f)
-                except OSError as exc:
-                    logger.warning(
-                        "Could not persist USDA cache to %s: %s", self._disk_path, exc
-                    )
+            self._persist_unlocked()
+
+    async def discard_fdc_id(self, fdc_id: int) -> int:
+        """Remove an unavailable FDC ID from every cached search result.
+
+        USDA search responses and long-lived disk caches can occasionally
+        contain an ID that the Food Details endpoint no longer serves.  Once
+        a 404 proves that an ID is stale, keeping it in any cached candidate
+        list only makes later analyses repeat the same dead lookup.
+        """
+        numeric_id = int(fdc_id)
+        removed = 0
+
+        async with self._lock:
+            for key, results in list(self._store.items()):
+                if not isinstance(results, list):
+                    continue
+
+                filtered: List[Dict[str, Any]] = []
+                for candidate in results:
+                    candidate_id = candidate.get("fdcId") if isinstance(candidate, dict) else None
+                    try:
+                        is_stale = int(candidate_id) == numeric_id
+                    except (TypeError, ValueError):
+                        is_stale = False
+
+                    if is_stale:
+                        removed += 1
+                    else:
+                        filtered.append(candidate)
+
+                if len(filtered) != len(results):
+                    self._store[key] = filtered
+
+            if removed:
+                self._persist_unlocked()
+
+        return removed
+
+    def _persist_unlocked(self) -> None:
+        if not self._disk_path:
+            return
+        try:
+            with open(self._disk_path, "w", encoding="utf-8") as f:
+                json.dump(self._store, f)
+        except OSError as exc:
+            logger.warning(
+                "Could not persist USDA cache to %s: %s", self._disk_path, exc
+            )
 
     def stats(self) -> Dict[str, int]:
         return {"cached_queries": len(self._store)}
@@ -184,6 +238,40 @@ _cache = SearchCache(CACHE_FILE_PATH)
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 _throttle_lock = asyncio.Lock()
 _last_request_time = 0.0
+
+
+def _search_cache_key(query: str, page_size: int) -> str:
+    data_types = ",".join(AUTOMATIC_RESOLVER_DATA_TYPES)
+    return f"{SEARCH_CACHE_VERSION}|{page_size}|{data_types}|{query}"
+
+
+def _known_invalid_candidate(candidate: Any) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    try:
+        fdc_id = int(candidate.get("fdcId"))
+    except (TypeError, ValueError):
+        return False
+    return _fdc_accessibility_cache.get(fdc_id) is False
+
+
+def _record_candidate_provenance(
+    candidates: List[Dict[str, Any]],
+    *,
+    source: str,
+    query: str,
+) -> None:
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        try:
+            fdc_id = int(candidate.get("fdcId"))
+        except (TypeError, ValueError):
+            continue
+        _fdc_candidate_provenance[fdc_id] = {
+            "source": source,
+            "query": query,
+        }
 
 
 async def _throttle() -> None:
@@ -225,9 +313,15 @@ async def search_food(
     if not query:
         return []
 
-    cached = await _cache.get(query)
+    cache_key = _search_cache_key(query, page_size)
+    cached = await _cache.get(cache_key)
 
     if cached is not None:
+        _record_candidate_provenance(
+            cached,
+            source="quinone_cache",
+            query=query,
+        )
         logger.debug(
             "Cache hit for query %r",
             query,
@@ -342,6 +436,16 @@ async def search_food(
             if not isinstance(foods, list):
                 foods = []
 
+            # Do not reintroduce an ID already proven unavailable earlier in
+            # this process, even if a later USDA search response contains it.
+            foods = [food for food in foods if not _known_invalid_candidate(food)]
+
+            _record_candidate_provenance(
+                foods,
+                source="live_usda_search",
+                query=query,
+            )
+
             logger.debug(
                 "USDA search %r returned %d candidates.",
                 query,
@@ -349,7 +453,7 @@ async def search_food(
             )
 
             await _cache.set(
-                query,
+                cache_key,
                 foods,
             )
 
@@ -881,12 +985,22 @@ async def _candidate_is_accessible(
                 return True
 
             if response.status_code == 404:
+                _fdc_accessibility_cache[numeric_id] = False
+                removed = await _cache.discard_fdc_id(numeric_id)
+                provenance = _fdc_candidate_provenance.pop(
+                    numeric_id,
+                    {"source": "unknown", "query": "unknown"},
+                )
                 logger.warning(
                     "Rejecting stale/unavailable USDA candidate fdcId=%s "
-                    "because Food Details returned 404.",
+                    "because Food Details returned 404 "
+                    "(source=%s, query=%r); removed it from %d cached "
+                    "candidate list(s) and continuing with the next match.",
                     numeric_id,
+                    provenance["source"],
+                    provenance["query"],
+                    removed,
                 )
-                _fdc_accessibility_cache[numeric_id] = False
                 return False
 
             if response.status_code == 429:
