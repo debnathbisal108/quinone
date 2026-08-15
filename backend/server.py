@@ -162,6 +162,8 @@ class ManualRecipeIngredientRequest(BaseModel):
     description: str
     data_type: str | None = None
     food_category: str | None = None
+    preparation: str | None = None
+    quantity_basis: str | None = None
     grams: float = Field(gt=0, le=100000)
 
 
@@ -692,6 +694,8 @@ async def _process_mixed_meal_confirmation_job(
                     "quantity": grams,
                     "unit": "g",
                     "estimated_weight_g": grams,
+                    "preparation": ingredient.preparation or "unknown",
+                    "quantity_basis": ingredient.quantity_basis or "as_served",
                     "resolver": {
                         "status": "resolved",
                         "fdc_id": resolved_food["fdc_id"],
@@ -1196,6 +1200,8 @@ async def _process_manual_recipe_job(
                     "quantity": grams,
                     "unit": "g",
                     "estimated_weight_g": grams,
+                    "preparation": ingredient.preparation or "unknown",
+                    "quantity_basis": ingredient.quantity_basis or "as_served",
                     "resolver": {
                         "status": "resolved",
                         "fdc_id": resolved_food["fdc_id"],
@@ -1965,7 +1971,8 @@ def _resolved_meal_to_review_draft(
             continue
 
         matched = str(
-            resolver.get("matched_description")
+            resolver.get("matched_name")
+            or resolver.get("matched_description")
             or resolver.get("description")
             or food.get("canonical_name")
             or food.get("display_name")
@@ -1979,6 +1986,11 @@ def _resolved_meal_to_review_draft(
             or matched
         ).strip()
 
+        preparation = str(food.get("preparation") or "").strip()
+        quantity_basis = str(
+            food.get("quantity_basis") or "as_served"
+        ).strip()
+
         ingredients.append(
             {
                 "food": {
@@ -1988,14 +2000,12 @@ def _resolved_meal_to_review_draft(
                     "data_type": str(resolver.get("data_type") or "USDA"),
                     "food_category": food.get("category"),
                     "brand_owner": resolver.get("brand_owner"),
+                    "preparation": preparation or None,
+                    "quantity_basis": quantity_basis,
+                    "match_query": resolver.get("match_query"),
                 },
                 "grams": round(grams, 3),
             }
-        )
-
-    if not ingredients:
-        raise ValueError(
-            "No resolved foods with usable quantities were available for confirmation."
         )
 
     meal_name = str(
