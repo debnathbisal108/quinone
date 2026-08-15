@@ -3457,6 +3457,68 @@ def attach_label_to_food(
         if isinstance(raw_claims, list)
         else []
     )
+
+
+def _nutrition_label_is_attached(food: dict[str, Any]) -> bool:
+    """Return true only after a label was actually extracted and attached."""
+    return (
+        food.get("back_image_received") is True
+        and isinstance(food.get("nutrition_label"), dict)
+    )
+
+
+def _same_packaged_product(
+    first: dict[str, Any],
+    second: dict[str, Any],
+) -> bool:
+    """Identify repeated detections/units of one packaged formulation.
+
+    A single readable label is valid for multiple appearances or units of the
+    same product. Formulation words such as ``zero`` and ``diet`` deliberately
+    prevent Coca-Cola and Coca-Cola Zero from being treated as one product.
+    """
+    if (
+        first.get("analysis_route") != "NUTRITION_LABEL"
+        or second.get("analysis_route") != "NUTRITION_LABEL"
+    ):
+        return False
+
+    first_brand = _identity_text(first.get("brand"))
+    second_brand = _identity_text(second.get("brand"))
+    if first_brand and second_brand and first_brand != second_brand:
+        return False
+
+    first_name = _identity_text(
+        first.get("canonical_name") or first.get("name")
+    )
+    second_name = _identity_text(
+        second.get("canonical_name") or second.get("name")
+    )
+    if not first_name or not second_name:
+        return False
+    if first_name == second_name:
+        return True
+
+    first_tokens = set(first_name.split())
+    second_tokens = set(second_name.split())
+    formulation_tokens = {
+        "zero", "diet", "light", "regular", "original", "classic",
+        "cherry", "vanilla", "lime", "lemon", "sugarfree", "caffeinefree",
+        "sugar", "caffeine", "free", "no",
+    }
+    if (first_tokens & formulation_tokens) != (second_tokens & formulation_tokens):
+        return False
+
+    generic_package_tokens = {
+        "beverage", "drink", "soft", "soda", "bottle", "bottled", "can",
+        "canned", "packaged", "product",
+    }
+    first_core = first_tokens - generic_package_tokens
+    second_core = second_tokens - generic_package_tokens
+    if not first_core or not second_core:
+        return False
+    overlap = len(first_core & second_core) / max(1, min(len(first_core), len(second_core)))
+    return overlap >= 0.9
     
 def create_food_from_label(label):
     """Create a proper food object when only a nutrition label was uploaded."""
@@ -4544,15 +4606,29 @@ def continue_with_back_label(
         label=label_result,
     )
 
+    # One label is sufficient for repeated detections or multiple visible
+    # units of the same exact packaged formulation. Without this propagation,
+    # a duplicate such as "Coca-Cola" / "Coca-Cola soft drink" can make the
+    # client request the identical back label indefinitely.
+    for food in foods:
+        if food is target_food:
+            continue
+        if (
+            not _nutrition_label_is_attached(food)
+            and _same_packaged_product(target_food, food)
+        ):
+            attach_label_to_food(
+                food=food,
+                label=copy.deepcopy(label_result),
+            )
+
     remaining = [
         food
         for food in foods
         if (
             food.get("analysis_route")
             == "NUTRITION_LABEL"
-            and not food.get(
-                "nutrition_label"
-            )
+            and not _nutrition_label_is_attached(food)
         )
     ]
 
@@ -4580,10 +4656,11 @@ def continue_with_back_label(
             ),
         }
 
-    return {
-        "status": "completed",
-        **partial_result,
-    }
+    completed_result = dict(partial_result)
+    # The continuation outcome must win over any status accidentally retained
+    # in a legacy saved partial result.
+    completed_result["status"] = "completed"
+    return completed_result
 
 def analyze_meal(
     image_paths: list[str],
