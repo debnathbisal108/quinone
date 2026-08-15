@@ -21,6 +21,9 @@ class ApiConfig {
   static const String backLabelStartEndpoint =
       "/analyze/back-label/start";
 
+ static const String labelOnlyStartEndpoint =
+      "/analyze/label-only/start";
+  
   static const String servingConfirmationStartEndpoint =
       "/analyze/serving-confirmation/start";
 
