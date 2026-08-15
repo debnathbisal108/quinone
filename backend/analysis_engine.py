@@ -4708,13 +4708,10 @@ def analyze_meal(
                 f"{Path(image_path).name}: {error}"
             ) from error
 
-    # Most initial uploads are meal photographs, so they go directly to the
-    # meal extractor without a separate classification request. A nutrition
-    # back-label can also be the FIRST and ONLY user upload, however. When the
-    # provisional meal result is empty or consists entirely of packaged foods,
-    # classify that ambiguous image and route a confirmed label straight to the
-    # label extractor. This preserves the fast path for ordinary meals while
-    # preventing a directly uploaded label from requesting itself again.
+    # Initial uploads may be either meal photographs OR nutrition back-labels.
+    # Image type must be established before meal extraction; otherwise printed
+    # ingredients/artwork on a label can be misread as a branded meal and the
+    # backend asks for the label that the user already supplied.
     food_images = all_images
 
     all_foods: list[dict[str, Any]] = []
@@ -4728,6 +4725,15 @@ def analyze_meal(
           food_images,
           start=1,
     ):
+        classification = classify_image(client, image)
+        image_type = str(classification.get("type") or "").strip().lower()
+        if image_type in {"nutrition_label", "back_label", "label"}:
+            label_result = extract_label(client, image)
+            label_food = create_food_from_label(label_result)
+            label_food["id"] = f"img_{image_index:03d}_food_0001"
+            all_foods.append(label_food)
+            continue
+
         result = _generate_json(
             model=GEMINI_MEAL_MODEL,
             instruction=optimized_meal_prompt,
@@ -4735,32 +4741,6 @@ def analyze_meal(
             config=MEAL_GENERATION_CONFIG,
             operation=f"meal image {image_index}",
         )
-
-        provisional_foods = (
-            result.get("meal", {}).get("foods", [])
-            if isinstance(result.get("meal"), dict)
-            else []
-        )
-        ambiguous_packaged_image = (
-            not provisional_foods
-            or (
-                isinstance(provisional_foods, list)
-                and all(
-                    isinstance(food, dict)
-                    and food.get("analysis_route") == "NUTRITION_LABEL"
-                    for food in provisional_foods
-                )
-            )
-        )
-
-        if ambiguous_packaged_image:
-            classification = classify_image(client, image)
-            if str(classification.get("type") or "").lower() == "nutrition_label":
-                label_result = extract_label(client, image)
-                label_food = create_food_from_label(label_result)
-                label_food["id"] = f"img_{image_index:03d}_food_0001"
-                all_foods.append(label_food)
-                continue
 
         result = _audit_and_correct_complete_food_inventory(
             image,
