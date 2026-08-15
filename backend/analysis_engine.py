@@ -31,13 +31,13 @@ client = genai.Client(
 
 logger = logging.getLogger("quinone.analysis_engine")
 
-GEMINI_MEAL_MODEL = os.environ.get(
-    "GEMINI_MEAL_MODEL",
-    "gemini-3-flash-preview",
+GEMINI_MEAL_MODEL = (
+    os.environ.get("GEMINI_MEAL_MODEL", "").strip()
+    or "gemini-3.5-flash"
 )
-GEMINI_LABEL_MODEL = os.environ.get(
-    "GEMINI_LABEL_MODEL",
-    GEMINI_MEAL_MODEL,
+GEMINI_LABEL_MODEL = (
+    os.environ.get("GEMINI_LABEL_MODEL", "").strip()
+    or GEMINI_MEAL_MODEL
 )
 
 # Phone cameras commonly produce 12-50 MP files. Gemini does not need the
@@ -50,6 +50,10 @@ GEMINI_JSON_MAX_ATTEMPTS = max(
     1,
     int(os.environ.get("GEMINI_JSON_MAX_ATTEMPTS", "3")),
 )
+ENABLE_MEAL_INVENTORY_AUDIT = os.environ.get(
+    "ENABLE_MEAL_INVENTORY_AUDIT",
+    "false",
+).strip().lower() in {"1", "true", "yes", "on"}
 
 
 class ModelJSONResponseError(RuntimeError):
@@ -2930,22 +2934,21 @@ Rules
 # CLASSIFIER PROMPT
 # =============================================================================
 classify_prompt = """
-You are an image classifier for a nutrition app.
+Classify this nutrition-app image as NUTRITION_LABEL or FOOD.
 
-Determine if this image is primarily:
+Choose NUTRITION_LABEL whenever readable printed nutrition quantities,
+Nutrition Facts/Nutritional Information, serving information, values per
+100 g/ml, OR a printed ingredients list appears anywhere in the image.
 
-- A photo of prepared food, meal, ingredients, dish, or edible items (type: "food")
-- OR a close-up photo of a packaged food's Nutrition Facts panel / nutrition label / back of package showing nutritional information, ingredients list, or barcode area (type: "nutrition_label")
+The image may show the entire back of a pouch, bottle, box, wrapper or can. It
+does not need to be tightly cropped. The label may occupy only one part of the
+frame, be angled or rotated, and appear beside branding, product artwork,
+directions, legal text or a barcode. Readable label evidence takes priority.
 
-Return ONLY valid JSON:
-{
-  "type": "food" or "nutrition_label",
-  "confidence": 0.0 to 1.0,
-  "reason": "one short sentence"
-}
+Choose FOOD for a prepared meal, loose ingredients, or a front-only package
+without readable nutrition/ingredient information.
 
-If the image is ambiguous or mostly packaging without a clear Nutrition Facts panel, prefer "food".
-If you can clearly read nutrient numbers / "Nutrition Facts" / "per 100g" / "Serving Size", choose "nutrition_label".
+Return exactly one token and nothing else: NUTRITION_LABEL or FOOD.
 """
 
 # =============================================================================
@@ -2979,6 +2982,88 @@ def prepare_image_for_model(
             Image.Resampling.LANCZOS,
         )
     return prepared
+
+
+def _label_detail_views(image: Image.Image) -> list[Image.Image]:
+    """Return the complete package photo plus enlarged overlapping regions."""
+    prepared = prepare_image_for_model(
+        image,
+        max_edge=LABEL_IMAGE_MAX_EDGE,
+    )
+    width, height = prepared.size
+    if width < 500 or height < 500:
+        return [prepared]
+
+    x_mid = width // 2
+    y_mid = height // 2
+    overlap_x = max(30, round(width * 0.10))
+    overlap_y = max(30, round(height * 0.10))
+    boxes = [
+        (0, 0, min(width, x_mid + overlap_x), min(height, y_mid + overlap_y)),
+        (max(0, x_mid - overlap_x), 0, width, min(height, y_mid + overlap_y)),
+        (0, max(0, y_mid - overlap_y), min(width, x_mid + overlap_x), height),
+        (
+            max(0, x_mid - overlap_x),
+            max(0, y_mid - overlap_y),
+            width,
+            height,
+        ),
+    ]
+    return [prepared, *(prepared.crop(box) for box in boxes)]
+
+
+def _generate_plain_meal_json(
+    image: Image.Image,
+    *,
+    image_index: int,
+) -> dict[str, Any]:
+    """Generate meal JSON without the failing nested SDK response schema."""
+    last_error: Exception | None = None
+    for attempt in range(1, GEMINI_JSON_MAX_ATTEMPTS + 1):
+        if attempt == GEMINI_JSON_MAX_ATTEMPTS:
+            # Compatibility fallback: this is the original full prompt from
+            # the working engine, with no response schema/config attached.
+            instruction = prompt
+        elif attempt == 1:
+            instruction = optimized_meal_prompt
+        else:
+            instruction = (
+                f"{optimized_meal_prompt}\n\n"
+                "Return one COMPLETE valid JSON object. Keep names, evidence "
+                "and USDA queries concise so the response cannot be truncated."
+            )
+
+        started = time.perf_counter()
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MEAL_MODEL,
+                contents=[instruction, image],
+            )
+            result = parse_model_json(response.text or "")
+            _validate_model_contract(
+                result,
+                SIMPLE_MEAL_RESPONSE_JSON_SCHEMA,
+            )
+            logger.info(
+                "Gemini meal image %d completed in %.1f ms on attempt %d",
+                image_index,
+                (time.perf_counter() - started) * 1000,
+                attempt,
+            )
+            return result
+        except Exception as error:
+            last_error = error
+            logger.warning(
+                "Gemini plain meal image %d failed on attempt %d/%d: %s",
+                image_index,
+                attempt,
+                GEMINI_JSON_MAX_ATTEMPTS,
+                error,
+            )
+
+    raise ModelJSONResponseError(
+        "Meal detection failed after compact and original-prompt retries."
+    ) from last_error
 
 
 def _generate_json(
@@ -3182,37 +3267,184 @@ def _model_finish_reason(response: Any) -> str:
 
 
 def classify_image(client, image):
-    """Legacy compatibility helper; normal uploads no longer call it."""
+    """Route a full image without using structured JSON output."""
+    last_error: Exception | None = None
+    views = _label_detail_views(image)
+    for attempt in range(1, 3):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MEAL_MODEL,
+                contents=[classify_prompt, *views],
+                config={
+                    "temperature": 0.0,
+                    "max_output_tokens": 128,
+                },
+            )
+            decision = str(response.text or "").strip().upper()
+            decision = decision.replace("-", "_").replace(" ", "_")
+            if "NUTRITION_LABEL" in decision or decision == "LABEL":
+                return {
+                    "type": "nutrition_label",
+                    "confidence": 1.0,
+                    "reason": "readable printed label information",
+                }
+            if decision == "FOOD" or decision.endswith("_FOOD"):
+                return {
+                    "type": "food",
+                    "confidence": 1.0,
+                    "reason": "meal or food image",
+                }
+            raise ValueError(f"Unsupported route token: {decision[:80]}")
+        except Exception as error:
+            last_error = error
+            logger.warning(
+                "Image route classification failed on attempt %d/2: %s",
+                attempt,
+                error,
+            )
+
+    # Unknown is deliberately non-fatal. analyze_meal performs a strict label
+    # probe and then safely falls through to ordinary meal detection.
+    return {
+        "type": "unknown",
+        "confidence": 0.0,
+        "reason": f"classification unavailable: {last_error}",
+    }
+
+
+def _coerce_optional_number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        cleaned = value.strip().replace(",", "")
+        if not cleaned or cleaned.lower() in {"null", "none", "n/a", "na"}:
+            return None
+        if cleaned.startswith("<"):
+            cleaned = cleaned[1:].strip()
+        value = cleaned
     try:
-        response = client.models.generate_content(
-            model=GEMINI_MEAL_MODEL,
-            contents=[classify_prompt, image],
-            config={
-                "response_mime_type": "application/json",
-                "temperature": 0.0,
-                "max_output_tokens": 256,
-            },
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _normalize_label_result(label: dict[str, Any]) -> dict[str, Any]:
+    """Restore a stable downstream label shape without inventing values."""
+    normalized = dict(label)
+    normalized.pop("is_nutrition_label", None)
+    normalized["brand"] = normalized.get("brand") or None
+    normalized["product_name"] = str(
+        normalized.get("product_name")
+        or normalized.get("brand")
+        or "Packaged Food"
+    ).strip()
+    normalized["barcode"] = normalized.get("barcode") or None
+    for key in ("net_weight", "serving_size", "nutrition_basis"):
+        quantity = normalized.get(key)
+        if not isinstance(quantity, dict):
+            quantity = {}
+        normalized[key] = {
+            "value": _coerce_optional_number(quantity.get("value")),
+            "unit": quantity.get("unit"),
+        }
+    normalized["servings_per_container"] = _coerce_optional_number(
+        normalized.get("servings_per_container")
+    )
+    for key in ("nutrition_per_serving", "nutrition_per_100g"):
+        supplied = normalized.get(key)
+        if not isinstance(supplied, dict):
+            supplied = {}
+        normalized[key] = {
+            nutrient: _coerce_optional_number(supplied.get(nutrient))
+            for nutrient in _LABEL_NUTRIENT_PROPERTIES
+        }
+    for key in ("ingredients", "allergens", "claims"):
+        values = normalized.get(key)
+        normalized[key] = (
+            [
+                str(value).strip()
+                for value in values
+                if value is not None and str(value).strip()
+            ]
+            if isinstance(values, list)
+            else []
         )
-        text = response.text.strip()
-        if text.startswith("```"):
-            text = text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
-    except Exception:
-        return {"type": "food", "confidence": 0.5, "reason": "classification failed"}
+    try:
+        normalized["ocr_confidence"] = max(
+            0.0,
+            min(1.0, float(normalized.get("ocr_confidence") or 0.0)),
+        )
+    except (TypeError, ValueError):
+        normalized["ocr_confidence"] = 0.0
+    return normalized
+
+
+def _label_contains_evidence(label: dict[str, Any]) -> bool:
+    for key in ("nutrition_per_serving", "nutrition_per_100g"):
+        nutrients = label.get(key)
+        if isinstance(nutrients, dict) and any(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in nutrients.values()
+        ):
+            return True
+    ingredients = label.get("ingredients")
+    return isinstance(ingredients, list) and any(
+        str(item or "").strip() for item in ingredients
+    )
 
 
 def extract_label(client, image):
-    prepared = prepare_image_for_model(
-        image,
-        max_edge=LABEL_IMAGE_MAX_EDGE,
+    """Extract a full package label without forcing an SDK response schema."""
+    views = _label_detail_views(image)
+    last_error: Exception | None = None
+    base_instruction = (
+        "The first image is the user's complete package photograph and all "
+        "later images are enlarged crops of that SAME photograph. Combine "
+        "readable evidence across them. If no printed nutrition quantities "
+        "and no printed ingredients list are readable, return exactly "
+        '{"is_nutrition_label": false}. Otherwise set '
+        '"is_nutrition_label": true and return the requested label JSON.\n\n'
+        f"{label_prompt}"
     )
-    return _generate_json(
-        model=GEMINI_LABEL_MODEL,
-        instruction=label_prompt,
-        image=prepared,
-        config=LABEL_GENERATION_CONFIG,
-        operation="back-label extraction",
-    )
+
+    for attempt in range(1, GEMINI_JSON_MAX_ATTEMPTS + 1):
+        instruction = base_instruction
+        if attempt > 1:
+            instruction = (
+                f"{base_instruction}\n\n"
+                "Your previous output was incomplete. Return one complete JSON "
+                "object only. Exclude addresses, directions, legal paragraphs "
+                "and marketing copy. Keep ingredient names concise."
+            )
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_LABEL_MODEL,
+                contents=[instruction, *views],
+            )
+            raw = parse_model_json(response.text or "")
+            if raw.get("is_nutrition_label") is False:
+                raise ValueError(
+                    "No readable nutrition table or ingredients list was found."
+                )
+            result = _normalize_label_result(raw)
+            if not _label_contains_evidence(result):
+                raise ValueError(
+                    "The label response contained no printed nutrition or ingredients."
+                )
+            return result
+        except Exception as error:
+            last_error = error
+            logger.warning(
+                "Back-label extraction failed on attempt %d/%d: %s",
+                attempt,
+                GEMINI_JSON_MAX_ATTEMPTS,
+                error,
+            )
+
+    raise ModelJSONResponseError(
+        "The nutrition label could not be read after retries."
+    ) from last_error
 
 
 def _meal_inventory_views(image: Image.Image) -> list[Image.Image]:
@@ -4614,7 +4846,11 @@ def analyze_meal(
                     image_path,
                     prepare_image_for_model(
                         image,
-                        max_edge=MEAL_IMAGE_MAX_EDGE,
+                        # Preserve printed text until routing is complete.
+                        max_edge=max(
+                            MEAL_IMAGE_MAX_EDGE,
+                            LABEL_IMAGE_MAX_EDGE,
+                        ),
                     ),
                 )
             )
@@ -4626,35 +4862,69 @@ def analyze_meal(
                 f"{Path(image_path).name}: {error}"
             ) from error
 
-    # Initial uploads are meal photographs by API contract. Nutrition labels
-    # are uploaded through /analyze/back-label/start, so classifying every meal
-    # photo with a separate Gemini request was pure fixed latency. Each image
-    # now goes directly to the meal extractor.
-    food_images = all_images
-
     all_foods: list[dict[str, Any]] = []
 
     # ---------------------------------------------------------
     # Analyse food photographs
     # ---------------------------------------------------------
 
-    # for _, image in food_images:
-    for image_index, (_, image) in enumerate(
-          food_images,
+    for image_index, (_, classification_image) in enumerate(
+          all_images,
           start=1,
     ):
-        result = _generate_json(
-            model=GEMINI_MEAL_MODEL,
-            instruction=optimized_meal_prompt,
-            image=image,
-            config=MEAL_GENERATION_CONFIG,
-            operation=f"meal image {image_index}",
+        classification = classify_image(client, classification_image)
+        image_type = str(classification.get("type") or "").strip().lower()
+
+        if image_type in {"nutrition_label", "back_label", "label"}:
+            label_result = extract_label(client, classification_image)
+            label_food = create_food_from_label(label_result)
+            label_food["id"] = f"img_{image_index:03d}_food_0001"
+            all_foods.append(label_food)
+            continue
+
+        if image_type == "unknown":
+            # A routing outage must not fail a normal meal. Probe strictly for
+            # printed label evidence; if absent/unreadable, continue as food.
+            try:
+                label_result = extract_label(client, classification_image)
+            except Exception as error:
+                logger.warning(
+                    "Unknown-route label probe failed for image %d; "
+                    "continuing as meal: %s",
+                    image_index,
+                    error,
+                )
+            else:
+                label_food = create_food_from_label(label_result)
+                label_food["id"] = f"img_{image_index:03d}_food_0001"
+                all_foods.append(label_food)
+                continue
+
+        image = prepare_image_for_model(
+            classification_image,
+            max_edge=MEAL_IMAGE_MAX_EDGE,
         )
-        result = _audit_and_correct_complete_food_inventory(
+        result = _generate_plain_meal_json(
             image,
-            result,
             image_index=image_index,
         )
+
+        # This second Gemini pass was the other shared failure point. It is
+        # opt-in and non-fatal; the complete primary result remains usable.
+        if ENABLE_MEAL_INVENTORY_AUDIT:
+            try:
+                result = _audit_and_correct_complete_food_inventory(
+                    image,
+                    result,
+                    image_index=image_index,
+                )
+            except Exception as error:
+                logger.warning(
+                    "Optional inventory audit failed for image %d; using "
+                    "primary detection: %s",
+                    image_index,
+                    error,
+                )
 
         foods = (
             result
