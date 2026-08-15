@@ -9,10 +9,15 @@ class UploadRequest {
   /// Food that requested the back label.
   final String? foodId;
 
+  /// True when the user is uploading a label image directly, with no
+  /// prior meal photo and no existing analysisId.
+  final bool isLabelOnly;
+
   const UploadRequest({
     required this.imagePaths,
     this.userProfile,
     this.analysisId,
     this.foodId,
+    this.isLabelOnly = false,
   });
 }
