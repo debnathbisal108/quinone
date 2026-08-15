@@ -4650,6 +4650,10 @@ def post_process(
         if not isinstance(food, dict):
             continue
         food["name"] = _normalize_core_food_name(food.get("name"))
+        # Photo quantities describe the edible mass visible in the submitted
+        # meal. For a cooked bowl this is prepared/as-served weight, not the
+        # unknown dry ingredient weight used before water absorption.
+        food.setdefault("quantity_basis", "as_served")
         unit = str(food.get("unit", "g")).lower().strip()
         food["unit"] = unit_map.get(unit, unit)
 
