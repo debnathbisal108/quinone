@@ -6,6 +6,7 @@ import '../../../profile/providers/profile_provider.dart';
 import '../../../recipe/models/manual_recipe.dart';
 import '../../providers/upload_provider.dart';
 import '../widgets/analyze_button.dart';
+import '../services/image_picker_service.dart';
 import '../widgets/back_label_request_card.dart';
 import '../widgets/image_grid.dart';
 import '../widgets/upload_progress_card.dart';
@@ -70,6 +71,37 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
         ref.read(profileProvider).backendPayload;
 
     await ref.read(uploadProvider.notifier).upload(
+          userProfile: profilePayload,
+        );
+
+    if (!mounted) {
+      return;
+    }
+
+    _handleUploadResponse();
+  }
+
+  Future<void> _startLabelOnlyAnalysis() async {
+    final uploadState = ref.read(uploadProvider);
+
+    if (uploadState.isUploading) {
+      return;
+    }
+
+    final image =
+        await ImagePickerService.instance.pickBackLabelFromCamera();
+
+    if (image == null || !mounted) {
+      return;
+    }
+
+    _handledResponse = false;
+
+    final profilePayload =
+        ref.read(profileProvider).backendPayload;
+
+    await ref.read(uploadProvider.notifier).uploadLabelOnly(
+          imagePath: image.path,
           userProfile: profilePayload,
         );
 
@@ -494,7 +526,15 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
                   enabled: !uploadState.isUploading,
                   onPressed: _showImageSourceSheet,
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 12),
+                TextButton.icon(
+                  onPressed: uploadState.isUploading
+                      ? null
+                      : _startLabelOnlyAnalysis,
+                  icon: const Icon(Icons.document_scanner_rounded),
+                  label: const Text('Just have the nutrition label?'),
+                ),
+                const SizedBox(height: 8),
 
                 ImageGrid(
                   images: uploadState.images,
