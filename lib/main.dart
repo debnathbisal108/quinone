@@ -11,6 +11,7 @@ import 'core/router/app_router.dart';
 import 'core/theme/app_theme.dart';
 import 'core/theme/theme_mode_provider.dart';
 import 'features/history/repositories/analysis_history_repository.dart';
+import 'features/notifications/services/health_risk_notification_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,12 +19,31 @@ Future<void> main() async {
   await Hive.initFlutter();
   await AppPreferencesRepository.initialize();
   await AnalysisHistoryRepository.initialize();
+  await HealthRiskNotificationService.instance.initialize(
+    onOpen: (destination) {
+      AppRouter.router.go(
+        '/risk-recommendations',
+        extra: <String, dynamic>{
+          'period_days': destination.periodDays,
+          if (destination.asOf != null)
+            'as_of': destination.asOf!.toIso8601String(),
+        },
+      );
+    },
+  );
+
+  await HealthRiskNotificationService.instance.refresh(
+    AnalysisHistoryRepository().getAll(),
+  );
 
   runApp(
     const ProviderScope(
       child: QuinoneApp(),
     ),
   );
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    HealthRiskNotificationService.instance.consumePendingLaunch();
+  });
 
   // Render's free service may be asleep. Wake it while the user is browsing
   // the home screen or choosing a photograph instead of making the analysis
