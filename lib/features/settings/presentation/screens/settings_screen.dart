@@ -2,13 +2,36 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../../core/preferences/app_preferences_repository.dart';
 import '../../../../core/theme/theme_mode_provider.dart';
+import '../../../history/providers/analysis_history_provider.dart';
+import '../../../notifications/services/health_risk_notification_service.dart';
 
-class SettingsScreen extends ConsumerWidget {
+class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+  late bool _notificationsEnabled;
+  late bool _dailyEnabled;
+  late bool _weeklyEnabled;
+  late bool _monthlyEnabled;
+
+  @override
+  void initState() {
+    super.initState();
+    _notificationsEnabled =
+        AppPreferencesRepository.healthRiskNotificationsEnabled;
+    _dailyEnabled = AppPreferencesRepository.dailyRiskNotificationsEnabled;
+    _weeklyEnabled = AppPreferencesRepository.weeklyRiskNotificationsEnabled;
+    _monthlyEnabled = AppPreferencesRepository.monthlyRiskNotificationsEnabled;
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final selectedMode = ref.watch(themeModeProvider);
 
@@ -76,8 +99,112 @@ class SettingsScreen extends ConsumerWidget {
               ],
             ),
           ),
+          const SizedBox(height: 16),
+          Container(
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surfaceContainerLow,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: theme.colorScheme.outlineVariant),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SwitchListTile.adaptive(
+                  value: _notificationsEnabled,
+                  onChanged: _setNotificationsEnabled,
+                  secondary: const Icon(Icons.notifications_active_outlined),
+                  title: const Text('Nutrition pattern alerts'),
+                  subtitle: const Text(
+                    'Private on-device reminders from logged scores and '
+                    'personalized nutrient targets.',
+                  ),
+                ),
+                const Divider(height: 1),
+                SwitchListTile.adaptive(
+                  value: _dailyEnabled,
+                  onChanged: _notificationsEnabled
+                      ? (value) => _setPeriod(1, value)
+                      : null,
+                  title: const Text('Daily follow-up'),
+                  subtitle: const Text('Scheduled for 9:00 AM the next day.'),
+                ),
+                SwitchListTile.adaptive(
+                  value: _weeklyEnabled,
+                  onChanged: _notificationsEnabled
+                      ? (value) => _setPeriod(7, value)
+                      : null,
+                  title: const Text('7-day pattern'),
+                  subtitle: const Text(
+                    'Only after at least 4 logged days show a persistent concern.',
+                  ),
+                ),
+                SwitchListTile.adaptive(
+                  value: _monthlyEnabled,
+                  onChanged: _notificationsEnabled
+                      ? (value) => _setPeriod(30, value)
+                      : null,
+                  title: const Text('30-day pattern'),
+                  subtitle: const Text(
+                    'Only after at least 10 logged days show a persistent concern.',
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(18, 0, 18, 16),
+                  child: Text(
+                    'Alerts describe dietary-support scores—not disease risk. '
+                    'Missing days and nutrients without personalized targets '
+                    'do not count as low.',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
+    );
+  }
+
+  Future<void> _setNotificationsEnabled(bool value) async {
+    setState(() => _notificationsEnabled = value);
+    await AppPreferencesRepository.saveHealthRiskNotificationsEnabled(value);
+    if (!value) {
+      await HealthRiskNotificationService.instance.cancelAllRiskNotifications();
+      return;
+    }
+    final granted =
+        await HealthRiskNotificationService.instance.requestPermission();
+    await HealthRiskNotificationService.instance.refresh(
+      ref.read(analysisHistoryProvider),
+    );
+    if (!granted && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Notifications are blocked by the device. Enable them in system settings.',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _setPeriod(int days, bool value) async {
+    setState(() {
+      if (days == 1) _dailyEnabled = value;
+      if (days == 7) _weeklyEnabled = value;
+      if (days == 30) _monthlyEnabled = value;
+    });
+    if (days == 1) {
+      await AppPreferencesRepository.saveDailyRiskNotificationsEnabled(value);
+    } else if (days == 7) {
+      await AppPreferencesRepository.saveWeeklyRiskNotificationsEnabled(value);
+    } else {
+      await AppPreferencesRepository.saveMonthlyRiskNotificationsEnabled(value);
+    }
+    await HealthRiskNotificationService.instance.refresh(
+      ref.read(analysisHistoryProvider),
     );
   }
 }
