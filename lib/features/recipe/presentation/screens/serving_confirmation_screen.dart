@@ -77,25 +77,18 @@ class _ServingConfirmationScreenState
       return;
     }
 
-    final confirmed = <Map<String, dynamic>>[];
-    for (var i = 0; i < _items.length; i++) {
-      final quantity =
-          double.tryParse(_controllers[i].text.trim());
-      if (quantity == null || quantity <= 0) {
-        _message('Enter a valid amount for every packaged food.');
-        return;
-      }
-      confirmed.add({
-        'food_id': _items[i]['food_id']?.toString() ?? '',
-        'quantity': quantity,
-        'unit': _items[i]['unit']?.toString() ?? 'serving',
-      });
+    if (_confirmedItems() == null) {
+      _message('Enter a valid amount for every packaged food.');
+      return;
     }
 
     if (_guidanceEnabled && _acceptedGuidanceRevision != _revision) {
       final proceed = await _evaluateGuidance(analysisCheckpoint: true);
       if (!proceed || !mounted) return;
     }
+
+    final confirmed = _confirmedItems();
+    if (confirmed == null) return;
 
     setState(() {
       _submitting = true;
@@ -139,6 +132,34 @@ class _ServingConfirmationScreenState
     return confirmed;
   }
 
+  List<DraftGuidanceAdjustableFood> _guidanceAdjustableFoods() {
+    final foods = <DraftGuidanceAdjustableFood>[];
+    for (var i = 0; i < _items.length; i++) {
+      final quantity = double.tryParse(_controllers[i].text.trim());
+      if (quantity == null || quantity <= 0) continue;
+      foods.add(DraftGuidanceAdjustableFood(
+        name: _items[i]['name']?.toString() ?? 'Packaged food',
+        quantity: quantity,
+        unit: _items[i]['unit']?.toString() ?? 'serving',
+      ));
+    }
+    return foods;
+  }
+
+  void _applyGuidanceQuantities(Map<String, double> quantities) {
+    var changed = false;
+    for (var i = 0; i < _items.length; i++) {
+      final name = _items[i]['name']?.toString() ?? 'Packaged food';
+      final quantity = quantities[_guidanceFoodKey(name)];
+      if (quantity == null || quantity <= 0) continue;
+      final current = double.tryParse(_controllers[i].text.trim());
+      if (current != null && (current - quantity).abs() < 0.0001) continue;
+      _controllers[i].text = _format(quantity);
+      changed = true;
+    }
+    if (changed) _revision += 1;
+  }
+
   Future<bool> _evaluateGuidance({
     required bool analysisCheckpoint,
   }) async {
@@ -160,16 +181,22 @@ class _ServingConfirmationScreenState
         _acceptedGuidanceRevision = revision;
         return true;
       }
-      final accepted = await showDraftMealGuidanceSheet(
+      final result = await showDraftMealGuidanceSheet(
         context,
         guidance: guidance,
         analysisCheckpoint: analysisCheckpoint,
-        onSearchSuggestion: (_) => _message(
-          'Use Add recipe to search and add this alternative.',
-        ),
+        adjustableFoods: _guidanceAdjustableFoods(),
       );
-      if (accepted) _acceptedGuidanceRevision = revision;
-      return accepted;
+      if (!mounted) return false;
+      if (result.action == DraftMealGuidanceAction.searchSuggestion) {
+        _applyGuidanceQuantities(result.adjustedQuantities);
+        _message('Use Add recipe to search and add this suggested food.');
+        return false;
+      }
+      if (!result.accepted) return false;
+      _applyGuidanceQuantities(result.adjustedQuantities);
+      _acceptedGuidanceRevision = _revision;
+      return true;
     } catch (_) {
       if (!mounted) return false;
       if (!analysisCheckpoint) {
@@ -305,6 +332,8 @@ class _ServingConfirmationScreenState
     return value.toStringAsFixed(2);
   }
 }
+
+String _guidanceFoodKey(String value) => value.trim().toLowerCase();
 
 class _ServingCard extends StatelessWidget {
   const _ServingCard({
