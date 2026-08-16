@@ -114,7 +114,9 @@ class _DraftMealGuidanceSheet extends StatelessWidget {
                     Expanded(
                       child: OutlinedButton(
                         onPressed: () => Navigator.pop(context, 'review'),
-                        child: const Text('Review meal'),
+                        child: Text(
+                          analysisCheckpoint ? 'Review meal' : 'Back to edit',
+                        ),
                       ),
                     ),
                     const SizedBox(width: 10),
@@ -124,7 +126,7 @@ class _DraftMealGuidanceSheet extends StatelessWidget {
                         child: Text(
                           analysisCheckpoint
                               ? 'Continue & analyze anyway'
-                              : 'Continue anyway',
+                              : 'Dismiss for this draft',
                           textAlign: TextAlign.center,
                         ),
                       ),
@@ -208,7 +210,9 @@ class _NutrientAlertCard extends StatelessWidget {
           if (alert.suggestions.isNotEmpty) ...[
             const SizedBox(height: 10),
             Text(
-              alert.isExcess ? 'Alternatives' : 'Foods to consider',
+              alert.isExcess
+                  ? 'Lower-${alert.label.toLowerCase()} alternatives'
+                  : 'Foods to add (choose one)',
               style: theme.textTheme.labelLarge?.copyWith(
                 fontWeight: FontWeight.w800,
               ),
