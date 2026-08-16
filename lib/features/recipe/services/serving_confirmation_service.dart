@@ -6,6 +6,7 @@ import 'package:dio/dio.dart';
 import '../../../core/api/dio_client.dart';
 import '../../../core/config/api_config.dart';
 import '../../upload/models/analysis_job_progress.dart';
+import '../models/draft_meal_guidance.dart';
 
 class ServingConfirmationService {
   ServingConfirmationService({Dio? dio}) : _dio = dio ?? DioClient.instance;
@@ -72,6 +73,34 @@ class ServingConfirmationService {
 
       await Future<void>.delayed(const Duration(milliseconds: 650));
     }
+  }
+
+  Future<DraftMealGuidance> evaluateGuidance({
+    required String analysisId,
+    required List<Map<String, dynamic>> items,
+    Map<String, dynamic>? profile,
+    int? localHour,
+  }) async {
+    final response = await _dio.post<dynamic>(
+      _absoluteUrl(ApiConfig.draftMealGuidanceEndpoint),
+      data: jsonEncode({
+        'recipe_name': 'Packaged meal',
+        'ingredients': const <Map<String, dynamic>>[],
+        'servings_made': 1.0,
+        'servings_eaten': 1.0,
+        'analysis_id': analysisId,
+        'label_items': items,
+        if (profile != null && profile.isNotEmpty) 'profile': profile,
+        'local_hour': localHour ?? DateTime.now().hour,
+      }),
+      options: Options(
+        responseType: ResponseType.json,
+        contentType: Headers.jsonContentType,
+        headers: const {'Accept': 'application/json'},
+        receiveTimeout: const Duration(seconds: 45),
+      ),
+    );
+    return DraftMealGuidance.fromJson(_asMap(response.data));
   }
 
   Map<String, dynamic> _asMap(dynamic value) {
