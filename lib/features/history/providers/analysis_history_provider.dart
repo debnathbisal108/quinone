@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../notifications/services/health_risk_notification_service.dart';
 import '../models/analysis_history_record.dart';
 import '../repositories/analysis_history_repository.dart';
 
@@ -11,16 +14,34 @@ final analysisHistoryProvider = StateNotifierProvider<
     AnalysisHistoryNotifier, List<AnalysisHistoryRecord>>((ref) {
   return AnalysisHistoryNotifier(
     repository: ref.watch(analysisHistoryRepositoryProvider),
+    onHistoryChanged: (records, {required requestPermission}) {
+      unawaited(
+        HealthRiskNotificationService.instance.refresh(
+          records,
+          requestPermissionIfNeeded: requestPermission,
+        ),
+      );
+    },
   );
+});
+
+typedef AnalysisHistoryChanged = void Function(
+  List<AnalysisHistoryRecord> records, {
+  required bool requestPermission,
 });
 
 class AnalysisHistoryNotifier
     extends StateNotifier<List<AnalysisHistoryRecord>> {
-  AnalysisHistoryNotifier({required AnalysisHistoryRepository repository})
+  AnalysisHistoryNotifier({
+    required AnalysisHistoryRepository repository,
+    AnalysisHistoryChanged? onHistoryChanged,
+  })
       : _repository = repository,
+        _onHistoryChanged = onHistoryChanged,
         super(repository.getAll());
 
   final AnalysisHistoryRepository _repository;
+  final AnalysisHistoryChanged? _onHistoryChanged;
 
   Future<void> saveResult(Map<String, dynamic> result) async {
     final status = result['status']?.toString().toLowerCase();
@@ -30,17 +51,23 @@ class AnalysisHistoryNotifier
     final record = AnalysisHistoryRecord.fromAnalysisJson(result);
     await _repository.save(record);
     state = _repository.getAll();
+    _onHistoryChanged?.call(state, requestPermission: true);
   }
 
   Future<void> delete(String analysisId) async {
     await _repository.delete(analysisId);
     state = _repository.getAll();
+    _onHistoryChanged?.call(state, requestPermission: false);
   }
 
   Future<void> clear() async {
     await _repository.clear();
     state = const [];
+    _onHistoryChanged?.call(state, requestPermission: false);
   }
 
-  void refresh() => state = _repository.getAll();
+  void refresh() {
+    state = _repository.getAll();
+    _onHistoryChanged?.call(state, requestPermission: false);
+  }
 }
