@@ -3,9 +3,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../history/providers/analysis_history_provider.dart';
+import '../../../profile/providers/profile_provider.dart';
 
 import '../../../upload/models/analysis_job_progress.dart';
+import '../../models/draft_meal_guidance.dart';
 import '../../services/serving_confirmation_service.dart';
+import '../widgets/draft_meal_guidance_sheet.dart';
 
 class ServingConfirmationScreen extends ConsumerStatefulWidget {
   const ServingConfirmationScreen({
@@ -26,6 +29,10 @@ class _ServingConfirmationScreenState
   final List<TextEditingController> _controllers = [];
   late final List<Map<String, dynamic>> _items;
   bool _submitting = false;
+  bool _guidanceEnabled = true;
+  bool _checkingGuidance = false;
+  int _revision = 0;
+  int _acceptedGuidanceRevision = -1;
   AnalysisJobProgress? _progress;
 
   @override
@@ -45,6 +52,11 @@ class _ServingConfirmationScreenState
         TextEditingController(text: _format(value)),
       );
     }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _items.isNotEmpty) {
+        _evaluateGuidance(analysisCheckpoint: false);
+      }
+    });
   }
 
   @override
@@ -56,7 +68,7 @@ class _ServingConfirmationScreenState
   }
 
   Future<void> _confirm() async {
-    if (_submitting) return;
+    if (_submitting || _checkingGuidance) return;
 
     final analysisId =
         widget.payload['analysis_id']?.toString().trim() ?? '';
@@ -78,6 +90,11 @@ class _ServingConfirmationScreenState
         'quantity': quantity,
         'unit': _items[i]['unit']?.toString() ?? 'serving',
       });
+    }
+
+    if (_guidanceEnabled && _acceptedGuidanceRevision != _revision) {
+      final proceed = await _evaluateGuidance(analysisCheckpoint: true);
+      if (!proceed || !mounted) return;
     }
 
     setState(() {
@@ -105,6 +122,84 @@ class _ServingConfirmationScreenState
       );
     } finally {
       if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  List<Map<String, dynamic>>? _confirmedItems() {
+    final confirmed = <Map<String, dynamic>>[];
+    for (var i = 0; i < _items.length; i++) {
+      final quantity = double.tryParse(_controllers[i].text.trim());
+      if (quantity == null || quantity <= 0) return null;
+      confirmed.add({
+        'food_id': _items[i]['food_id']?.toString() ?? '',
+        'quantity': quantity,
+        'unit': _items[i]['unit']?.toString() ?? 'serving',
+      });
+    }
+    return confirmed;
+  }
+
+  Future<bool> _evaluateGuidance({
+    required bool analysisCheckpoint,
+  }) async {
+    if (!_guidanceEnabled) return true;
+    final analysisId = widget.payload['analysis_id']?.toString().trim() ?? '';
+    final items = _confirmedItems();
+    if (analysisId.isEmpty || items == null || _checkingGuidance) return false;
+    final revision = _revision;
+    setState(() => _checkingGuidance = true);
+    try {
+      final DraftMealGuidance guidance = await _service.evaluateGuidance(
+        analysisId: analysisId,
+        items: items,
+        profile: ref.read(profileProvider).backendPayload,
+        localHour: DateTime.now().hour,
+      );
+      if (!mounted || revision != _revision) return false;
+      if (!guidance.hasAlerts) {
+        _acceptedGuidanceRevision = revision;
+        if (!analysisCheckpoint) _message(guidance.message);
+        return true;
+      }
+      final accepted = await showDraftMealGuidanceSheet(
+        context,
+        guidance: guidance,
+        analysisCheckpoint: analysisCheckpoint,
+        onSearchSuggestion: (_) => _message(
+          'Use Add recipe to search and add this alternative.',
+        ),
+      );
+      if (accepted) _acceptedGuidanceRevision = revision;
+      return accepted;
+    } catch (_) {
+      if (!mounted) return false;
+      if (!analysisCheckpoint) {
+        _message('Meal guidance is unavailable right now. You can continue.');
+        return true;
+      }
+      return await showDialog<bool>(
+            context: context,
+            builder: (dialogContext) => AlertDialog(
+              title: const Text('Guidance unavailable'),
+              content: const Text(
+                'The optional nutrient check could not be loaded. '
+                'You can still continue with the normal analysis.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, false),
+                  child: const Text('Go back'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(dialogContext, true),
+                  child: const Text('Continue anyway'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+    } finally {
+      if (mounted) setState(() => _checkingGuidance = false);
     }
   }
 
@@ -138,9 +233,28 @@ class _ServingConfirmationScreenState
               child: _ServingCard(
                 item: _items[index],
                 controller: _controllers[index],
+                onChanged: () => _revision += 1,
               ),
             ),
           ),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            value: _guidanceEnabled,
+            onChanged: _submitting || _checkingGuidance
+                ? null
+                : (value) => setState(() => _guidanceEnabled = value),
+            title: const Text('Optional nutrient guidance'),
+            subtitle: const Text(
+              'Check nutrient excesses or shortfalls before analysis. You can continue anyway.',
+            ),
+            secondary: const Icon(Icons.balance_outlined),
+          ),
+          if (_checkingGuidance) ...[
+            const SizedBox(height: 8),
+            const LinearProgressIndicator(),
+            const SizedBox(height: 8),
+            const Text('Checking this serving’s nutrient balance…'),
+          ],
           if (_progress != null) ...[
             const SizedBox(height: 8),
             LinearProgressIndicator(
@@ -159,8 +273,8 @@ class _ServingConfirmationScreenState
       bottomNavigationBar: SafeArea(
         minimum: const EdgeInsets.fromLTRB(20, 10, 20, 18),
         child: FilledButton.icon(
-          onPressed: _submitting ? null : _confirm,
-          icon: _submitting
+          onPressed: _submitting || _checkingGuidance ? null : _confirm,
+          icon: _submitting || _checkingGuidance
               ? const SizedBox(
                   width: 18,
                   height: 18,
@@ -168,7 +282,11 @@ class _ServingConfirmationScreenState
                 )
               : const Icon(Icons.check_circle_outline_rounded),
           label: Text(
-            _submitting ? 'Analyzing…' : 'Confirm & analyze',
+            _checkingGuidance
+                ? 'Checking…'
+                : _submitting
+                    ? 'Analyzing…'
+                    : 'Confirm & analyze',
           ),
         ),
       ),
@@ -193,10 +311,12 @@ class _ServingCard extends StatelessWidget {
   const _ServingCard({
     required this.item,
     required this.controller,
+    required this.onChanged,
   });
 
   final Map<String, dynamic> item;
   final TextEditingController controller;
+  final VoidCallback onChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -248,6 +368,7 @@ class _ServingCard extends StatelessWidget {
           const SizedBox(height: 16),
           TextField(
             controller: controller,
+            onChanged: (_) => onChanged(),
             keyboardType:
                 const TextInputType.numberWithOptions(decimal: true),
             decoration: InputDecoration(
