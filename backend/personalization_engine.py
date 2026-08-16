@@ -522,6 +522,7 @@ def normalize_user_profile(
         "goal",
         "activity_level",
         "diet_type",
+        "diet_pattern",
         "smoking_status",
         "ckd_stage",
         "dialysis_modality",
@@ -617,6 +618,22 @@ def normalize_user_profile(
     normalized["allergies"] = list(
         dict.fromkeys(allergies)
     )
+
+    for field_name in (
+        "intolerances",
+        "food_intolerances",
+        "excluded_foods",
+        "disliked_foods",
+    ):
+        raw_values = profile.get(field_name)
+        if not isinstance(raw_values, (list, tuple, set)):
+            continue
+        cleaned_values = [
+            cleaned
+            for value in raw_values
+            if (cleaned := clean_text(value))
+        ]
+        normalized[field_name] = list(dict.fromkeys(cleaned_values))
 
     for field_name in (
         "pregnant",
