@@ -849,6 +849,37 @@ def build_evidence(
     }
 
 
+def _directional_rule_name(
+    rule: Rule,
+    feature_value: Any,
+    direction: str,
+) -> str:
+    """Describe whether the observed protein signal is low, supportive or high.
+
+    ``Protein adequacy`` is ambiguous in the UI because the same feature can
+    fire below an adequacy threshold, provide a protective signal above it,
+    or represent renal protein load. The evidence calculation is unchanged;
+    only its user-facing label becomes explicit.
+    """
+    if rule.feature != "protein_density":
+        return _smart_title_case(rule.display_name)
+
+    if rule.curve == CurveType.U_SHAPED:
+        try:
+            below_low = float(feature_value) < float(
+                rule.curve_params.get("low_threshold", 0.0)
+            )
+        except (TypeError, ValueError):
+            below_low = False
+        return "Low Protein" if below_low else "Adequate Protein"
+
+    if direction == "negative":
+        return "High Protein Load"
+    if direction == "positive":
+        return "Protein Support"
+    return "Protein Level"
+
+
 # =========================================================================
 # DOMAIN RULE DATABASES
 # =========================================================================
@@ -3186,6 +3217,12 @@ def process_feature(
                 evidence["direction"] = "negative" if evidence["direction"] == "positive" else "positive"
                 evidence["evidence_type"] = _EVIDENCE_TYPE_BY_DIRECTION[evidence["direction"]]
                 evidence["raw_effect"] = -abs(evidence["effective_weight"]) if evidence["direction"] == "negative" else abs(evidence["effective_weight"])
+
+        evidence["rule_name"] = _directional_rule_name(
+            rule,
+            value,
+            str(evidence.get("direction") or "neutral"),
+        )
 
         if applicable_modifiers:
             combined_multiplier = 1.0
