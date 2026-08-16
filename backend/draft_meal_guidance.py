@@ -21,7 +21,7 @@ from recommendation_engine import (
 )
 
 
-GUIDANCE_ENGINE_VERSION = "1.0.0"
+GUIDANCE_ENGINE_VERSION = "1.1.0"
 
 _LABELS: dict[str, tuple[str, str]] = {
     "energy_kcal": ("Energy", "kcal"),
@@ -113,6 +113,19 @@ def _target_high(target: dict[str, Any]) -> float | None:
     return None
 
 
+def _actual_upper_target(target: dict[str, Any]) -> float | None:
+    """Return a real daily upper edge, never a minimum mislabeled as a cap."""
+    range_high = _number(target.get("range_high"))
+    if range_high is not None and range_high > 0:
+        return range_high
+    if str(target.get("target_type") or "").lower() == "maximum":
+        for key in ("upper_limit", "resolved_value", "baseline_value"):
+            value = _number(target.get(key))
+            if value is not None and value > 0:
+                return value
+    return None
+
+
 def _meal_fraction(meal_name: str) -> float:
     lowered = meal_name.lower()
     if any(token in lowered for token in ("snack", "dessert", "drink")):
@@ -139,6 +152,51 @@ def _contributors(
     ]
 
 
+def _replacement_groups(name: str, category: str = "") -> set[str]:
+    identity = f"{name} {category}".lower()
+    groups: set[str] = set()
+    if any(token in identity for token in (
+        "paneer", "cheese", "yogurt", "curd", "milk", "dairy",
+    )):
+        groups.update(("protein", "dairy"))
+    if any(token in identity for token in (
+        "tofu", "lentil", "chickpea", "bean", "egg", "chicken", "fish",
+        "salmon", "meat", "paneer", "cheese", "yogurt", "protein",
+    )):
+        groups.add("protein")
+    if any(token in identity for token in (
+        "rice", "oat", "bread", "roti", "pasta", "noodle", "potato",
+        "grain", "cereal", "starch",
+    )):
+        groups.add("starch")
+    if any(token in identity for token in ("oil", "ghee", "butter", "fat")):
+        groups.add("fat")
+    if any(token in identity for token in (
+        "vegetable", "spinach", "broccoli", "carrot", "pea", "fruit",
+        "berry", "orange",
+    )):
+        groups.add("produce")
+    return groups
+
+
+def _primary_contributor_food(
+    foods: list[dict[str, Any]],
+    nutrient_key: str,
+) -> dict[str, Any] | None:
+    contributors = [
+        food for food in foods
+        if (_number((food.get("nutrients") or {}).get(nutrient_key)) or 0.0) > 0
+    ]
+    if not contributors:
+        return None
+    return max(
+        contributors,
+        key=lambda food: _number(
+            (food.get("nutrients") or {}).get(nutrient_key)
+        ) or 0.0,
+    )
+
+
 def _suggestions(
     *,
     nutrient_key: str,
@@ -149,6 +207,33 @@ def _suggestions(
     local_hour: int,
 ) -> list[dict[str, Any]]:
     ranked: list[tuple[float, dict[str, Any]]] = []
+    contributor = (
+        _primary_contributor_food(foods, nutrient_key)
+        if direction == "excess"
+        else None
+    )
+    contributor_name = str(
+        (contributor or {}).get("display_name")
+        or (contributor or {}).get("name")
+        or ""
+    )
+    contributor_groups = _replacement_groups(
+        contributor_name,
+        str((contributor or {}).get("category") or ""),
+    )
+    contributor_quantity = _number(
+        (contributor or {}).get("estimated_weight_g")
+        or (contributor or {}).get("quantity")
+    ) or 0.0
+    contributor_amount = _number(
+        ((contributor or {}).get("nutrients") or {}).get(nutrient_key)
+    ) or 0.0
+    contributor_per100 = (
+        contributor_amount * 100.0 / contributor_quantity
+        if contributor_quantity > 0
+        else None
+    )
+
     for candidate in FOOD_RECOMMENDATION_CATALOG:
         if _candidate_already_present(candidate, foods):
             continue
@@ -164,10 +249,21 @@ def _suggestions(
         energy = _number((candidate.get("nutrients") or {}).get("energy_kcal")) or 1.0
         rank = amount / max(energy * serving / 100.0, 1.0)
         if direction == "excess":
-            rank = -amount
+            candidate_groups = _replacement_groups(
+                str(candidate.get("name") or "")
+            )
+            # An alternative must replace the same meal role. This prevents
+            # fruit/leafy-vegetable suggestions for a high-fat paneer or meat
+            # component merely because those foods contain little fat.
+            if not contributor_groups or not (candidate_groups & contributor_groups):
+                continue
+            if contributor_per100 is None or per100 >= contributor_per100 * 0.75:
+                continue
+            reduction = contributor_per100 - per100
+            rank = reduction
         ranked.append((rank, candidate))
     ranked.sort(key=lambda row: row[0], reverse=True)
-    verb = "Add" if direction == "low" else "Consider instead"
+    verb = "Add" if direction == "low" else f"Replace or reduce {contributor_name} and consider"
     return [
         {
             "type": "add" if direction == "low" else "alternative",
@@ -228,36 +324,75 @@ def build_draft_meal_guidance(
             "suggestions": [],
         })
 
-    # Macronutrients use a meal allocation, not a medical daily upper limit.
-    # This detects a draft that is very large for the stated meal context
-    # without claiming that a high-protein meal is inherently unsafe.
+    # Macronutrients are checked against both the meal allocation and a real
+    # personalized daily range edge. The range edge is used only when the
+    # target engine actually supplies one; a minimum/RDA is never converted
+    # into a fabricated upper limit.
     for key in _MACROS:
         if key not in reported or key in clinical_keys:
             continue
         target = targets.get(key) if isinstance(targets, dict) else None
         if not isinstance(target, dict):
             continue
-        daily_high = _target_high(target)
-        if daily_high is None:
+        allocation_high = _target_high(target)
+        if allocation_high is None:
             continue
-        expected_high = daily_high * fraction
+        actual_daily_high = _actual_upper_target(target)
+        expected_high = allocation_high * fraction
         amount = max(0.0, totals.get(key, 0.0))
-        ratio = amount / expected_high if expected_high > 0 else 0.0
-        if ratio < 1.60:
+        daily_ratio = (
+            amount / actual_daily_high
+            if actual_daily_high is not None and actual_daily_high > 0
+            else 0.0
+        )
+        daily_reference_ratio = amount / allocation_high
+        meal_ratio = amount / expected_high if expected_high > 0 else 0.0
+        above_protein_target = (
+            key == "protein_g"
+            and actual_daily_high is None
+            and daily_reference_ratio >= 1.0
+        )
+        if (
+            daily_ratio < 1.0
+            and not above_protein_target
+            and meal_ratio < 1.60
+        ):
             continue
         label, unit = _LABELS.get(key, (key.replace("_", " ").title(), ""))
+        exceeds_daily = daily_ratio >= 1.0
         alerts.append({
             "direction": "excess",
-            "severity": "warning",
+            "severity": "critical" if exceeds_daily else "warning",
             "nutrient": key,
             "label": label,
             "amount": round(amount, 2),
             "unit": unit,
-            "reference": round(expected_high, 2),
-            "percentage": round(ratio * 100.0, 1),
+            "reference": round(
+                actual_daily_high
+                if exceeds_daily
+                else allocation_high
+                if above_protein_target
+                else expected_high,
+                2,
+            ),
+            "percentage": round(
+                (
+                    daily_ratio
+                    if exceeds_daily
+                    else daily_reference_ratio
+                    if above_protein_target
+                    else meal_ratio
+                ) * 100.0,
+                1,
+            ),
             "message": (
-                f"{label} is well above this meal's estimated share of the personalized daily range; "
-                "this meal reference is not a medical upper limit."
+                f"This draft exceeds your personalized daily upper target for {label.lower()}."
+                if exceeds_daily
+                else f"This draft is above your personalized daily {label.lower()} target; "
+                "that target is an intake reference, not a medical safety limit."
+                if above_protein_target
+                else f"{label} is well above this meal's estimated share of the personalized daily range; "
+                "the meal share is guidance, not a medical upper limit."
             ),
             "contributors": _contributors(foods, key),
             "suggestions": _suggestions(
