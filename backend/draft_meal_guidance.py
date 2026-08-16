@@ -22,7 +22,7 @@ from recommendation_engine import (
 )
 
 
-GUIDANCE_ENGINE_VERSION = "1.2.0"
+GUIDANCE_ENGINE_VERSION = "1.3.0"
 
 _LABELS: dict[str, tuple[str, str]] = {
     "energy_kcal": ("Energy", "kcal"),
@@ -50,7 +50,8 @@ _LABELS: dict[str, tuple[str, str]] = {
     "vitamin_b12_ug": ("Vitamin B12", "µg"),
 }
 
-_MACROS = {"energy_kcal", "protein_g", "carbohydrate_g", "fat_g", "fiber_g"}
+_MACRO_KEYS = ("energy_kcal", "protein_g", "carbohydrate_g", "fat_g", "fiber_g")
+_MACROS = set(_MACRO_KEYS)
 _SHORTFALL_KEYS = (
     "energy_kcal", "protein_g", "carbohydrate_g", "fat_g", "fiber_g",
     "calcium_mg", "iron_mg", "magnesium_mg",
@@ -72,6 +73,13 @@ _NUTRIENT_KEY_ALIASES: dict[str, str] = {
         *(compatibility.get("accepted_input_keys") or []),
     )
 }
+_NUTRIENT_KEY_ALIASES.update({
+    "total_protein_g": "protein_g",
+    "proteins_g": "protein_g",
+    "total_lipid_g": "fat_g",
+    "total_lipid_fat_g": "fat_g",
+    "total_carbohydrates_g": "carbohydrate_g",
+})
 
 
 def _number(value: Any) -> float | None:
@@ -109,20 +117,58 @@ def _nutrient_value(
     return None
 
 
+def _food_nutrient_map(food: dict[str, Any]) -> dict[str, float]:
+    """Build one canonical nutrient map without double-counting sources."""
+    sources: list[dict[str, Any]] = []
+    nutrition = food.get("nutrition")
+    features = food.get("features")
+    for candidate in (
+        food.get("nutrients"),
+        food.get("macronutrients"),
+        nutrition.get("macronutrients") if isinstance(nutrition, dict) else None,
+        features.get("macronutrients") if isinstance(features, dict) else None,
+        features.get("fat_profile") if isinstance(features, dict) else None,
+    ):
+        if isinstance(candidate, dict):
+            sources.append(candidate)
+
+    canonical: dict[str, float] = {}
+    for source in sources:
+        for raw_key, raw_value in source.items():
+            key = _canonical_nutrient_key(raw_key)
+            value = _number(raw_value)
+            if value is not None and key not in canonical:
+                canonical[key] = value
+
+    # Total fat can never be lower than its reported fat components. Recover a
+    # conservative total when USDA/label data contains subtypes but omits or
+    # understates total fat, so the macro warning cannot silently disappear.
+    non_trans_components = [
+        max(0.0, canonical[key])
+        for key in (
+            "saturated_fat_g",
+            "monounsaturated_fat_g",
+            "polyunsaturated_fat_g",
+        )
+        if key in canonical
+    ]
+    trans_fat = max(0.0, canonical.get("trans_fat_g", 0.0))
+    if non_trans_components or trans_fat > 0:
+        canonical["fat_g"] = max(
+            max(0.0, canonical.get("fat_g", 0.0)),
+            sum(non_trans_components),
+            trans_fat,
+        )
+    return canonical
+
+
 def _nutrient_totals(
     foods: Iterable[dict[str, Any]],
 ) -> tuple[dict[str, float], set[str]]:
     totals: dict[str, float] = {}
     reported: set[str] = set()
     for food in foods:
-        nutrients = food.get("nutrients")
-        if not isinstance(nutrients, dict):
-            continue
-        for key, raw in nutrients.items():
-            value = _number(raw)
-            if value is None:
-                continue
-            canonical_key = _canonical_nutrient_key(key)
+        for canonical_key, value in _food_nutrient_map(food).items():
             reported.add(canonical_key)
             totals[canonical_key] = totals.get(canonical_key, 0.0) + value
     return ({key: round(value, 4) for key, value in totals.items()}, reported)
@@ -171,7 +217,7 @@ def _contributors(
 ) -> list[dict[str, Any]]:
     rows: list[tuple[float, str]] = []
     for food in foods:
-        value = _nutrient_value(food.get("nutrients") or {}, nutrient_key) or 0.0
+        value = _food_nutrient_map(food).get(nutrient_key, 0.0)
         if value <= 0:
             continue
         name = str(food.get("display_name") or food.get("name") or "Food")
@@ -216,15 +262,13 @@ def _primary_contributor_food(
 ) -> dict[str, Any] | None:
     contributors = [
         food for food in foods
-        if (_nutrient_value(food.get("nutrients") or {}, nutrient_key) or 0.0) > 0
+        if _food_nutrient_map(food).get(nutrient_key, 0.0) > 0
     ]
     if not contributors:
         return None
     return max(
         contributors,
-        key=lambda food: _nutrient_value(
-            food.get("nutrients") or {}, nutrient_key
-        ) or 0.0,
+        key=lambda food: _food_nutrient_map(food).get(nutrient_key, 0.0),
     )
 
 
@@ -256,9 +300,10 @@ def _suggestions(
         (contributor or {}).get("estimated_weight_g")
         or (contributor or {}).get("quantity")
     ) or 0.0
-    contributor_amount = _nutrient_value(
-        (contributor or {}).get("nutrients") or {}, nutrient_key
-    ) or 0.0
+    contributor_amount = _food_nutrient_map(contributor or {}).get(
+        nutrient_key,
+        0.0,
+    )
     contributor_per100 = (
         contributor_amount * 100.0 / contributor_quantity
         if contributor_quantity > 0
@@ -359,7 +404,7 @@ def build_draft_meal_guidance(
     # personalized daily range edge. The range edge is used only when the
     # target engine actually supplies one; a minimum/RDA is never converted
     # into a fabricated upper limit.
-    for key in _MACROS:
+    for key in _MACRO_KEYS:
         if key not in reported or key in clinical_keys:
             continue
         target = targets.get(key) if isinstance(targets, dict) else None
@@ -594,7 +639,17 @@ def build_draft_meal_guidance(
     alerts.extend(selected_shortfalls)
 
     severity_order = {"critical": 0, "warning": 1, "notice": 2}
-    alerts.sort(key=lambda item: severity_order.get(str(item.get("severity")), 9))
+    # Macro excesses must be visible before micronutrient cards in the sheet.
+    alerts.sort(key=lambda item: (
+        0
+        if item.get("direction") == "excess"
+        and item.get("nutrient") in _MACROS
+        else 1,
+        severity_order.get(str(item.get("severity")), 9),
+        _MACRO_KEYS.index(str(item.get("nutrient")))
+        if item.get("nutrient") in _MACROS
+        else len(_MACRO_KEYS),
+    ))
     return {
         "status": "completed",
         "engine_version": GUIDANCE_ENGINE_VERSION,
