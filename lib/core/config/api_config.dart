@@ -39,6 +39,9 @@ class ApiConfig {
   static const String postAnalysisRecommendationEndpoint =
       "/recommendations/after-analysis";
 
+  static const String postAnalysisRecommendationApplyEndpoint =
+      "/recommendations/apply";
+
   static String analysisJobEndpoint(String jobId) =>
       "/analyze/jobs/$jobId";
 
