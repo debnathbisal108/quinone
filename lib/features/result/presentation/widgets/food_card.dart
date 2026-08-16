@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 import '../../models/analysis_result.dart';
-// import 'package:flutter/material.dart';
-// import 'package:quinone/features/result/models/analysis_result.dart';
 
 class FoodCard extends StatelessWidget {
   const FoodCard({super.key, required this.food});
@@ -24,15 +22,6 @@ class FoodCard extends StatelessWidget {
           Text(food.name, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700)),
           const SizedBox(height: 4),
           Text(_details(), style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-          if (_sourceDetails().isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(
-              _sourceDetails(),
-              style: theme.textTheme.labelSmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ],
         ])),
       ]),
     );
@@ -44,23 +33,5 @@ class FoodCard extends StatelessWidget {
     if (food.calories > 0) parts.add('${food.calories.round()} kcal');
     if (food.protein > 0) parts.add('${food.protein.toStringAsFixed(1)} g protein');
     return parts.isEmpty ? 'Detected in this meal' : parts.join(' • ');
-  }
-
-  String _sourceDetails() {
-    final parts = <String>[];
-    final preparation = food.preparation?.trim();
-    if (preparation != null &&
-        preparation.isNotEmpty &&
-        preparation.toLowerCase() != 'unknown') {
-      parts.add(preparation);
-    }
-    if (food.quantityBasis == 'as_served') parts.add('as-served weight');
-    final match = food.usdaMatch?.trim();
-    if (match != null &&
-        match.isNotEmpty &&
-        match.toLowerCase() != food.name.trim().toLowerCase()) {
-      parts.add(match);
-    }
-    return parts.join(' • ');
   }
 }
