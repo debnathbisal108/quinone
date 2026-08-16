@@ -26,6 +26,7 @@ class RecommendationService {
     Map<String, dynamic>? profile,
     int? localHour,
     int maximumResults = 5,
+    List<String> preferredDomainKeys = const [],
   }) async {
     final payload = {
       'current_result': currentResult,
@@ -33,6 +34,8 @@ class RecommendationService {
       if (profile != null && profile.isNotEmpty) 'profile': profile,
       'local_hour': localHour ?? DateTime.now().hour,
       'maximum_results': maximumResults,
+      if (preferredDomainKeys.isNotEmpty)
+        'preferred_domain_keys': preferredDomainKeys,
     };
 
     try {
