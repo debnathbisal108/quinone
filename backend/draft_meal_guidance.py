@@ -12,6 +12,7 @@ import math
 from typing import Any, Iterable
 
 from nutrient_target_engine import calculate_nutrient_targets
+from nutrient_target_data import CANONICAL_KEY_COMPATIBILITY
 from personalization_engine import normalize_user_profile
 from recommendation_catalog import FOOD_RECOMMENDATION_CATALOG
 from recommendation_engine import (
@@ -21,7 +22,7 @@ from recommendation_engine import (
 )
 
 
-GUIDANCE_ENGINE_VERSION = "1.1.0"
+GUIDANCE_ENGINE_VERSION = "1.2.0"
 
 _LABELS: dict[str, tuple[str, str]] = {
     "energy_kcal": ("Energy", "kcal"),
@@ -63,6 +64,15 @@ _HARD_DAILY_CAPS = {
     "trans_fat_g": 2.0,
 }
 
+_NUTRIENT_KEY_ALIASES: dict[str, str] = {
+    alias.lower(): canonical
+    for canonical, compatibility in CANONICAL_KEY_COMPATIBILITY.items()
+    for alias in (
+        canonical,
+        *(compatibility.get("accepted_input_keys") or []),
+    )
+}
+
 
 def _number(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
@@ -79,6 +89,26 @@ def _foods(result: dict[str, Any]) -> list[dict[str, Any]]:
     return [food for food in raw if isinstance(food, dict)] if isinstance(raw, list) else []
 
 
+def _canonical_nutrient_key(value: Any) -> str:
+    key = str(value or "").strip().lower()
+    return _NUTRIENT_KEY_ALIASES.get(key, key)
+
+
+def _nutrient_value(
+    nutrients: dict[str, Any],
+    nutrient_key: str,
+) -> float | None:
+    direct = _number(nutrients.get(nutrient_key))
+    if direct is not None:
+        return direct
+    for raw_key, raw_value in nutrients.items():
+        if _canonical_nutrient_key(raw_key) == nutrient_key:
+            value = _number(raw_value)
+            if value is not None:
+                return value
+    return None
+
+
 def _nutrient_totals(
     foods: Iterable[dict[str, Any]],
 ) -> tuple[dict[str, float], set[str]]:
@@ -92,8 +122,9 @@ def _nutrient_totals(
             value = _number(raw)
             if value is None:
                 continue
-            reported.add(str(key))
-            totals[str(key)] = totals.get(str(key), 0.0) + value
+            canonical_key = _canonical_nutrient_key(key)
+            reported.add(canonical_key)
+            totals[canonical_key] = totals.get(canonical_key, 0.0) + value
     return ({key: round(value, 4) for key, value in totals.items()}, reported)
 
 
@@ -140,7 +171,7 @@ def _contributors(
 ) -> list[dict[str, Any]]:
     rows: list[tuple[float, str]] = []
     for food in foods:
-        value = _number((food.get("nutrients") or {}).get(nutrient_key)) or 0.0
+        value = _nutrient_value(food.get("nutrients") or {}, nutrient_key) or 0.0
         if value <= 0:
             continue
         name = str(food.get("display_name") or food.get("name") or "Food")
@@ -185,14 +216,14 @@ def _primary_contributor_food(
 ) -> dict[str, Any] | None:
     contributors = [
         food for food in foods
-        if (_number((food.get("nutrients") or {}).get(nutrient_key)) or 0.0) > 0
+        if (_nutrient_value(food.get("nutrients") or {}, nutrient_key) or 0.0) > 0
     ]
     if not contributors:
         return None
     return max(
         contributors,
-        key=lambda food: _number(
-            (food.get("nutrients") or {}).get(nutrient_key)
+        key=lambda food: _nutrient_value(
+            food.get("nutrients") or {}, nutrient_key
         ) or 0.0,
     )
 
@@ -225,8 +256,8 @@ def _suggestions(
         (contributor or {}).get("estimated_weight_g")
         or (contributor or {}).get("quantity")
     ) or 0.0
-    contributor_amount = _number(
-        ((contributor or {}).get("nutrients") or {}).get(nutrient_key)
+    contributor_amount = _nutrient_value(
+        (contributor or {}).get("nutrients") or {}, nutrient_key
     ) or 0.0
     contributor_per100 = (
         contributor_amount * 100.0 / contributor_quantity
@@ -433,6 +464,60 @@ def build_draft_meal_guidance(
                 f"This draft exceeds the personalized daily limit for {label.lower()}."
                 if ratio >= 1.0
                 else f"This one meal already uses {ratio * 100:.0f}% of the daily {label.lower()} limit."
+            ),
+            "contributors": _contributors(foods, key),
+            "suggestions": _suggestions(
+                nutrient_key=key,
+                direction="excess",
+                profile=normalized_profile,
+                draft_result=nutrient_result,
+                foods=foods,
+                local_hour=local_hour,
+            ),
+        })
+
+    # Surface every reported nutrient that has crossed its personalized daily
+    # target, even when that target is an adequacy reference rather than a
+    # toxicological upper limit. Explicit UL/cap alerts above take precedence,
+    # so the same nutrient is never shown twice.
+    existing_excess = {
+        str(item.get("nutrient") or "")
+        for item in alerts
+        if item.get("direction") == "excess"
+    }
+    for key in sorted(reported):
+        if key in existing_excess or key in clinical_keys:
+            continue
+        target = targets.get(key) if isinstance(targets, dict) else None
+        if not isinstance(target, dict):
+            continue
+        daily_reference = _target_high(target)
+        if daily_reference is None or daily_reference <= 0:
+            continue
+        amount = max(0.0, totals.get(key, 0.0))
+        ratio = amount / daily_reference
+        if ratio < 1.0:
+            continue
+        target_unit = str(target.get("resolved_unit") or "").split("/", 1)[0]
+        label, unit = _LABELS.get(
+            key,
+            (
+                str(target.get("nutrient_name") or key.replace("_", " ").title()),
+                target_unit,
+            ),
+        )
+        alerts.append({
+            "direction": "excess",
+            "severity": "warning",
+            "nutrient": key,
+            "label": label,
+            "amount": round(amount, 2),
+            "unit": unit,
+            "reference": round(daily_reference, 2),
+            "percentage": round(ratio * 100.0, 1),
+            "message": (
+                f"This draft is above your personalized daily {label.lower()} target. "
+                "This target is an intake reference, not necessarily a medical safety limit."
             ),
             "contributors": _contributors(foods, key),
             "suggestions": _suggestions(
