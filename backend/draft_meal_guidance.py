@@ -12,7 +12,6 @@ import math
 from typing import Any, Iterable
 
 from nutrient_target_engine import calculate_nutrient_targets
-from nutrient_target_data import CANONICAL_KEY_COMPATIBILITY
 from personalization_engine import normalize_user_profile
 from recommendation_catalog import FOOD_RECOMMENDATION_CATALOG
 from recommendation_engine import (
@@ -22,7 +21,7 @@ from recommendation_engine import (
 )
 
 
-GUIDANCE_ENGINE_VERSION = "1.3.0"
+GUIDANCE_ENGINE_VERSION = "1.2.0"
 
 _LABELS: dict[str, tuple[str, str]] = {
     "energy_kcal": ("Energy", "kcal"),
@@ -50,8 +49,7 @@ _LABELS: dict[str, tuple[str, str]] = {
     "vitamin_b12_ug": ("Vitamin B12", "µg"),
 }
 
-_MACRO_KEYS = ("energy_kcal", "protein_g", "carbohydrate_g", "fat_g", "fiber_g")
-_MACROS = set(_MACRO_KEYS)
+_MACROS = {"energy_kcal", "protein_g", "carbohydrate_g", "fat_g", "fiber_g"}
 _SHORTFALL_KEYS = (
     "energy_kcal", "protein_g", "carbohydrate_g", "fat_g", "fiber_g",
     "calcium_mg", "iron_mg", "magnesium_mg",
@@ -64,22 +62,6 @@ _HARD_DAILY_CAPS = {
     "added_sugars_g": 50.0,
     "trans_fat_g": 2.0,
 }
-
-_NUTRIENT_KEY_ALIASES: dict[str, str] = {
-    alias.lower(): canonical
-    for canonical, compatibility in CANONICAL_KEY_COMPATIBILITY.items()
-    for alias in (
-        canonical,
-        *(compatibility.get("accepted_input_keys") or []),
-    )
-}
-_NUTRIENT_KEY_ALIASES.update({
-    "total_protein_g": "protein_g",
-    "proteins_g": "protein_g",
-    "total_lipid_g": "fat_g",
-    "total_lipid_fat_g": "fat_g",
-    "total_carbohydrates_g": "carbohydrate_g",
-})
 
 
 def _number(value: Any) -> float | None:
@@ -97,80 +79,21 @@ def _foods(result: dict[str, Any]) -> list[dict[str, Any]]:
     return [food for food in raw if isinstance(food, dict)] if isinstance(raw, list) else []
 
 
-def _canonical_nutrient_key(value: Any) -> str:
-    key = str(value or "").strip().lower()
-    return _NUTRIENT_KEY_ALIASES.get(key, key)
-
-
-def _nutrient_value(
-    nutrients: dict[str, Any],
-    nutrient_key: str,
-) -> float | None:
-    direct = _number(nutrients.get(nutrient_key))
-    if direct is not None:
-        return direct
-    for raw_key, raw_value in nutrients.items():
-        if _canonical_nutrient_key(raw_key) == nutrient_key:
-            value = _number(raw_value)
-            if value is not None:
-                return value
-    return None
-
-
-def _food_nutrient_map(food: dict[str, Any]) -> dict[str, float]:
-    """Build one canonical nutrient map without double-counting sources."""
-    sources: list[dict[str, Any]] = []
-    nutrition = food.get("nutrition")
-    features = food.get("features")
-    for candidate in (
-        food.get("nutrients"),
-        food.get("macronutrients"),
-        nutrition.get("macronutrients") if isinstance(nutrition, dict) else None,
-        features.get("macronutrients") if isinstance(features, dict) else None,
-        features.get("fat_profile") if isinstance(features, dict) else None,
-    ):
-        if isinstance(candidate, dict):
-            sources.append(candidate)
-
-    canonical: dict[str, float] = {}
-    for source in sources:
-        for raw_key, raw_value in source.items():
-            key = _canonical_nutrient_key(raw_key)
-            value = _number(raw_value)
-            if value is not None and key not in canonical:
-                canonical[key] = value
-
-    # Total fat can never be lower than its reported fat components. Recover a
-    # conservative total when USDA/label data contains subtypes but omits or
-    # understates total fat, so the macro warning cannot silently disappear.
-    non_trans_components = [
-        max(0.0, canonical[key])
-        for key in (
-            "saturated_fat_g",
-            "monounsaturated_fat_g",
-            "polyunsaturated_fat_g",
-        )
-        if key in canonical
-    ]
-    trans_fat = max(0.0, canonical.get("trans_fat_g", 0.0))
-    if non_trans_components or trans_fat > 0:
-        canonical["fat_g"] = max(
-            max(0.0, canonical.get("fat_g", 0.0)),
-            sum(non_trans_components),
-            trans_fat,
-        )
-    return canonical
-
-
 def _nutrient_totals(
     foods: Iterable[dict[str, Any]],
 ) -> tuple[dict[str, float], set[str]]:
     totals: dict[str, float] = {}
     reported: set[str] = set()
     for food in foods:
-        for canonical_key, value in _food_nutrient_map(food).items():
-            reported.add(canonical_key)
-            totals[canonical_key] = totals.get(canonical_key, 0.0) + value
+        nutrients = food.get("nutrients")
+        if not isinstance(nutrients, dict):
+            continue
+        for key, raw in nutrients.items():
+            value = _number(raw)
+            if value is None:
+                continue
+            reported.add(str(key))
+            totals[str(key)] = totals.get(str(key), 0.0) + value
     return ({key: round(value, 4) for key, value in totals.items()}, reported)
 
 
@@ -213,63 +136,35 @@ def _meal_fraction(meal_name: str) -> float:
 def _contributors(
     foods: list[dict[str, Any]],
     nutrient_key: str,
-    maximum: int = 3,
+    maximum: int = 12,
 ) -> list[dict[str, Any]]:
-    rows: list[tuple[float, str]] = []
+    rows: list[tuple[float, str, str, float, str]] = []
     for food in foods:
-        value = _food_nutrient_map(food).get(nutrient_key, 0.0)
+        value = _number((food.get("nutrients") or {}).get(nutrient_key)) or 0.0
         if value <= 0:
             continue
         name = str(food.get("display_name") or food.get("name") or "Food")
-        rows.append((value, name))
+        quantity = _number(
+            food.get("estimated_weight_g") or food.get("quantity")
+        ) or 0.0
+        rows.append((
+            value,
+            name,
+            str(food.get("id") or ""),
+            quantity,
+            str(food.get("unit") or "g"),
+        ))
     rows.sort(reverse=True)
     return [
-        {"name": name, "amount": round(value, 2)}
-        for value, name in rows[:maximum]
+        {
+            "name": name,
+            "food_id": food_id,
+            "amount": round(value, 4),
+            "quantity": round(quantity, 3),
+            "quantity_unit": quantity_unit,
+        }
+        for value, name, food_id, quantity, quantity_unit in rows[:maximum]
     ]
-
-
-def _replacement_groups(name: str, category: str = "") -> set[str]:
-    identity = f"{name} {category}".lower()
-    groups: set[str] = set()
-    if any(token in identity for token in (
-        "paneer", "cheese", "yogurt", "curd", "milk", "dairy",
-    )):
-        groups.update(("protein", "dairy"))
-    if any(token in identity for token in (
-        "tofu", "lentil", "chickpea", "bean", "egg", "chicken", "fish",
-        "salmon", "meat", "paneer", "cheese", "yogurt", "protein",
-    )):
-        groups.add("protein")
-    if any(token in identity for token in (
-        "rice", "oat", "bread", "roti", "pasta", "noodle", "potato",
-        "grain", "cereal", "starch",
-    )):
-        groups.add("starch")
-    if any(token in identity for token in ("oil", "ghee", "butter", "fat")):
-        groups.add("fat")
-    if any(token in identity for token in (
-        "vegetable", "spinach", "broccoli", "carrot", "pea", "fruit",
-        "berry", "orange",
-    )):
-        groups.add("produce")
-    return groups
-
-
-def _primary_contributor_food(
-    foods: list[dict[str, Any]],
-    nutrient_key: str,
-) -> dict[str, Any] | None:
-    contributors = [
-        food for food in foods
-        if _food_nutrient_map(food).get(nutrient_key, 0.0) > 0
-    ]
-    if not contributors:
-        return None
-    return max(
-        contributors,
-        key=lambda food: _food_nutrient_map(food).get(nutrient_key, 0.0),
-    )
 
 
 def _suggestions(
@@ -281,34 +176,12 @@ def _suggestions(
     foods: list[dict[str, Any]],
     local_hour: int,
 ) -> list[dict[str, Any]]:
+    # Excess is corrected by changing the contributing food quantity inside
+    # Meal Guidance. Never recommend another food for an excess alert.
+    if direction == "excess":
+        return []
+
     ranked: list[tuple[float, dict[str, Any]]] = []
-    contributor = (
-        _primary_contributor_food(foods, nutrient_key)
-        if direction == "excess"
-        else None
-    )
-    contributor_name = str(
-        (contributor or {}).get("display_name")
-        or (contributor or {}).get("name")
-        or ""
-    )
-    contributor_groups = _replacement_groups(
-        contributor_name,
-        str((contributor or {}).get("category") or ""),
-    )
-    contributor_quantity = _number(
-        (contributor or {}).get("estimated_weight_g")
-        or (contributor or {}).get("quantity")
-    ) or 0.0
-    contributor_amount = _food_nutrient_map(contributor or {}).get(
-        nutrient_key,
-        0.0,
-    )
-    contributor_per100 = (
-        contributor_amount * 100.0 / contributor_quantity
-        if contributor_quantity > 0
-        else None
-    )
 
     for candidate in FOOD_RECOMMENDATION_CATALOG:
         if _candidate_already_present(candidate, foods):
@@ -320,34 +193,20 @@ def _suggestions(
         serving = float(candidate.get("serving_g") or 100.0)
         per100 = _number((candidate.get("nutrients") or {}).get(nutrient_key)) or 0.0
         amount = per100 * serving / 100.0
-        if direction == "low" and amount <= 0:
+        if amount <= 0:
             continue
         energy = _number((candidate.get("nutrients") or {}).get("energy_kcal")) or 1.0
         rank = amount / max(energy * serving / 100.0, 1.0)
-        if direction == "excess":
-            candidate_groups = _replacement_groups(
-                str(candidate.get("name") or "")
-            )
-            # An alternative must replace the same meal role. This prevents
-            # fruit/leafy-vegetable suggestions for a high-fat paneer or meat
-            # component merely because those foods contain little fat.
-            if not contributor_groups or not (candidate_groups & contributor_groups):
-                continue
-            if contributor_per100 is None or per100 >= contributor_per100 * 0.75:
-                continue
-            reduction = contributor_per100 - per100
-            rank = reduction
         ranked.append((rank, candidate))
     ranked.sort(key=lambda row: row[0], reverse=True)
-    verb = "Add" if direction == "low" else f"Replace or reduce {contributor_name} and consider"
     return [
         {
-            "type": "add" if direction == "low" else "alternative",
+            "type": "add",
             "name": candidate["name"],
             "search_query": candidate["search_query"],
             "quantity": round(float(candidate.get("serving_g") or 100.0), 1),
             "unit": "g",
-            "reason": f"{verb} a source with a more suitable {(_LABELS.get(nutrient_key) or (nutrient_key, ''))[0].lower()} profile.",
+            "reason": f"Add a source of {(_LABELS.get(nutrient_key) or (nutrient_key, ''))[0].lower()}.",
             "nutrient_basis": "idea_only_until_usda_selection",
         }
         for _, candidate in ranked[:2]
@@ -404,7 +263,7 @@ def build_draft_meal_guidance(
     # personalized daily range edge. The range edge is used only when the
     # target engine actually supplies one; a minimum/RDA is never converted
     # into a fabricated upper limit.
-    for key in _MACRO_KEYS:
+    for key in _MACROS:
         if key not in reported or key in clinical_keys:
             continue
         target = targets.get(key) if isinstance(targets, dict) else None
@@ -521,60 +380,6 @@ def build_draft_meal_guidance(
             ),
         })
 
-    # Surface every reported nutrient that has crossed its personalized daily
-    # target, even when that target is an adequacy reference rather than a
-    # toxicological upper limit. Explicit UL/cap alerts above take precedence,
-    # so the same nutrient is never shown twice.
-    existing_excess = {
-        str(item.get("nutrient") or "")
-        for item in alerts
-        if item.get("direction") == "excess"
-    }
-    for key in sorted(reported):
-        if key in existing_excess or key in clinical_keys:
-            continue
-        target = targets.get(key) if isinstance(targets, dict) else None
-        if not isinstance(target, dict):
-            continue
-        daily_reference = _target_high(target)
-        if daily_reference is None or daily_reference <= 0:
-            continue
-        amount = max(0.0, totals.get(key, 0.0))
-        ratio = amount / daily_reference
-        if ratio < 1.0:
-            continue
-        target_unit = str(target.get("resolved_unit") or "").split("/", 1)[0]
-        label, unit = _LABELS.get(
-            key,
-            (
-                str(target.get("nutrient_name") or key.replace("_", " ").title()),
-                target_unit,
-            ),
-        )
-        alerts.append({
-            "direction": "excess",
-            "severity": "warning",
-            "nutrient": key,
-            "label": label,
-            "amount": round(amount, 2),
-            "unit": unit,
-            "reference": round(daily_reference, 2),
-            "percentage": round(ratio * 100.0, 1),
-            "message": (
-                f"This draft is above your personalized daily {label.lower()} target. "
-                "This target is an intake reference, not necessarily a medical safety limit."
-            ),
-            "contributors": _contributors(foods, key),
-            "suggestions": _suggestions(
-                nutrient_key=key,
-                direction="excess",
-                profile=normalized_profile,
-                draft_result=nutrient_result,
-                foods=foods,
-                local_hour=local_hour,
-            ),
-        })
-
     shortfalls: list[tuple[float, dict[str, Any]]] = []
     for key in _SHORTFALL_KEYS:
         if key not in reported:
@@ -639,17 +444,7 @@ def build_draft_meal_guidance(
     alerts.extend(selected_shortfalls)
 
     severity_order = {"critical": 0, "warning": 1, "notice": 2}
-    # Macro excesses must be visible before micronutrient cards in the sheet.
-    alerts.sort(key=lambda item: (
-        0
-        if item.get("direction") == "excess"
-        and item.get("nutrient") in _MACROS
-        else 1,
-        severity_order.get(str(item.get("severity")), 9),
-        _MACRO_KEYS.index(str(item.get("nutrient")))
-        if item.get("nutrient") in _MACROS
-        else len(_MACRO_KEYS),
-    ))
+    alerts.sort(key=lambda item: severity_order.get(str(item.get("severity")), 9))
     return {
         "status": "completed",
         "engine_version": GUIDANCE_ENGINE_VERSION,
@@ -674,7 +469,7 @@ def build_draft_meal_guidance(
             else "Review these optional alerts or continue without changing the meal."
         ),
         "disclaimer": (
-            "Meal shortfalls use an estimated share of daily targets. Suggested foods are search ideas; "
-            "their exact nutrients are resolved only after selection."
+            "Meal shortfalls use an estimated share of daily targets. Food suggestions appear only for "
+            "shortfalls. Excess alerts are adjusted by changing food quantity in 10% steps."
         ),
     }
