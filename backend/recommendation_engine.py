@@ -1092,6 +1092,7 @@ async def recommend_after_analysis(
     profile: dict[str, Any] | None,
     local_hour: int,
     maximum_results: int = 5,
+    preferred_domain_keys: list[str] | None = None,
 ) -> dict[str, Any]:
     """Rank safe changes by improvement to the weakest current-meal domain."""
     normalized_profile = normalize_user_profile(profile)
@@ -1110,7 +1111,22 @@ async def recommend_after_analysis(
     )
     before_overall, before_domain_numbers = _overall_score(baseline_analysis)
     before_domains = _domain_score_items(baseline_analysis)
-    targets_to_improve = _target_domains(baseline_analysis)
+    ranked_targets = _target_domains(baseline_analysis, maximum=8)
+    requested = {
+        str(key).strip().lower()
+        for key in preferred_domain_keys or []
+        if str(key).strip()
+    }
+    if requested:
+        preferred = [
+            item for item in ranked_targets if item[0].strip().lower() in requested
+        ]
+        remaining = [item for item in ranked_targets if item not in preferred]
+        targets_to_improve = [*preferred, *remaining][
+            : max(2, min(len(preferred), 4))
+        ]
+    else:
+        targets_to_improve = ranked_targets[:2]
     targets = _resolved_targets(normalized_profile)
     before_totals = _sum_nutrients(current_foods)
     before_balance = _target_score(before_totals, targets)
