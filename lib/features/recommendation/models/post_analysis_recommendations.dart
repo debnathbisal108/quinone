@@ -58,6 +58,8 @@ class FoodRecommendation {
     required this.scoreDelta,
     required this.reason,
     required this.confidence,
+    required this.targetDomain,
+    required this.combinedMeal,
     required this.nutrientEffects,
     required this.warnings,
   });
@@ -78,6 +80,8 @@ class FoodRecommendation {
   final double scoreDelta;
   final String reason;
   final double confidence;
+  final RecommendationTargetDomain? targetDomain;
+  final bool combinedMeal;
   final List<RecommendationNutrientEffect> nutrientEffects;
   final List<String> warnings;
 
@@ -107,6 +111,7 @@ class FoodRecommendation {
     final replaces = _asMap(json['replaces']);
     final effects = json['nutrient_effects'];
     final warnings = json['warnings'];
+    final targetDomain = _asMap(json['target_domain']);
     return FoodRecommendation(
       id: json['id']?.toString() ?? '',
       action: json['action']?.toString() ?? 'add',
@@ -126,6 +131,10 @@ class FoodRecommendation {
       scoreDelta: _number(json['score_delta']),
       reason: json['reason']?.toString() ?? '',
       confidence: _number(json['confidence']),
+      targetDomain: targetDomain.isEmpty
+          ? null
+          : RecommendationTargetDomain.fromJson(targetDomain),
+      combinedMeal: json['combined_meal'] == true,
       nutrientEffects: effects is List
           ? effects
               .whereType<Map>()
@@ -137,6 +146,35 @@ class FoodRecommendation {
       warnings: warnings is List
           ? warnings.map((item) => item.toString()).toList(growable: false)
           : const [],
+    );
+  }
+}
+
+class RecommendationTargetDomain {
+  const RecommendationTargetDomain({
+    required this.key,
+    required this.label,
+    required this.before,
+    required this.after,
+    required this.delta,
+    required this.confidence,
+  });
+
+  final String key;
+  final String label;
+  final double before;
+  final double after;
+  final double delta;
+  final double confidence;
+
+  factory RecommendationTargetDomain.fromJson(Map<String, dynamic> json) {
+    return RecommendationTargetDomain(
+      key: json['key']?.toString() ?? '',
+      label: json['label']?.toString() ?? 'Health module',
+      before: _number(json['before']),
+      after: _number(json['after']),
+      delta: _number(json['delta']),
+      confidence: _number(json['confidence']),
     );
   }
 }
@@ -189,4 +227,3 @@ int _integer(dynamic value) {
 String _format(double value) => value == value.roundToDouble()
     ? value.toStringAsFixed(0)
     : value.toStringAsFixed(1);
-
