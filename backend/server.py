@@ -43,6 +43,7 @@ from personalization_engine import (
 from nutrient_target_engine import (
     attach_nutrient_targets,
 )
+from draft_meal_guidance import build_draft_meal_guidance
 from recommendation_engine import apply_recommendation, recommend_after_analysis
 
 
@@ -200,6 +201,12 @@ class ApplyPostAnalysisRecommendationRequest(BaseModel):
     recommendation_id: str = Field(min_length=1, max_length=100)
 
 
+class DraftMealGuidanceRequest(ManualRecipeRequest):
+    analysis_id: str | None = None
+    label_items: list[LabelServingItemRequest] = Field(default_factory=list)
+    local_hour: int = Field(default=12, ge=0, le=23)
+
+
 @app.post("/recommendations/after-analysis")
 @app.post("/api/v1/recommendations/after-analysis", include_in_schema=False)
 async def post_analysis_recommendations(
@@ -245,6 +252,117 @@ async def apply_post_analysis_recommendation(
         raise HTTPException(
             status_code=500,
             detail="The recommendation could not be applied to this meal.",
+        ) from error
+
+
+async def _draft_guidance_nutrient_result(
+    request: DraftMealGuidanceRequest,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    portion_fraction = request.servings_eaten / request.servings_made
+    validated = await asyncio.gather(
+        *[
+            validate_or_recover_usda_food(
+                fdc_id=item.fdc_id,
+                name=item.name,
+                description=item.description,
+                data_type=item.data_type,
+                food_category=item.food_category,
+            )
+            for item in request.ingredients
+        ]
+    )
+
+    foods: list[dict[str, Any]] = []
+    effective_profile = request.profile
+    if request.analysis_id and request.label_items:
+        session = load_session(request.analysis_id)
+        if session is None:
+            raise ValueError("Analysis session was not found or has expired.")
+        base_result = session.get("confirmed_label_result")
+        if not isinstance(base_result, dict):
+            raise ValueError("The saved detected meal is unavailable.")
+        confirmed = _apply_label_serving_confirmation(
+            base_result,
+            LabelServingConfirmationRequest(
+                analysis_id=request.analysis_id,
+                items=request.label_items,
+            ),
+        )
+        foods.extend(
+            copy.deepcopy(food)
+            for food in confirmed.get("meal", {}).get("foods", [])
+            if isinstance(food, dict)
+            and food.get("analysis_route") == "NUTRITION_LABEL"
+        )
+        if effective_profile is None:
+            effective_profile = session.get("profile")
+
+    total_weight = 0.0
+    for index, (item, resolved) in enumerate(zip(request.ingredients, validated), start=1):
+        grams = float(item.grams) * portion_fraction
+        total_weight += grams
+        foods.append({
+            "id": f"guidance_{index:04d}",
+            "name": item.name.strip() or item.description,
+            "display_name": item.name.strip() or item.description,
+            "canonical_name": item.description,
+            "category": item.food_category or "Unknown",
+            "food_source": "draft_guidance",
+            "analysis_route": "DIRECT_USDA",
+            "quantity": grams,
+            "unit": "g",
+            "estimated_weight_g": grams,
+            "preparation": item.preparation or "unknown",
+            "quantity_basis": item.quantity_basis or "as_served",
+            "resolver": {
+                "status": "resolved",
+                "fdc_id": resolved["fdc_id"],
+                "matched_description": resolved["description"],
+                "data_type": resolved.get("data_type"),
+                "confidence": 1.0,
+                "source": "user_selected_usda",
+            },
+            "ingredients": [],
+            "spices": [],
+        })
+    prepared = {
+        "status": "completed",
+        "input_method": "draft_guidance",
+        "meal": {
+            "meal_type": request.recipe_name.strip() or "Draft meal",
+            "meal_name": request.recipe_name.strip() or "Draft meal",
+            "estimated_visible_food_weight_g": round(total_weight, 3),
+            "foods": foods,
+        },
+    }
+    return await attach_nutrients(prepared), effective_profile
+
+
+@app.post("/meal-guidance/evaluate")
+@app.post("/api/v1/meal-guidance/evaluate", include_in_schema=False)
+async def evaluate_draft_meal_guidance(
+    request: DraftMealGuidanceRequest,
+) -> dict[str, Any]:
+    """Return optional pre-analysis nutrient alerts for an editable draft."""
+    if request.servings_eaten > request.servings_made:
+        raise HTTPException(
+            status_code=422,
+            detail="servings_eaten cannot exceed servings_made",
+        )
+    try:
+        nutrient_result, effective_profile = await _draft_guidance_nutrient_result(request)
+        return build_draft_meal_guidance(
+            nutrient_result,
+            profile=effective_profile,
+            local_hour=request.local_hour,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Draft meal guidance failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Meal guidance could not be calculated right now. You can continue without it.",
         ) from error
 
 
