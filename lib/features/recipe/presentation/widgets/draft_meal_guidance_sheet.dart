@@ -39,6 +39,12 @@ class _DraftMealGuidanceSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final macroExcesses = guidance.alerts
+        .where(
+          (alert) =>
+              alert.isExcess && _macroNutrients.contains(alert.nutrient),
+        )
+        .toList(growable: false);
     return DraggableScrollableSheet(
       expand: false,
       initialChildSize: 0.78,
@@ -82,6 +88,42 @@ class _DraftMealGuidanceSheet extends StatelessWidget {
               ],
             ),
           ),
+          if (macroExcesses.isNotEmpty)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+              decoration: BoxDecoration(
+                color: scheme.errorContainer.withOpacity(0.42),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: scheme.error.withOpacity(0.28)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Macro alerts',
+                    style: theme.textTheme.labelLarge?.copyWith(
+                      color: scheme.error,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    children: macroExcesses
+                        .map((alert) => Text(
+                              '${alert.label} ${alert.percentage.toStringAsFixed(0)}%',
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ))
+                        .toList(growable: false),
+                  ),
+                ],
+              ),
+            ),
           Expanded(
             child: ListView.separated(
               controller: controller,
@@ -249,6 +291,14 @@ class _NutrientAlertCard extends StatelessWidget {
     );
   }
 }
+
+const _macroNutrients = {
+  'energy_kcal',
+  'protein_g',
+  'carbohydrate_g',
+  'fat_g',
+  'fiber_g',
+};
 
 String _format(double value) => value == value.roundToDouble()
     ? value.toStringAsFixed(0)
