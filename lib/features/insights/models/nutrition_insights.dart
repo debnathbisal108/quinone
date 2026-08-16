@@ -259,9 +259,10 @@ class NutritionInsights {
 
   factory NutritionInsights.fromRecords(
     List<AnalysisHistoryRecord> records,
-    Duration period,
-  ) {
-    final now = DateTime.now();
+    Duration period, {
+    DateTime? referenceDate,
+  }) {
+    final now = referenceDate ?? DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final days = period.inDays <= 0 ? 1 : period.inDays;
     final currentStart = today.subtract(Duration(days: days - 1));
