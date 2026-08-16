@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 
 import '../preferences/app_preferences_repository.dart';
 import '../../features/navigation/presentation/screens/bottom_navigation_screen.dart';
+import '../../features/notifications/presentation/screens/risk_recommendations_screen.dart';
 import '../../features/onboarding/presentation/screens/onboarding_screen.dart';
 import '../../features/profile/presentation/screens/profile_setup_screen.dart';
 import '../../features/recipe/presentation/screens/recipe_builder_screen.dart';
@@ -95,6 +96,26 @@ class AppRouter {
       GoRoute(
         path: '/profile',
         builder: (context, state) => const ProfileSetupScreen(),
+      ),
+      GoRoute(
+        path: '/risk-recommendations',
+        builder: (context, state) {
+          final extra = state.extra;
+          var periodDays = 1;
+          DateTime? asOf;
+          if (extra is Map) {
+            final raw = extra['period_days'];
+            periodDays = raw is num
+                ? raw.toInt()
+                : int.tryParse(raw?.toString() ?? '') ?? 1;
+            asOf = DateTime.tryParse(extra['as_of']?.toString() ?? '')?.toLocal();
+          }
+          if (!const [1, 7, 30].contains(periodDays)) periodDays = 1;
+          return RiskRecommendationsScreen(
+            periodDays: periodDays,
+            notificationAsOf: asOf,
+          );
+        },
       ),
       GoRoute(
         path: '/result',
