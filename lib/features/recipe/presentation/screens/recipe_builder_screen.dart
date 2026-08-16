@@ -176,7 +176,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
               if (value == null || value <= 0) return;
               Navigator.pop(dialogContext, value);
             },
-            child: const Text('Add'),
+            child: const Text('Review'),
           ),
         ],
       ),
@@ -184,12 +184,110 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
     controller.dispose();
     if (grams == null || !mounted) return;
 
-    final existingIndex = _ingredients.indexWhere((item) => item.food.fdcId == food.fdcId);
+    await _reviewPendingFood(food, grams);
+  }
+
+  Future<void> _reviewPendingFood(
+    UsdaFoodSuggestion food,
+    double addedGrams,
+  ) async {
+    final existingIndex = _ingredients.indexWhere(
+      (item) => item.food.fdcId == food.fdcId,
+    );
+    final totalGrams = existingIndex >= 0
+        ? _ingredients[existingIndex].grams + addedGrams
+        : addedGrams;
+    final staged = [..._ingredients];
+    if (existingIndex >= 0) {
+      staged[existingIndex] = staged[existingIndex].copyWith(
+        grams: totalGrams,
+      );
+    } else {
+      staged.add(ManualRecipeIngredient(food: food, grams: totalGrams));
+    }
+
+    if (!_guidanceEnabled) {
+      _commitPendingFood(food, totalGrams, existingIndex);
+      return;
+    }
+    final recipe = _buildRecipeWithIngredients(staged);
+    final labels = _confirmedLabelItemsForGuidance();
+    if (recipe == null || labels == null || _checkingGuidance) return;
+
+    setState(() => _checkingGuidance = true);
+    try {
+      final guidance = await _service.evaluateDraft(
+        recipe: recipe,
+        profile: ref.read(profileProvider).backendPayload,
+        analysisId: widget.analysisId,
+        labelItems: labels,
+        localHour: DateTime.now().hour,
+      );
+      if (!mounted) return;
+      if (!guidance.hasAlerts) {
+        _commitPendingFood(food, totalGrams, existingIndex);
+        return;
+      }
+
+      final result = await showDraftMealGuidanceSheet(
+        context,
+        guidance: guidance,
+        analysisCheckpoint: false,
+        pendingFoodAddition: true,
+        adjustableFoods: [
+          DraftGuidanceAdjustableFood(
+            name: food.displayName,
+            quantity: totalGrams,
+          ),
+        ],
+      );
+      if (!mounted || result.action == DraftMealGuidanceAction.review) return;
+      final confirmedGrams =
+          result.adjustedQuantities[_guidanceFoodKey(food.displayName)] ??
+              totalGrams;
+      _commitPendingFood(food, confirmedGrams, existingIndex);
+      final query = result.searchQuery?.trim() ?? '';
+      if (query.isNotEmpty) _searchSuggestedFood(query);
+    } catch (_) {
+      if (!mounted) return;
+      final addAnyway = await showDialog<bool>(
+            context: context,
+            builder: (dialogContext) => AlertDialog(
+              title: const Text('Meal guidance unavailable'),
+              content: const Text(
+                'The optional nutrient check could not be loaded. '
+                'You can cancel or add the entered quantity anyway.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(dialogContext, true),
+                  child: const Text('Add anyway'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+      if (addAnyway && mounted) {
+        _commitPendingFood(food, totalGrams, existingIndex);
+      }
+    } finally {
+      if (mounted) setState(() => _checkingGuidance = false);
+    }
+  }
+
+  void _commitPendingFood(
+    UsdaFoodSuggestion food,
+    double grams,
+    int existingIndex,
+  ) {
     setState(() {
       if (existingIndex >= 0) {
         final copy = [..._ingredients];
-        final current = copy[existingIndex];
-        copy[existingIndex] = current.copyWith(grams: current.grams + grams);
+        copy[existingIndex] = copy[existingIndex].copyWith(grams: grams);
         _ingredients = copy;
       } else {
         _ingredients = [..._ingredients, ManualRecipeIngredient(food: food, grams: grams)];
@@ -197,8 +295,8 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       _searchController.clear();
       _suggestions = const [];
       _draftRevision += 1;
+      _guidanceAcceptedRevision = _draftRevision;
     });
-    await _evaluateGuidance(analysisCheckpoint: false);
   }
 
   Future<void> _editIngredient(int index) async {
@@ -245,15 +343,19 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
     await _evaluateGuidance(analysisCheckpoint: false);
   }
 
-  ManualRecipe? _buildRecipe() {
-    if (_ingredients.isEmpty) return null;
+  ManualRecipe? _buildRecipe() => _buildRecipeWithIngredients(_ingredients);
+
+  ManualRecipe? _buildRecipeWithIngredients(
+    List<ManualRecipeIngredient> ingredients,
+  ) {
+    if (ingredients.isEmpty) return null;
     final made = double.tryParse(_servingsMadeController.text.trim()) ?? 1;
     final eaten = double.tryParse(_servingsEatenController.text.trim()) ?? 1;
     if (made <= 0 || eaten <= 0 || eaten > made) return null;
     return ManualRecipe(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       name: _nameController.text.trim().isEmpty ? 'My recipe' : _nameController.text.trim(),
-      ingredients: List.unmodifiable(_ingredients),
+      ingredients: List.unmodifiable(ingredients),
       servingsMade: made,
       servingsEaten: eaten,
       source: widget.photoReview ? 'photo_confirmed' : 'manual',
@@ -297,6 +399,36 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
     _search(query);
   }
 
+  List<DraftGuidanceAdjustableFood> _guidanceAdjustableFoods() =>
+      _ingredients
+          .map(
+            (ingredient) => DraftGuidanceAdjustableFood(
+              name: ingredient.food.displayName,
+              quantity: ingredient.grams,
+            ),
+          )
+          .toList(growable: false);
+
+  bool _applyGuidanceQuantities(Map<String, double> quantities) {
+    var changed = false;
+    final updated = _ingredients.map((ingredient) {
+      final quantity = quantities[
+        _guidanceFoodKey(ingredient.food.displayName)
+      ];
+      if (quantity == null || quantity <= 0) return ingredient;
+      if ((quantity - ingredient.grams).abs() < 0.05) return ingredient;
+      changed = true;
+      return ingredient.copyWith(grams: quantity);
+    }).toList(growable: false);
+    if (changed) {
+      setState(() {
+        _ingredients = updated;
+        _draftRevision += 1;
+      });
+    }
+    return changed;
+  }
+
   Future<bool> _evaluateGuidance({
     required bool analysisCheckpoint,
   }) async {
@@ -326,14 +458,23 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
         _guidanceAcceptedRevision = revision;
         return true;
       }
-      final accepted = await showDraftMealGuidanceSheet(
+      final result = await showDraftMealGuidanceSheet(
         context,
         guidance: guidance,
         analysisCheckpoint: analysisCheckpoint,
-        onSearchSuggestion: _searchSuggestedFood,
+        adjustableFoods: _guidanceAdjustableFoods(),
       );
-      if (accepted) _guidanceAcceptedRevision = revision;
-      return accepted;
+      if (!mounted) return false;
+      if (result.action == DraftMealGuidanceAction.searchSuggestion) {
+        _applyGuidanceQuantities(result.adjustedQuantities);
+        final query = result.searchQuery?.trim() ?? '';
+        if (query.isNotEmpty) _searchSuggestedFood(query);
+        return false;
+      }
+      if (!result.accepted) return false;
+      _applyGuidanceQuantities(result.adjustedQuantities);
+      _guidanceAcceptedRevision = _draftRevision;
+      return true;
     } catch (error) {
       if (!mounted) return false;
       if (!analysisCheckpoint) {
@@ -367,7 +508,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
   }
 
   Future<void> _analyze() async {
-    final recipe = _buildRecipe();
+    var recipe = _buildRecipe();
     if (recipe == null || _analyzing || _checkingGuidance) {
       if (recipe == null) _message('Add at least one ingredient and check the serving values.');
       return;
@@ -375,6 +516,8 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
     if (_guidanceEnabled && _guidanceAcceptedRevision != _draftRevision) {
       final proceed = await _evaluateGuidance(analysisCheckpoint: true);
       if (!proceed || !mounted) return;
+      recipe = _buildRecipe();
+      if (recipe == null) return;
     }
     setState(() {
       _analyzing = true;
@@ -893,3 +1036,5 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 }
+
+String _guidanceFoodKey(String value) => value.trim().toLowerCase();
