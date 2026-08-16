@@ -109,30 +109,32 @@ class _DraftMealGuidanceSheet extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: () => Navigator.pop(context, 'review'),
-                        child: Text(
-                          analysisCheckpoint ? 'Review meal' : 'Back to edit',
+                if (analysisCheckpoint)
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => Navigator.pop(context, 'review'),
+                          child: const Text('Review meal'),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: FilledButton(
-                        onPressed: () => Navigator.pop(context, 'continue'),
-                        child: Text(
-                          analysisCheckpoint
-                              ? 'Continue & analyze anyway'
-                              : 'Dismiss for this draft',
-                          textAlign: TextAlign.center,
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: () => Navigator.pop(context, 'continue'),
+                          child: const Text(
+                            'Continue & analyze anyway',
+                            textAlign: TextAlign.center,
+                          ),
                         ),
                       ),
-                    ),
-                  ],
-                ),
+                    ],
+                  )
+                else
+                  FilledButton(
+                    onPressed: () => Navigator.pop(context, 'continue'),
+                    child: const Text('Return to recipe'),
+                  ),
               ],
             ),
           ),
