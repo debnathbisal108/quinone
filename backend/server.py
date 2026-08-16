@@ -43,7 +43,7 @@ from personalization_engine import (
 from nutrient_target_engine import (
     attach_nutrient_targets,
 )
-from recommendation_engine import recommend_after_analysis
+from recommendation_engine import apply_recommendation, recommend_after_analysis
 
 
 APP_NAME = "Quinone API"
@@ -192,12 +192,20 @@ class PostAnalysisRecommendationRequest(BaseModel):
     maximum_results: int = Field(default=5, ge=1, le=8)
 
 
+class ApplyPostAnalysisRecommendationRequest(BaseModel):
+    current_result: dict[str, Any]
+    today_results: list[dict[str, Any]] = Field(default_factory=list)
+    profile: dict[str, Any] | None = None
+    local_hour: int = Field(default=12, ge=0, le=23)
+    recommendation_id: str = Field(min_length=1, max_length=100)
+
+
 @app.post("/recommendations/after-analysis")
 @app.post("/api/v1/recommendations/after-analysis", include_in_schema=False)
 async def post_analysis_recommendations(
     request: PostAnalysisRecommendationRequest,
 ) -> dict[str, Any]:
-    """Recommend an immediate meal change using everything logged today."""
+    """Recommend a safe change targeted to this meal's weakest domain."""
     try:
         return await recommend_after_analysis(
             current_result=request.current_result,
@@ -213,6 +221,30 @@ async def post_analysis_recommendations(
         raise HTTPException(
             status_code=500,
             detail="Recommendations could not be calculated for this meal.",
+        ) from error
+
+
+@app.post("/recommendations/apply")
+@app.post("/api/v1/recommendations/apply", include_in_schema=False)
+async def apply_post_analysis_recommendation(
+    request: ApplyPostAnalysisRecommendationRequest,
+) -> dict[str, Any]:
+    """Merge a revalidated recommendation into the existing meal analysis."""
+    try:
+        return await apply_recommendation(
+            current_result=request.current_result,
+            today_results=request.today_results,
+            profile=request.profile,
+            local_hour=request.local_hour,
+            recommendation_id=request.recommendation_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Applying post-analysis recommendation failed")
+        raise HTTPException(
+            status_code=500,
+            detail="The recommendation could not be applied to this meal.",
         ) from error
 
 
