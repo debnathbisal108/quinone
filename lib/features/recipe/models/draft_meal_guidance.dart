@@ -55,7 +55,7 @@ class DraftNutrientAlert {
   final double reference;
   final double percentage;
   final String message;
-  final List<String> contributors;
+  final List<DraftNutrientContributor> contributors;
   final List<DraftFoodSuggestion> suggestions;
 
   bool get isExcess => direction == 'excess';
@@ -77,8 +77,10 @@ class DraftNutrientAlert {
       contributors: rawContributors is List
           ? rawContributors
               .whereType<Map>()
-              .map((item) => item['name']?.toString() ?? '')
-              .where((name) => name.isNotEmpty)
+              .map((item) => DraftNutrientContributor.fromJson(
+                    Map<String, dynamic>.from(item),
+                  ))
+              .where((item) => item.name.isNotEmpty)
               .toList(growable: false)
           : const [],
       suggestions: rawSuggestions is List
@@ -89,6 +91,32 @@ class DraftNutrientAlert {
                   ))
               .toList(growable: false)
           : const [],
+    );
+  }
+}
+
+class DraftNutrientContributor {
+  const DraftNutrientContributor({
+    required this.foodId,
+    required this.name,
+    required this.amount,
+    required this.quantity,
+    required this.quantityUnit,
+  });
+
+  final String foodId;
+  final String name;
+  final double amount;
+  final double quantity;
+  final String quantityUnit;
+
+  factory DraftNutrientContributor.fromJson(Map<String, dynamic> json) {
+    return DraftNutrientContributor(
+      foodId: json['food_id']?.toString() ?? '',
+      name: json['name']?.toString() ?? '',
+      amount: _number(json['amount']),
+      quantity: _number(json['quantity']),
+      quantityUnit: json['quantity_unit']?.toString() ?? 'g',
     );
   }
 }
