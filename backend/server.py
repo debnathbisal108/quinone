@@ -191,6 +191,7 @@ class PostAnalysisRecommendationRequest(BaseModel):
     profile: dict[str, Any] | None = None
     local_hour: int = Field(default=12, ge=0, le=23)
     maximum_results: int = Field(default=5, ge=1, le=8)
+    preferred_domain_keys: list[str] = Field(default_factory=list)
 
 
 class ApplyPostAnalysisRecommendationRequest(BaseModel):
@@ -220,6 +221,7 @@ async def post_analysis_recommendations(
             profile=request.profile,
             local_hour=request.local_hour,
             maximum_results=request.maximum_results,
+            preferred_domain_keys=request.preferred_domain_keys,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
