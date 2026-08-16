@@ -158,7 +158,6 @@ class _ServingConfirmationScreenState
       if (!mounted || revision != _revision) return false;
       if (!guidance.hasAlerts) {
         _acceptedGuidanceRevision = revision;
-        if (!analysisCheckpoint) _message(guidance.message);
         return true;
       }
       final accepted = await showDraftMealGuidanceSheet(
