@@ -42,6 +42,7 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
   PostAnalysisRecommendations? _recommendations;
   bool _recommendationsLoading = true;
   String? _recommendationError;
+  String? _applyingRecommendationId;
 
   AnalysisResult get result => widget.result;
 
@@ -99,6 +100,45 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
       if (!mounted) return;
       setState(() {
         _recommendationsLoading = false;
+        _recommendationError = error.toString();
+      });
+    }
+  }
+
+  List<Map<String, dynamic>> _todayResultsExcludingCurrent(DateTime now) {
+    final history = ref.read(analysisHistoryProvider);
+    final currentId = _analysisId(widget.rawResult);
+    return history
+        .where((record) => _sameLocalDay(record.createdAt, now))
+        .where((record) => currentId == null || record.analysisId != currentId)
+        .map((record) => record.rawResult)
+        .where((result) => result.isNotEmpty)
+        .map(Map<String, dynamic>.from)
+        .toList(growable: false);
+  }
+
+  Future<void> _applyRecommendation(FoodRecommendation item) async {
+    if (_applyingRecommendationId != null) return;
+    final now = DateTime.now();
+    setState(() {
+      _applyingRecommendationId = item.id;
+      _recommendationError = null;
+    });
+    try {
+      final combined = await _recommendationService.applyToMeal(
+        currentResult: widget.rawResult,
+        todayResults: _todayResultsExcludingCurrent(now),
+        recommendationId: item.id,
+        profile: ref.read(profileProvider).backendPayload,
+        localHour: now.hour,
+      );
+      await ref.read(analysisHistoryProvider.notifier).saveResult(combined);
+      if (!mounted) return;
+      context.pushReplacement('/result', extra: combined);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _applyingRecommendationId = null;
         _recommendationError = error.toString();
       });
     }
@@ -545,6 +585,8 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                         recommendations: _recommendations,
                         error: _recommendationError,
                         onRetry: _loadRecommendations,
+                        applyingRecommendationId: _applyingRecommendationId,
+                        onApply: _applyRecommendation,
                       ),
                       if (result.displayFoods.isNotEmpty) ...[
                         const SizedBox(height: 28),
@@ -826,12 +868,16 @@ class _RecommendationSection extends StatelessWidget {
     required this.recommendations,
     required this.error,
     required this.onRetry,
+    required this.applyingRecommendationId,
+    required this.onApply,
   });
 
   final bool loading;
   final PostAnalysisRecommendations? recommendations;
   final String? error;
   final VoidCallback onRetry;
+  final String? applyingRecommendationId;
+  final ValueChanged<FoodRecommendation> onApply;
 
   @override
   Widget build(BuildContext context) {
@@ -869,7 +915,7 @@ class _RecommendationSection extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Improve today’s score',
+                      'Improve this meal’s weakest score',
                       style: theme.textTheme.titleLarge?.copyWith(
                         fontWeight: FontWeight.w900,
                       ),
@@ -914,7 +960,7 @@ class _RecommendationSection extends StatelessWidget {
               children: [
                 Expanded(
                   child: _RecommendationScoreTile(
-                    label: 'Today so far',
+                    label: 'Current meal',
                     value: recommendations!.currentDayScore,
                   ),
                 ),
@@ -940,7 +986,12 @@ class _RecommendationSection extends StatelessWidget {
               ...recommendations!.items.map(
                 (item) => Padding(
                   padding: const EdgeInsets.only(bottom: 10),
-                  child: _FoodRecommendationCard(item: item),
+                  child: _FoodRecommendationCard(
+                    item: item,
+                    applying: applyingRecommendationId == item.id,
+                    applyDisabled: applyingRecommendationId != null,
+                    onApply: () => onApply(item),
+                  ),
                 ),
               ),
             if (recommendations!.disclaimer.trim().isNotEmpty) ...[
@@ -992,9 +1043,17 @@ class _RecommendationScoreTile extends StatelessWidget {
 }
 
 class _FoodRecommendationCard extends StatelessWidget {
-  const _FoodRecommendationCard({required this.item});
+  const _FoodRecommendationCard({
+    required this.item,
+    required this.applying,
+    required this.applyDisabled,
+    required this.onApply,
+  });
 
   final FoodRecommendation item;
+  final bool applying;
+  final bool applyDisabled;
+  final VoidCallback onApply;
 
   @override
   Widget build(BuildContext context) {
@@ -1031,7 +1090,7 @@ class _FoodRecommendationCard extends StatelessWidget {
               Icon(Icons.trending_up_rounded, color: scheme.primary, size: 18),
               const SizedBox(width: 4),
               Text(
-                '+${item.scoreDelta.toStringAsFixed(1)}',
+                '+${(item.targetDomain?.delta ?? item.scoreDelta).toStringAsFixed(1)}',
                 style: theme.textTheme.labelLarge?.copyWith(
                   color: scheme.primary,
                   fontWeight: FontWeight.w900,
@@ -1053,14 +1112,26 @@ class _FoodRecommendationCard extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 10),
-          Text(
-            'Predicted current-day score: '
-            '${item.baselineScore.toStringAsFixed(0)} → '
-            '${item.predictedScore.toStringAsFixed(0)} '
-            '(${item.predictedScoreLow.toStringAsFixed(0)}–'
-            '${item.predictedScoreHigh.toStringAsFixed(0)})',
-            style: theme.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w700),
-          ),
+          if (item.targetDomain != null)
+            Text(
+              '${item.targetDomain!.label}: '
+              '${item.targetDomain!.before.toStringAsFixed(0)} → '
+              '${item.targetDomain!.after.toStringAsFixed(0)} '
+              '(+${item.targetDomain!.delta.toStringAsFixed(1)})',
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontWeight: FontWeight.w800,
+                color: scheme.primary,
+              ),
+            )
+          else
+            Text(
+              'Combined meal score: '
+              '${item.baselineScore.toStringAsFixed(0)} → '
+              '${item.predictedScore.toStringAsFixed(0)}',
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
           if (item.nutrientEffects.isNotEmpty) ...[
             const SizedBox(height: 10),
             Wrap(
@@ -1074,24 +1145,20 @@ class _FoodRecommendationCard extends StatelessWidget {
               }).toList(growable: false),
             ),
           ],
-          if (item.action == 'add' && item.searchQuery.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton.icon(
-                onPressed: () => context.push(
-                  '/recipe',
-                  extra: {
-                    'recommendation_query': item.searchQuery,
-                    'recommendation_quantity': item.quantity,
-                    'recommendation_name': item.foodName,
-                  },
-                ),
-                icon: const Icon(Icons.add_rounded),
-                label: const Text('Add and analyze'),
-              ),
+          const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton.icon(
+              onPressed: applyDisabled ? null : onApply,
+              icon: applying
+                  ? const SizedBox.square(
+                      dimension: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.add_circle_outline_rounded),
+              label: Text(applying ? 'Updating meal…' : 'Apply to this meal'),
             ),
-          ],
+          ),
         ],
       ),
     );
