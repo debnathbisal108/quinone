@@ -80,7 +80,10 @@ FOOD_RECOMMENDATION_CATALOG: tuple[dict[str, Any], ...] = (
         "search_query": "egg whole cooked hard boiled",
         "serving_g": 50.0,
         "meal_roles": ["breakfast", "snack", "lunch"],
-        "diet_tags": ["vegetarian", "gluten_free"],
+        # Egg is deliberately not tagged as generic vegetarian. In India and
+        # many other contexts, a vegetarian profile excludes eggs unless the
+        # user explicitly selects an ovo-vegetarian pattern.
+        "diet_tags": ["ovo_vegetarian", "gluten_free"],
         "allergens": ["egg"],
         "nutrients": {
             "energy_kcal": 155, "protein_g": 12.6, "fat_g": 10.6,
@@ -259,4 +262,3 @@ FOOD_RECOMMENDATION_CATALOG: tuple[dict[str, Any], ...] = (
         },
     },
 )
-
