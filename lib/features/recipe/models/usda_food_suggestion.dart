@@ -6,6 +6,9 @@ class UsdaFoodSuggestion {
     required this.dataType,
     this.foodCategory,
     this.brandOwner,
+    this.preparation,
+    this.quantityBasis,
+    this.matchQuery,
   });
 
   final int fdcId;
@@ -14,6 +17,9 @@ class UsdaFoodSuggestion {
   final String dataType;
   final String? foodCategory;
   final String? brandOwner;
+  final String? preparation;
+  final String? quantityBasis;
+  final String? matchQuery;
 
   factory UsdaFoodSuggestion.fromJson(Map<String, dynamic> json) {
     return UsdaFoodSuggestion(
@@ -23,6 +29,9 @@ class UsdaFoodSuggestion {
       dataType: json['data_type']?.toString() ?? 'Unknown',
       foodCategory: json['food_category']?.toString(),
       brandOwner: json['brand_owner']?.toString(),
+      preparation: json['preparation']?.toString(),
+      quantityBasis: json['quantity_basis']?.toString(),
+      matchQuery: json['match_query']?.toString(),
     );
   }
 
@@ -33,5 +42,8 @@ class UsdaFoodSuggestion {
         'data_type': dataType,
         if (foodCategory != null) 'food_category': foodCategory,
         if (brandOwner != null) 'brand_owner': brandOwner,
+        if (preparation != null) 'preparation': preparation,
+        if (quantityBasis != null) 'quantity_basis': quantityBasis,
+        if (matchQuery != null) 'match_query': matchQuery,
       };
 }
