@@ -8,9 +8,11 @@ import '../../../history/providers/analysis_history_provider.dart';
 import '../../../profile/providers/profile_provider.dart';
 import '../../../upload/models/analysis_job_progress.dart';
 import '../../models/manual_recipe.dart';
+import '../../models/draft_meal_guidance.dart';
 import '../../models/usda_food_suggestion.dart';
 import '../../repositories/saved_recipe_repository.dart';
 import '../../services/recipe_service.dart';
+import '../widgets/draft_meal_guidance_sheet.dart';
 
 class RecipeBuilderScreen extends ConsumerStatefulWidget {
   const RecipeBuilderScreen({
@@ -50,6 +52,10 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
   List<ManualRecipe> _savedRecipes = const [];
   bool _searching = false;
   bool _analyzing = false;
+  bool _guidanceEnabled = true;
+  bool _checkingGuidance = false;
+  int _draftRevision = 0;
+  int _guidanceAcceptedRevision = -1;
   String? _searchError;
   AnalysisJobProgress? _progress;
   final List<TextEditingController> _labelQuantityControllers = [];
@@ -63,6 +69,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       _servingsMadeController.text = _format(initial.servingsMade);
       _servingsEatenController.text = _format(initial.servingsEaten);
       _ingredients = [...initial.ingredients];
+      _draftRevision = 1;
     }
     for (final item in widget.labelItems) {
       final quantity = (item['quantity'] as num?)?.toDouble() ?? 1.0;
@@ -82,6 +89,11 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       });
     }
     _loadSaved();
+    if (widget.photoReview && _ingredients.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _evaluateGuidance(analysisCheckpoint: false);
+      });
+    }
   }
 
   @override
@@ -184,7 +196,9 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       }
       _searchController.clear();
       _suggestions = const [];
+      _draftRevision += 1;
     });
+    await _evaluateGuidance(analysisCheckpoint: false);
   }
 
   Future<void> _editIngredient(int index) async {
@@ -226,7 +240,9 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
         copy[index] = ingredient.copyWith(grams: value);
       }
       _ingredients = copy;
+      _draftRevision += 1;
     });
+    await _evaluateGuidance(analysisCheckpoint: false);
   }
 
   ManualRecipe? _buildRecipe() {
@@ -255,11 +271,111 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
     if (mounted) _message('Recipe saved.');
   }
 
+  List<Map<String, dynamic>>? _confirmedLabelItemsForGuidance() {
+    final confirmed = <Map<String, dynamic>>[];
+    for (var i = 0; i < widget.labelItems.length; i++) {
+      final quantity = double.tryParse(
+        _labelQuantityControllers[i].text.trim(),
+      );
+      if (quantity == null || quantity <= 0) return null;
+      confirmed.add({
+        'food_id': widget.labelItems[i]['food_id']?.toString() ?? '',
+        'quantity': quantity,
+        'unit': widget.labelItems[i]['unit']?.toString() ?? 'serving',
+      });
+    }
+    return confirmed;
+  }
+
+  void _searchSuggestedFood(String query) {
+    setState(() {
+      _searchController.text = query;
+      _searchController.selection = TextSelection.collapsed(
+        offset: query.length,
+      );
+    });
+    _search(query);
+  }
+
+  Future<bool> _evaluateGuidance({
+    required bool analysisCheckpoint,
+  }) async {
+    if (!_guidanceEnabled) return true;
+    final recipe = _buildRecipe();
+    if (recipe == null || _checkingGuidance) return !analysisCheckpoint;
+    final labels = _confirmedLabelItemsForGuidance();
+    if (labels == null) {
+      if (analysisCheckpoint) {
+        _message('Enter a valid amount for every packaged food.');
+      }
+      return false;
+    }
+
+    final revision = _draftRevision;
+    setState(() => _checkingGuidance = true);
+    try {
+      final DraftMealGuidance guidance = await _service.evaluateDraft(
+        recipe: recipe,
+        profile: ref.read(profileProvider).backendPayload,
+        analysisId: widget.analysisId,
+        labelItems: labels,
+        localHour: DateTime.now().hour,
+      );
+      if (!mounted || revision != _draftRevision) return false;
+      if (!guidance.hasAlerts) {
+        _guidanceAcceptedRevision = revision;
+        if (!analysisCheckpoint) _message(guidance.message);
+        return true;
+      }
+      final accepted = await showDraftMealGuidanceSheet(
+        context,
+        guidance: guidance,
+        analysisCheckpoint: analysisCheckpoint,
+        onSearchSuggestion: _searchSuggestedFood,
+      );
+      if (accepted) _guidanceAcceptedRevision = revision;
+      return accepted;
+    } catch (error) {
+      if (!mounted) return false;
+      if (!analysisCheckpoint) {
+        _message('Meal guidance is unavailable right now. You can continue.');
+        return true;
+      }
+      return await showDialog<bool>(
+            context: context,
+            builder: (dialogContext) => AlertDialog(
+              title: const Text('Guidance unavailable'),
+              content: const Text(
+                'The optional nutrient check could not be loaded. '
+                'You can still continue with the normal analysis.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, false),
+                  child: const Text('Go back'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(dialogContext, true),
+                  child: const Text('Continue anyway'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+    } finally {
+      if (mounted) setState(() => _checkingGuidance = false);
+    }
+  }
+
   Future<void> _analyze() async {
     final recipe = _buildRecipe();
-    if (recipe == null || _analyzing) {
+    if (recipe == null || _analyzing || _checkingGuidance) {
       if (recipe == null) _message('Add at least one ingredient and check the serving values.');
       return;
+    }
+    if (_guidanceEnabled && _guidanceAcceptedRevision != _draftRevision) {
+      final proceed = await _evaluateGuidance(analysisCheckpoint: true);
+      if (!proceed || !mounted) return;
     }
     setState(() {
       _analyzing = true;
@@ -315,13 +431,15 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
     }
   }
 
-  void _loadRecipe(ManualRecipe recipe) {
+  Future<void> _loadRecipe(ManualRecipe recipe) async {
     setState(() {
       _nameController.text = recipe.name;
       _servingsMadeController.text = _format(recipe.servingsMade);
       _servingsEatenController.text = _format(recipe.servingsEaten);
       _ingredients = [...recipe.ingredients];
+      _draftRevision += 1;
     });
+    await _evaluateGuidance(analysisCheckpoint: false);
   }
 
   @override
@@ -372,6 +490,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
             TextField(
               controller: _nameController,
               enabled: !_analyzing,
+              onChanged: (_) => _draftRevision += 1,
               textCapitalization: TextCapitalization.sentences,
               decoration: const InputDecoration(
                 labelText: 'Recipe name',
@@ -452,6 +571,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
                         subtitle: Text(
                           [
                             _friendlyDataType(_suggestions[i].dataType),
+                            'FDC ${_suggestions[i].fdcId}',
                             if (_suggestions[i].brandOwner != null) _suggestions[i].brandOwner!,
                           ].join(' • '),
                         ),
@@ -492,7 +612,23 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
                     child: ListTile(
                       leading: const CircleAvatar(child: Icon(Icons.restaurant_rounded)),
                       title: Text(ingredient.food.displayName, maxLines: 2, overflow: TextOverflow.ellipsis),
-                      subtitle: Text('${_format(ingredient.grams)} g • ${_friendlyDataType(ingredient.food.dataType)}'),
+                      subtitle: Text(
+                        [
+                          '${_format(ingredient.grams)} g',
+                          if (ingredient.food.quantityBasis == 'as_served')
+                            'as served',
+                          if (ingredient.food.preparation?.trim().isNotEmpty == true)
+                            ingredient.food.preparation!.trim(),
+                          _friendlyDataType(ingredient.food.dataType),
+                          'FDC ${ingredient.food.fdcId}',
+                          if (ingredient.food.description.trim().isNotEmpty &&
+                              ingredient.food.description.trim().toLowerCase() !=
+                                  ingredient.food.displayName.trim().toLowerCase())
+                            ingredient.food.description.trim(),
+                        ].join(' • '),
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                       trailing: const Icon(Icons.edit_outlined),
                       onTap: _analyzing ? null : () => _editIngredient(entry.key),
                     ),
@@ -606,6 +742,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
                           controller:
                               _labelQuantityControllers[index],
                           enabled: !_analyzing,
+                          onChanged: (_) => _draftRevision += 1,
                           keyboardType:
                               const TextInputType.numberWithOptions(
                             decimal: true,
@@ -632,6 +769,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
                   child: TextField(
                     controller: _servingsMadeController,
                     enabled: !_analyzing,
+                    onChanged: (_) => _draftRevision += 1,
                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                     decoration: const InputDecoration(labelText: 'Recipe makes', suffixText: 'servings'),
                   ),
@@ -641,12 +779,32 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
                   child: TextField(
                     controller: _servingsEatenController,
                     enabled: !_analyzing,
+                    onChanged: (_) => _draftRevision += 1,
                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                     decoration: const InputDecoration(labelText: 'You ate', suffixText: 'servings'),
                   ),
                 ),
               ],
             ),
+            const SizedBox(height: 14),
+            SwitchListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              value: _guidanceEnabled,
+              onChanged: _analyzing || _checkingGuidance
+                  ? null
+                  : (value) => setState(() => _guidanceEnabled = value),
+              title: const Text('Optional nutrient guidance'),
+              subtitle: const Text(
+                'Check macro and micronutrient excesses or shortfalls before analysis. You can continue anyway.',
+              ),
+              secondary: const Icon(Icons.balance_outlined),
+            ),
+            if (_checkingGuidance) ...[
+              const SizedBox(height: 8),
+              const LinearProgressIndicator(),
+              const SizedBox(height: 8),
+              const Text('Checking this draft’s nutrient balance…'),
+            ],
             if (_analyzing) ...[
               const SizedBox(height: 24),
               LinearProgressIndicator(value: _progress?.progress),
@@ -658,7 +816,9 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: _analyzing ? null : _saveRecipe,
+                    onPressed: _analyzing || _checkingGuidance
+                        ? null
+                        : _saveRecipe,
                     icon: const Icon(Icons.bookmark_add_outlined),
                     label: const Text('Save recipe'),
                   ),
@@ -666,9 +826,19 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: FilledButton.icon(
-                    onPressed: _analyzing ? null : _analyze,
+                    onPressed: _analyzing || _checkingGuidance
+                        ? null
+                        : _analyze,
                     icon: const Icon(Icons.analytics_outlined),
-                    label: Text(_analyzing ? 'Analyzing…' : (widget.photoReview ? 'Confirm & analyze' : 'Analyze')),
+                    label: Text(
+                      _checkingGuidance
+                          ? 'Checking…'
+                          : _analyzing
+                              ? 'Analyzing…'
+                              : (widget.photoReview
+                                  ? 'Confirm & analyze'
+                                  : 'Analyze'),
+                    ),
                   ),
                 ),
               ],
