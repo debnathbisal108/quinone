@@ -8,6 +8,7 @@ import '../../../core/api/dio_client.dart';
 import '../../../core/config/api_config.dart';
 import '../../upload/models/analysis_job_progress.dart';
 import '../models/manual_recipe.dart';
+import '../models/draft_meal_guidance.dart';
 import '../models/usda_food_suggestion.dart';
 
 class RecipeServiceException implements Exception {
@@ -157,6 +158,41 @@ class RecipeService {
       throw _mapDioError(
         error,
         operation: 'analyze recipe',
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<DraftMealGuidance> evaluateDraft({
+    required ManualRecipe recipe,
+    Map<String, dynamic>? profile,
+    String? analysisId,
+    List<Map<String, dynamic>> labelItems = const [],
+    int? localHour,
+  }) async {
+    final payload = recipe.toBackendJson(profile: profile)
+      ..addAll({
+        if (analysisId?.trim().isNotEmpty == true)
+          'analysis_id': analysisId!.trim(),
+        if (labelItems.isNotEmpty) 'label_items': labelItems,
+        'local_hour': localHour ?? DateTime.now().hour,
+      });
+    try {
+      final response = await _dio.post<dynamic>(
+        _absoluteUrl(ApiConfig.draftMealGuidanceEndpoint),
+        data: jsonEncode(payload),
+        options: Options(
+          responseType: ResponseType.json,
+          contentType: Headers.jsonContentType,
+          headers: const {'Accept': 'application/json'},
+          receiveTimeout: const Duration(seconds: 45),
+        ),
+      );
+      return DraftMealGuidance.fromJson(_asMap(response.data));
+    } on DioException catch (error, stackTrace) {
+      throw _mapDioError(
+        error,
+        operation: 'evaluate meal guidance',
         stackTrace: stackTrace,
       );
     }
