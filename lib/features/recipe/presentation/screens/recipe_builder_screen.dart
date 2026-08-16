@@ -324,7 +324,6 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       if (!mounted || revision != _draftRevision) return false;
       if (!guidance.hasAlerts) {
         _guidanceAcceptedRevision = revision;
-        if (!analysisCheckpoint) _message(guidance.message);
         return true;
       }
       final accepted = await showDraftMealGuidanceSheet(
@@ -571,7 +570,6 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
                         subtitle: Text(
                           [
                             _friendlyDataType(_suggestions[i].dataType),
-                            'FDC ${_suggestions[i].fdcId}',
                             if (_suggestions[i].brandOwner != null) _suggestions[i].brandOwner!,
                           ].join(' • '),
                         ),
@@ -620,7 +618,6 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
                           if (ingredient.food.preparation?.trim().isNotEmpty == true)
                             ingredient.food.preparation!.trim(),
                           _friendlyDataType(ingredient.food.dataType),
-                          'FDC ${ingredient.food.fdcId}',
                           if (ingredient.food.description.trim().isNotEmpty &&
                               ingredient.food.description.trim().toLowerCase() !=
                                   ingredient.food.displayName.trim().toLowerCase())
