@@ -2774,17 +2774,23 @@ Return this shape:
 
 Rules:
 - Ignore plates, cutlery, napkins and other non-food objects.
-- Inspect the bowl or plate in layers before finalizing: underlying base first,
-  then mixed-in foods, then visible toppings. A base such as rolled oats,
-  yogurt, cereal, rice, noodles, milk or porridge must not be omitted merely
-  because fruit, seeds or nuts cover part of it.
-- Before returning, perform a coverage check for every occupied container:
-  identify what supplies the majority of its edible mass. If toppings are
-  listed but the visible base beneath them is missing, the response is
-  incomplete and must be corrected.
-- If multiple toppings are visible over a substantial food mass, identify the
-  underlying nutrient-bearing base. Return the base ingredient (for example
-  Rolled oats), never the prepared parent label (for example Oatmeal).
+- Build a complete visual coverage ledger before naming foods. For every
+  occupied container, sweep left-to-right and top-to-bottom, then inspect all
+  visible layers: dominant mass, secondary masses, fillings, mix-ins, sauces,
+  spreads, toppings, garnish and beverages. Every visually distinct edible
+  region must map to exactly one returned atomic food, regardless of its food
+  category. A large or partly covered component must never be omitted because
+  smaller, clearer components are easier to recognize.
+- Reconcile the ledger before returning. The final list must cover the entire
+  defensible visible edible mass, contain no duplicate/synonym/preparation
+  variants, and contain no generic dish or combined-food parent when the same
+  mass is already represented by its atomic components. This applies equally
+  to bowls, plates, curries, sandwiches, wraps, salads, soups, drinks, desserts
+  and isolated foods.
+- Break foods down only as far as the photograph supports. Never invent a
+  fully hidden ingredient, but never replace multiple clearly visible foods
+  with one vague combined label. A prepared dish name belongs in meal_type,
+  not as an extra nutrient-bearing food when its components are listed.
 - Hydration-expanded staple ingredients must use their dry foundational
   reference basis when they are recovered from a prepared dish. This includes
   oats, rice, barley, quinoa, couscous, bulgur, millet, pasta/noodles,
@@ -3583,9 +3589,11 @@ def _audit_and_correct_complete_food_inventory(
         f"The provisional detector returned: {json.dumps(provisional)}. Treat "
         "that list only as a checklist: preserve items verified in the image, "
         "remove false positives, and recover every missed edible component.\n\n"
-        "Perform a complete visual sweep: every container; left-to-right and "
-        "top-to-bottom; then each item from underlying base through mixed-in "
-        "ingredients, fillings, spreads, sauces, toppings and garnishes. "
+        "Build a visual coverage ledger for every container: sweep left-to-right "
+        "and top-to-bottom, then inspect every visible layer and region, including "
+        "dominant and secondary masses, fillings, mix-ins, spreads, sauces, "
+        "toppings, garnishes and beverages. Every defensible visible edible "
+        "region must map to exactly one returned item, regardless of food category. "
         "Return ONE flat inventory of atomic nutrient-bearing foods. Split "
         "sandwiches into bread/fillings/spreads, salads into their visible "
         "ingredients, bowls into base/mix-ins/toppings, and mixed dishes into "
@@ -3596,7 +3604,12 @@ def _audit_and_correct_complete_food_inventory(
         "synonym, or has both a prepared and ingredient name; aggregate its "
         "mass into one item unless the foods are different branded products. "
         "A prepared dish name is not an extra food when its constituent "
-        "ingredients are present. For hydration-expanded staple bases such "
+        "ingredients are present. Before returning, reconcile the coverage ledger: "
+        "(1) no visible edible region may be unrepresented; (2) no physical food "
+        "may appear twice through a synonym, prepared name, crop, or combined parent; "
+        "and (3) no vague combined label may remain when the image supports its "
+        "individual foods. Apply these rules to every food type, not a preset list. "
+        "For hydration-expanded staple bases such "
         "as oats, rice, barley, quinoa, couscous, bulgur, millet, pasta, "
         "noodles, buckwheat, semolina, cornmeal, lentils, beans or chickpeas, "
         "return the dry foundational ingredient and estimate its dry grams "
@@ -3668,17 +3681,12 @@ def _audit_and_correct_complete_food_inventory(
         if isinstance(item, dict)
     ]
 
-    # The auditor is allowed to recover omissions but not to erase a valid
-    # primary detection. Start with its corrected inventory, then preserve any
-    # primary item it did not represent. post_process() performs the final
-    # alias-aware duplicate reconciliation.
+    # A successful audit returns the complete corrected inventory, not a list
+    # of additions. Treating every omitted provisional item as mandatory used
+    # to re-introduce false positives and combined-dish parents that the audit
+    # had explicitly removed. If the audit fails validation it is discarded
+    # before this point and the untouched primary result remains the fallback.
     foods = list(audited_foods)
-    for primary_food in provisional_foods if isinstance(provisional_foods, list) else []:
-        if not isinstance(primary_food, dict):
-            continue
-        if any(_same_core_food(primary_food, audited_food) for audited_food in foods):
-            continue
-        foods.append(copy.deepcopy(primary_food))
 
     primary_identities = {
         _canonical_food_identity(food)
@@ -3711,7 +3719,12 @@ def _audit_and_correct_complete_food_inventory(
 
 
 def _should_audit_complete_food_inventory(result: dict[str, Any]) -> bool:
-    """Use the second pass for visually compound meals, not isolated foods."""
+    """Audit any draft whose own structure suggests incomplete coverage.
+
+    Isolated main foods avoid a second model call. Compound meals and drafts
+    containing only sides/toppings/ingredients receive the universal visual
+    ledger audit, independent of any particular cuisine or food name.
+    """
     meal = result.get("meal")
     if not isinstance(meal, dict):
         return False
@@ -3724,10 +3737,22 @@ def _should_audit_complete_food_inventory(result: dict[str, Any]) -> bool:
     if any(food.get("analysis_route") == "DECOMPOSE" for food in valid_foods):
         return True
     meal_type = _identity_text(meal.get("meal_type"))
-    return any(
+    if any(
         token in meal_type
-        for token in ("mixed", "bowl", "salad", "sandwich", "curry", "porridge")
-    )
+        for token in (
+            "mixed", "bowl", "plate", "salad", "sandwich", "wrap",
+            "burger", "curry", "stew", "soup", "porridge", "meal",
+            "platter", "dessert",
+        )
+    ):
+        return True
+    if not valid_foods:
+        return False
+    roles = {
+        str(food.get("role") or "").lower().strip()
+        for food in valid_foods
+    }
+    return not roles or roles.isdisjoint({"main", "beverage", "snack"})
 
 
 SEPARATORS = ["/", "&", ",", " and "]
@@ -4614,6 +4639,78 @@ _COMPOSITE_PARENT_COMPONENT_ALIASES: dict[str, set[str]] = {
     "porridge": {"oats", "rolled oats"},
 }
 
+_GENERIC_COMPOSITE_FAMILIES: dict[str, tuple[str, int]] = {
+    "mixed vegetable": ("vegetable", 2),
+    "vegetable mix": ("vegetable", 2),
+    "mixed veg": ("vegetable", 2),
+    "vegetable medley": ("vegetable", 2),
+    "mixed fruit": ("fruit", 2),
+    "fruit salad": ("fruit", 2),
+    "mixed berry": ("fruit", 2),
+    "mixed nut": ("nut_seed", 2),
+    "mixed seed": ("nut_seed", 2),
+    "mixed seafood": ("protein", 2),
+    "mixed grill": ("protein", 2),
+    "garden salad": ("produce", 2),
+    "mixed salad": ("produce", 2),
+}
+
+
+def _atomic_food_families(food: dict[str, Any]) -> set[str]:
+    """Broad families used only to prove that a generic parent is redundant."""
+    identity = _canonical_food_identity(food)
+    tokens = set(identity.split())
+    category = str(food.get("category") or "").lower().strip()
+    families: set[str] = set()
+
+    vegetable_tokens = {
+        "pea", "onion", "carrot", "pepper", "chilli", "chili", "tomato",
+        "cucumber", "spinach", "broccoli", "cauliflower", "cabbage", "okra",
+        "zucchini", "eggplant", "aubergine", "corn", "lettuce", "radish",
+        "beet", "mushroom", "vegetable",
+    }
+    fruit_tokens = {
+        "apple", "banana", "orange", "berry", "blueberry", "strawberry",
+        "grape", "mango", "melon", "watermelon", "papaya", "pineapple",
+        "fruit", "pear", "peach", "plum", "kiwi",
+    }
+    nut_seed_tokens = {
+        "nut", "almond", "cashew", "walnut", "peanut", "pistachio",
+        "seed", "chia", "flax", "sesame", "sunflower",
+    }
+    protein_tokens = {
+        "chicken", "fish", "salmon", "tuna", "prawn", "shrimp", "meat",
+        "beef", "pork", "lamb", "egg", "paneer", "tofu", "lentil", "bean",
+        "chickpea", "seafood",
+    }
+
+    if category == "vegetable" or tokens & vegetable_tokens:
+        families.update(("vegetable", "produce"))
+    if category == "fruit" or tokens & fruit_tokens:
+        families.update(("fruit", "produce"))
+    if category in {"nut", "seed", "nuts and seeds"} or tokens & nut_seed_tokens:
+        families.add("nut_seed")
+    if category in {"meat", "fish", "seafood", "egg", "legume", "dairy"} or tokens & protein_tokens:
+        families.add("protein")
+    return families
+
+
+def _generic_composite_components(
+    identity: str,
+    foods: list[dict[str, Any]],
+    parent_index: int,
+) -> list[dict[str, Any]]:
+    rule = _GENERIC_COMPOSITE_FAMILIES.get(identity)
+    if rule is None:
+        return []
+    family, minimum = rule
+    matches = [
+        food
+        for index, food in enumerate(foods)
+        if index != parent_index and family in _atomic_food_families(food)
+    ]
+    return matches if len(matches) >= minimum else []
+
 
 def _suppress_redundant_composite_parents(
     foods: list[dict[str, Any]],
@@ -4661,7 +4758,18 @@ def _suppress_redundant_composite_parents(
             & other_identities
         )
 
-        if explicit_child_present or nested_match_present or alias_match_present:
+        generic_components = _generic_composite_components(
+            identity,
+            foods,
+            index,
+        )
+
+        if (
+            explicit_child_present
+            or nested_match_present
+            or alias_match_present
+            or generic_components
+        ):
             discarded.append({
                 "reason": "redundant_prepared_dish_parent",
                 "discarded_name": food.get("name"),
@@ -4672,6 +4780,10 @@ def _suppress_redundant_composite_parents(
                         nested_names
                         | _COMPOSITE_PARENT_COMPONENT_ALIASES.get(identity, set())
                     )
+                ),
+                "matching_atomic_components": sorted(
+                    _canonical_food_identity(item)
+                    for item in generic_components
                 ),
             })
             continue
