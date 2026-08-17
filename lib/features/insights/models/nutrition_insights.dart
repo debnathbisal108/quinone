@@ -51,6 +51,18 @@ class NutrientTargetBand {
   }
 }
 
+class FoodMetricContribution {
+  const FoodMetricContribution({
+    required this.foodName,
+    required this.percentage,
+    this.amount,
+  });
+
+  final String foodName;
+  final double percentage;
+  final double? amount;
+}
+
 class MealHealthImpact {
   const MealHealthImpact({
     required this.analysisId,
@@ -78,6 +90,8 @@ class DailyNutritionInsight {
     required this.overallHealthScore,
     required this.targets,
     required this.mealImpacts,
+    required this.nutrientContributions,
+    required this.healthContributions,
   });
 
   final DateTime date;
@@ -89,6 +103,8 @@ class DailyNutritionInsight {
   final double overallHealthScore;
   final Map<String, NutrientTargetBand> targets;
   final List<MealHealthImpact> mealImpacts;
+  final Map<String, List<FoodMetricContribution>> nutrientContributions;
+  final Map<String, List<FoodMetricContribution>> healthContributions;
 
   double? metricValue(InsightCategory category, String key) {
     switch (category) {
@@ -103,6 +119,16 @@ class DailyNutritionInsight {
   }
 
   NutrientTargetBand? targetFor(String key) => targets[key];
+
+  List<FoodMetricContribution> contributorsFor(
+    InsightCategory category,
+    String key,
+  ) {
+    if (category == InsightCategory.health) {
+      return healthContributions[key] ?? const [];
+    }
+    return nutrientContributions[key] ?? const [];
+  }
 }
 
 class NutrientBalanceSummary {
@@ -537,6 +563,10 @@ DailyNutritionInsight _buildDay(
   final domainWeights = <String, double>{};
   final mealImpacts = <MealHealthImpact>[];
   final targets = <String, NutrientTargetBand>{};
+  final nutrientContributionAmounts =
+      <String, Map<String, _NamedAmount>>{};
+  final healthContributionWeights =
+      <String, Map<String, _NamedAmount>>{};
 
   var calories = 0.0;
   var weightedOverall = 0.0;
@@ -582,6 +612,35 @@ DailyNutritionInsight _buildDay(
         final band = _bandFromPersonalizedTarget(targetEntry.value);
         if (band != null) {
           targets[targetEntry.key] = band;
+        }
+      }
+
+      final nutrientKeys = <String>{
+        ...record.macronutrients.keys,
+        ...record.micronutrients.keys,
+      };
+      for (final nutrientKey in nutrientKeys) {
+        for (final contribution in parsed.contributionsFor(nutrientKey)) {
+          _addNamedAmount(
+            nutrientContributionAmounts,
+            nutrientKey,
+            contribution.foodName,
+            contribution.amount,
+          );
+        }
+      }
+
+      final healthWeights = _healthEvidenceWeightsByFood(record.rawResult);
+      for (final domainEntry in healthWeights.entries) {
+        for (final foodEntry in domainEntry.value.entries) {
+          // Daily health scores are meal-energy weighted, so food influence
+          // uses the same meal weight before percentages are calculated.
+          _addNamedAmount(
+            healthContributionWeights,
+            domainEntry.key,
+            foodEntry.value.name,
+            foodEntry.value.amount * weight,
+          );
         }
       }
     } catch (_) {
@@ -640,6 +699,48 @@ DailyNutritionInsight _buildDay(
     }
   }
 
+  final nutrientContributions = <String, List<FoodMetricContribution>>{};
+  for (final entry in nutrientContributionAmounts.entries) {
+    final total = macros[entry.key] ?? micros[entry.key] ?? 0.0;
+    if (total <= 0) continue;
+    final items = entry.value.values
+        .where((item) => item.amount > 0)
+        .map(
+          (item) => FoodMetricContribution(
+            foodName: item.name,
+            amount: item.amount,
+            percentage: (item.amount / total * 100).clamp(0.0, 100.0).toDouble(),
+          ),
+        )
+        .toList(growable: false)
+      ..sort((a, b) => b.percentage.compareTo(a.percentage));
+    if (items.isNotEmpty) {
+      nutrientContributions[entry.key] = List.unmodifiable(items);
+    }
+  }
+
+  final healthContributions = <String, List<FoodMetricContribution>>{};
+  for (final entry in healthContributionWeights.entries) {
+    final totalWeight = entry.value.values.fold<double>(
+      0,
+      (sum, item) => sum + item.amount,
+    );
+    if (totalWeight <= 0) continue;
+    final items = entry.value.values
+        .where((item) => item.amount > 0)
+        .map(
+          (item) => FoodMetricContribution(
+            foodName: item.name,
+            percentage: item.amount / totalWeight * 100,
+          ),
+        )
+        .toList(growable: false)
+      ..sort((a, b) => b.percentage.compareTo(a.percentage));
+    if (items.isNotEmpty) {
+      healthContributions[entry.key] = List.unmodifiable(items);
+    }
+  }
+
   return DailyNutritionInsight(
     date: day,
     mealCount: records.length,
@@ -650,7 +751,117 @@ DailyNutritionInsight _buildDay(
     overallHealthScore: overall,
     targets: Map.unmodifiable(targets),
     mealImpacts: List.unmodifiable(mealImpacts),
+    nutrientContributions: Map.unmodifiable(nutrientContributions),
+    healthContributions: Map.unmodifiable(healthContributions),
   );
+}
+
+class _NamedAmount {
+  _NamedAmount(this.name, this.amount);
+
+  final String name;
+  double amount;
+}
+
+void _addNamedAmount(
+  Map<String, Map<String, _NamedAmount>> destination,
+  String metricKey,
+  String foodName,
+  double amount,
+) {
+  if (!amount.isFinite || amount <= 0) return;
+  final cleanName = foodName.trim();
+  if (cleanName.isEmpty) return;
+  final normalized = cleanName.toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+  final byFood = destination.putIfAbsent(metricKey, () => {});
+  final existing = byFood[normalized];
+  if (existing == null) {
+    byFood[normalized] = _NamedAmount(cleanName, amount);
+  } else {
+    existing.amount += amount;
+  }
+}
+
+Map<String, Map<String, _NamedAmount>> _healthEvidenceWeightsByFood(
+  Map<String, dynamic> rawResult,
+) {
+  final root = _unwrapInsightResult(rawResult);
+  final meal = _asMapLocal(root['meal']) ?? root;
+  final result = <String, Map<String, _NamedAmount>>{};
+
+  for (final rawFood in _asListLocal(meal['foods'])) {
+    final food = _asMapLocal(rawFood);
+    if (food == null) continue;
+    final foodName = _foodDisplayName(food);
+    if (foodName == null) continue;
+    _collectFoodHealthEvidence(food, foodName, result);
+  }
+  return result;
+}
+
+void _collectFoodHealthEvidence(
+  Map<String, dynamic> food,
+  String rootFoodName,
+  Map<String, Map<String, _NamedAmount>> destination,
+) {
+  final evidence = _asMapLocal(food['evidence']);
+  for (final rawItem in _asListLocal(evidence?['items'])) {
+    final item = _asMapLocal(rawItem);
+    if (item == null) continue;
+    final domain = item['domain']?.toString().trim();
+    if (domain == null || domain.isEmpty) continue;
+    final weight = _finiteDouble(item['effective_weight']).abs();
+    if (weight <= 0) continue;
+    _addNamedAmount(destination, domain, rootFoodName, weight);
+  }
+
+  // Match the backend scoring traversal: an aggregated DECOMPOSE parent
+  // already contains its components' evidence and must not be counted twice.
+  final route = food['analysis_route']?.toString().toUpperCase();
+  final nutrientStatus = food['nutrient_status']?.toString();
+  if (route == 'DECOMPOSE' && nutrientStatus == 'aggregated_from_components') {
+    return;
+  }
+
+  for (final childKey in const ['ingredients', 'spices']) {
+    for (final rawChild in _asListLocal(food[childKey])) {
+      final child = _asMapLocal(rawChild);
+      if (child == null) continue;
+      _collectFoodHealthEvidence(child, rootFoodName, destination);
+    }
+  }
+}
+
+Map<String, dynamic> _unwrapInsightResult(Map<String, dynamic> json) {
+  for (final key in const ['final_result', 'meal_analysis', 'data']) {
+    final nested = _asMapLocal(json[key]);
+    if (nested != null && nested.isNotEmpty) return nested;
+  }
+  return json;
+}
+
+Map<String, dynamic>? _asMapLocal(dynamic value) {
+  if (value is Map<String, dynamic>) return value;
+  if (value is Map) return Map<String, dynamic>.from(value);
+  return null;
+}
+
+List<dynamic> _asListLocal(dynamic value) => value is List ? value : const [];
+
+String? _foodDisplayName(Map<String, dynamic> food) {
+  for (final key in const ['display_name', 'name', 'canonical_name']) {
+    final value = food[key]?.toString().trim();
+    if (value != null && value.isNotEmpty) return value;
+  }
+  return null;
+}
+
+double _finiteDouble(dynamic value) {
+  if (value == null || value is bool) return 0;
+  final parsed = value is num
+      ? value.toDouble()
+      : double.tryParse(value.toString());
+  return parsed?.isFinite == true ? parsed! : 0;
 }
 
 NutrientTargetBand? _bandFromPersonalizedTarget(
