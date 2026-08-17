@@ -160,6 +160,22 @@ class _ServingConfirmationScreenState
     if (changed) _revision += 1;
   }
 
+  List<Map<String, dynamic>> _todayResultsForGuidance() {
+    final now = DateTime.now();
+    final currentAnalysisId =
+        widget.payload['analysis_id']?.toString().trim() ?? '';
+    return ref
+        .read(analysisHistoryProvider)
+        .where((record) => _sameLocalDay(record.createdAt, now))
+        .where(
+          (record) => currentAnalysisId.isEmpty ||
+              record.analysisId != currentAnalysisId,
+        )
+        .where((record) => record.rawResult.isNotEmpty)
+        .map((record) => Map<String, dynamic>.from(record.rawResult))
+        .toList(growable: false);
+  }
+
   Future<bool> _evaluateGuidance({
     required bool analysisCheckpoint,
   }) async {
@@ -174,11 +190,15 @@ class _ServingConfirmationScreenState
         analysisId: analysisId,
         items: items,
         profile: ref.read(profileProvider).backendPayload,
+        todayResults: _todayResultsForGuidance(),
+        includeShortfalls: analysisCheckpoint,
         localHour: DateTime.now().hour,
       );
       if (!mounted || revision != _revision) return false;
       if (!guidance.hasAlerts) {
-        _acceptedGuidanceRevision = revision;
+        if (analysisCheckpoint) {
+          _acceptedGuidanceRevision = revision;
+        }
         return true;
       }
       final result = await showDraftMealGuidanceSheet(
@@ -195,7 +215,9 @@ class _ServingConfirmationScreenState
       }
       if (!result.accepted) return false;
       _applyGuidanceQuantities(result.adjustedQuantities);
-      _acceptedGuidanceRevision = _revision;
+      if (analysisCheckpoint) {
+        _acceptedGuidanceRevision = _revision;
+      }
       return true;
     } catch (_) {
       if (!mounted) return false;
@@ -334,6 +356,14 @@ class _ServingConfirmationScreenState
 }
 
 String _guidanceFoodKey(String value) => value.trim().toLowerCase();
+
+bool _sameLocalDay(DateTime a, DateTime b) {
+  final left = a.toLocal();
+  final right = b.toLocal();
+  return left.year == right.year &&
+      left.month == right.month &&
+      left.day == right.day;
+}
 
 class _ServingCard extends StatelessWidget {
   const _ServingCard({
