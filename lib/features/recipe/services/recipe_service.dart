@@ -168,6 +168,8 @@ class RecipeService {
     Map<String, dynamic>? profile,
     String? analysisId,
     List<Map<String, dynamic>> labelItems = const [],
+    List<Map<String, dynamic>> todayResults = const [],
+    bool includeShortfalls = true,
     int? localHour,
   }) async {
     final payload = recipe.toBackendJson(profile: profile)
@@ -175,6 +177,8 @@ class RecipeService {
         if (analysisId?.trim().isNotEmpty == true)
           'analysis_id': analysisId!.trim(),
         if (labelItems.isNotEmpty) 'label_items': labelItems,
+        if (todayResults.isNotEmpty) 'today_results': todayResults,
+        'include_shortfalls': includeShortfalls,
         'local_hour': localHour ?? DateTime.now().hour,
       });
     try {
