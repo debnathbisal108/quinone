@@ -21,7 +21,7 @@ from recommendation_engine import (
 )
 
 
-GUIDANCE_ENGINE_VERSION = "1.2.0"
+GUIDANCE_ENGINE_VERSION = "1.4.0"
 
 _LABELS: dict[str, tuple[str, str]] = {
     "energy_kcal": ("Energy", "kcal"),
@@ -45,17 +45,35 @@ _LABELS: dict[str, tuple[str, str]] = {
     "vitamin_d_ug": ("Vitamin D", "µg"),
     "vitamin_e_mg": ("Vitamin E", "mg"),
     "vitamin_k_ug": ("Vitamin K", "µg"),
+    "thiamin_mg": ("Thiamin", "mg"),
+    "riboflavin_mg": ("Riboflavin", "mg"),
+    "niacin_mg": ("Niacin", "mg"),
+    "pantothenic_acid_mg": ("Pantothenic acid", "mg"),
+    "vitamin_b6_mg": ("Vitamin B6", "mg"),
     "folate_ug": ("Folate", "µg"),
     "vitamin_b12_ug": ("Vitamin B12", "µg"),
+    "choline_mg": ("Choline", "mg"),
+    "copper_mg": ("Copper", "mg"),
+    "manganese_mg": ("Manganese", "mg"),
+    "selenium_ug": ("Selenium", "µg"),
+    "iodine_ug": ("Iodine", "µg"),
+    "chromium_ug": ("Chromium", "µg"),
+    "molybdenum_ug": ("Molybdenum", "µg"),
+    "fluoride_mg": ("Fluoride", "mg"),
+    "linoleic_acid_g": ("Linoleic acid", "g"),
+    "alpha_linolenic_acid_g": ("Alpha-linolenic acid", "g"),
 }
 
-_MACROS = {"energy_kcal", "protein_g", "carbohydrate_g", "fat_g", "fiber_g"}
-_SHORTFALL_KEYS = (
-    "energy_kcal", "protein_g", "carbohydrate_g", "fat_g", "fiber_g",
-    "calcium_mg", "iron_mg", "magnesium_mg",
-    "potassium_mg", "vitamin_c_mg", "vitamin_d_ug", "vitamin_b12_ug",
-    "folate_ug", "zinc_mg",
-)
+_MACRO_ORDER = ("energy_kcal", "protein_g", "carbohydrate_g", "fat_g", "fiber_g")
+_MACROS = set(_MACRO_ORDER)
+_NO_SHORTFALL_KEYS = {
+    "sodium_mg",
+    "saturated_fat_g",
+    "trans_fat_g",
+    "added_sugars_g",
+    "sugars_g",
+    "cholesterol_mg",
+}
 _HARD_DAILY_CAPS = {
     "sodium_mg": 2300.0,
     "saturated_fat_g": 20.0,
@@ -74,9 +92,57 @@ def _number(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def _unwrap_result(result: dict[str, Any]) -> dict[str, Any]:
+    for key in ("final_result", "meal_analysis", "data", "result"):
+        nested = result.get(key)
+        if isinstance(nested, dict) and isinstance(nested.get("meal"), dict):
+            return nested
+    return result
+
+
 def _foods(result: dict[str, Any]) -> list[dict[str, Any]]:
-    raw = result.get("meal", {}).get("foods", [])
+    raw = _unwrap_result(result).get("meal", {}).get("foods", [])
     return [food for food in raw if isinstance(food, dict)] if isinstance(raw, list) else []
+
+
+def _day_foods(today_results: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    foods: list[dict[str, Any]] = []
+    seen_results: set[str] = set()
+    for index, result in enumerate(today_results, start=1):
+        if not isinstance(result, dict):
+            continue
+        root = _unwrap_result(result)
+        identity = str(
+            result.get("analysis_id")
+            or root.get("analysis_id")
+            or f"history_{index}"
+        )
+        if identity in seen_results:
+            continue
+        seen_results.add(identity)
+        foods.extend(_foods(root))
+    return foods
+
+
+def _combined_totals(*sources: dict[str, float]) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for source in sources:
+        for key, value in source.items():
+            totals[key] = totals.get(key, 0.0) + value
+    return {key: round(value, 4) for key, value in totals.items()}
+
+
+def _label_and_unit(
+    key: str,
+    target: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    known = _LABELS.get(key)
+    if known is not None:
+        return known
+    target = target if isinstance(target, dict) else {}
+    label = str(target.get("nutrient_name") or key.replace("_", " ").title())
+    unit = str(target.get("resolved_unit") or "").split("/", 1)[0]
+    return label, unit
 
 
 def _nutrient_totals(
@@ -218,10 +284,15 @@ def build_draft_meal_guidance(
     *,
     profile: dict[str, Any] | None,
     local_hour: int = 12,
+    today_results: Iterable[dict[str, Any]] = (),
+    include_shortfalls: bool = True,
 ) -> dict[str, Any]:
     normalized_profile = normalize_user_profile(profile)
     foods = _foods(nutrient_result)
-    totals, reported = _nutrient_totals(foods)
+    draft_totals, reported = _nutrient_totals(foods)
+    history_foods = _day_foods(today_results)
+    history_totals, history_reported = _nutrient_totals(history_foods)
+    projected_totals = _combined_totals(history_totals, draft_totals)
     meal_name = str(
         nutrient_result.get("meal", {}).get("meal_name")
         or nutrient_result.get("meal", {}).get("meal_type")
@@ -241,13 +312,13 @@ def build_draft_meal_guidance(
     for key in sorted(clinical_keys & reported):
         if key not in {"protein_g", "sodium_mg", "potassium_mg", "phosphorus_mg"}:
             continue
-        label, unit = _LABELS.get(key, (key.replace("_", " ").title(), ""))
+        label, unit = _label_and_unit(key, targets.get(key))
         alerts.append({
             "direction": "clinical",
             "severity": "notice",
             "nutrient": key,
             "label": label,
-            "amount": round(max(0.0, totals.get(key, 0.0)), 2),
+            "amount": round(max(0.0, projected_totals.get(key, 0.0)), 2),
             "unit": unit,
             "reference": 0.0,
             "percentage": 0.0,
@@ -263,7 +334,7 @@ def build_draft_meal_guidance(
     # personalized daily range edge. The range edge is used only when the
     # target engine actually supplies one; a minimum/RDA is never converted
     # into a fabricated upper limit.
-    for key in _MACROS:
+    for key in _MACRO_ORDER:
         if key not in reported or key in clinical_keys:
             continue
         target = targets.get(key) if isinstance(targets, dict) else None
@@ -274,33 +345,37 @@ def build_draft_meal_guidance(
             continue
         actual_daily_high = _actual_upper_target(target)
         expected_high = allocation_high * fraction
-        amount = max(0.0, totals.get(key, 0.0))
+        draft_amount = max(0.0, draft_totals.get(key, 0.0))
+        projected_amount = max(0.0, projected_totals.get(key, 0.0))
         daily_ratio = (
-            amount / actual_daily_high
+            projected_amount / actual_daily_high
             if actual_daily_high is not None and actual_daily_high > 0
             else 0.0
         )
-        daily_reference_ratio = amount / allocation_high
-        meal_ratio = amount / expected_high if expected_high > 0 else 0.0
+        daily_reference_ratio = projected_amount / allocation_high
+        meal_ratio = draft_amount / expected_high if expected_high > 0 else 0.0
         above_protein_target = (
             key == "protein_g"
             and actual_daily_high is None
-            and daily_reference_ratio >= 1.0
+            and daily_reference_ratio > 1.0
         )
         if (
-            daily_ratio < 1.0
+            daily_ratio <= 1.0
             and not above_protein_target
-            and meal_ratio < 1.60
+            and meal_ratio <= 1.0
         ):
             continue
-        label, unit = _LABELS.get(key, (key.replace("_", " ").title(), ""))
-        exceeds_daily = daily_ratio >= 1.0
+        label, unit = _label_and_unit(key, target)
+        exceeds_daily = daily_ratio > 1.0
+        displayed_amount = (
+            projected_amount if exceeds_daily or above_protein_target else draft_amount
+        )
         alerts.append({
             "direction": "excess",
             "severity": "critical" if exceeds_daily else "warning",
             "nutrient": key,
             "label": label,
-            "amount": round(amount, 2),
+            "amount": round(displayed_amount, 2),
             "unit": unit,
             "reference": round(
                 actual_daily_high
@@ -321,12 +396,12 @@ def build_draft_meal_guidance(
                 1,
             ),
             "message": (
-                f"This draft exceeds your personalized daily upper target for {label.lower()}."
+                f"With this draft, today's total exceeds your personalized daily upper target for {label.lower()}."
                 if exceeds_daily
-                else f"This draft is above your personalized daily {label.lower()} target; "
+                else f"With this draft, today's total is above your personalized daily protein target; "
                 "that target is an intake reference, not a medical safety limit."
                 if above_protein_target
-                else f"{label} is well above this meal's estimated share of the personalized daily range; "
+                else f"{label} is above this meal's estimated share of the personalized daily range; "
                 "the meal share is guidance, not a medical upper limit."
             ),
             "contributors": _contributors(foods, key),
@@ -343,17 +418,23 @@ def build_draft_meal_guidance(
     caps = dict(_HARD_DAILY_CAPS)
     for key, target in targets.items() if isinstance(targets, dict) else []:
         upper = _number(target.get("upper_limit")) if isinstance(target, dict) else None
-        if upper is not None and upper > 0:
+        upper_scope = str(target.get("upper_limit_scope") or "").lower()
+        is_food_applicable = not any(
+            token in upper_scope
+            for token in ("supplement", "added_folic_acid")
+        )
+        if upper is not None and upper > 0 and is_food_applicable:
             caps[key] = min(caps.get(key, upper), upper)
 
     for key, cap in caps.items():
         if key not in reported or key in clinical_keys or cap <= 0:
             continue
-        amount = max(0.0, totals.get(key, 0.0))
+        amount = max(0.0, projected_totals.get(key, 0.0))
         ratio = amount / cap
         if ratio < 0.50:
             continue
-        label, unit = _LABELS.get(key, (key.replace("_", " ").title(), ""))
+        target = targets.get(key) if isinstance(targets, dict) else None
+        label, unit = _label_and_unit(key, target)
         severity = "critical" if ratio >= 1.0 else "warning"
         alerts.append({
             "direction": "excess",
@@ -365,9 +446,9 @@ def build_draft_meal_guidance(
             "reference": round(cap, 2),
             "percentage": round(ratio * 100.0, 1),
             "message": (
-                f"This draft exceeds the personalized daily limit for {label.lower()}."
+                f"With this draft, today's total exceeds the personalized daily limit for {label.lower()}."
                 if ratio >= 1.0
-                else f"This one meal already uses {ratio * 100:.0f}% of the daily {label.lower()} limit."
+                else f"With this draft, today reaches {ratio * 100:.0f}% of the daily {label.lower()} limit."
             ),
             "contributors": _contributors(foods, key),
             "suggestions": _suggestions(
@@ -380,22 +461,40 @@ def build_draft_meal_guidance(
             ),
         })
 
-    shortfalls: list[tuple[float, dict[str, Any]]] = []
-    for key in _SHORTFALL_KEYS:
-        if key not in reported:
+    excess_nutrients = {
+        str(alert.get("nutrient"))
+        for alert in alerts
+        if alert.get("direction") == "excess"
+    }
+    shortfall_keys = list(_MACRO_ORDER) if include_shortfalls else []
+    if include_shortfalls and isinstance(targets, dict):
+        shortfall_keys.extend(
+            key for key in targets
+            if key not in _MACROS and key not in _NO_SHORTFALL_KEYS
+        )
+    shortfalls: list[tuple[int, float, dict[str, Any]]] = []
+    for key in dict.fromkeys(shortfall_keys):
+        if (
+            key not in reported
+            or key in clinical_keys
+            or key in excess_nutrients
+        ):
             continue
         target = targets.get(key) if isinstance(targets, dict) else None
         if not isinstance(target, dict):
+            continue
+        target_type = str(target.get("target_type") or "").lower()
+        if "maximum" in target_type or "upper" in target_type:
             continue
         daily = _target_value(target)
         if daily is None:
             continue
         expected = daily * fraction
-        amount = max(0.0, totals.get(key, 0.0))
+        amount = max(0.0, draft_totals.get(key, 0.0))
         ratio = amount / expected if expected > 0 else 1.0
-        if ratio >= 0.55:
+        if ratio >= 0.80:
             continue
-        label, unit = _LABELS.get(key, (key.replace("_", " ").title(), ""))
+        label, unit = _label_and_unit(key, target)
         alert = {
             "direction": "low",
             "severity": "notice",
@@ -419,29 +518,9 @@ def build_draft_meal_guidance(
                 local_hour=local_hour,
             ),
         }
-        shortfalls.append((ratio, alert))
-    shortfalls.sort(key=lambda row: row[0])
-    selected_shortfalls: list[dict[str, Any]] = []
-    selected_nutrients: set[str] = set()
-    for want_macro in (True, False):
-        for _, alert in shortfalls:
-            is_macro = alert["nutrient"] in _MACROS
-            if is_macro != want_macro:
-                continue
-            if sum(
-                (item["nutrient"] in _MACROS) == want_macro
-                for item in selected_shortfalls
-            ) >= 2:
-                break
-            selected_shortfalls.append(alert)
-            selected_nutrients.add(alert["nutrient"])
-    for _, alert in shortfalls:
-        if len(selected_shortfalls) >= 4:
-            break
-        if alert["nutrient"] not in selected_nutrients:
-            selected_shortfalls.append(alert)
-            selected_nutrients.add(alert["nutrient"])
-    alerts.extend(selected_shortfalls)
+        shortfalls.append((0 if key in _MACROS else 1, ratio, alert))
+    shortfalls.sort(key=lambda row: (row[0], row[1]))
+    alerts.extend(alert for _, _, alert in shortfalls)
 
     severity_order = {"critical": 0, "warning": 1, "notice": 2}
     alerts.sort(key=lambda item: severity_order.get(str(item.get("severity")), 9))
@@ -460,6 +539,10 @@ def build_draft_meal_guidance(
         "data_quality": {
             "foods_checked": len(foods),
             "reported_nutrients": len(reported),
+            "today_history_foods_checked": len(history_foods),
+            "today_history_reported_nutrients": len(history_reported),
+            "projected_day_totals_used_for_excess": True,
+            "shortfalls_included": include_shortfalls,
             "uses_selected_usda_or_label_values": True,
             "unreported_nutrients_treated_as_low": False,
         },
@@ -469,7 +552,8 @@ def build_draft_meal_guidance(
             else "Review these optional alerts or continue without changing the meal."
         ),
         "disclaimer": (
-            "Meal shortfalls use an estimated share of daily targets. Food suggestions appear only for "
-            "shortfalls. Excess alerts are adjusted by changing food quantity in 10% steps."
+            "Meal shortfalls use an estimated share of daily targets and appear only after Analyze is tapped. "
+            "Food suggestions appear only for shortfalls. Excess alerts are adjusted by changing food "
+            "quantity in 10% steps."
         ),
     }
