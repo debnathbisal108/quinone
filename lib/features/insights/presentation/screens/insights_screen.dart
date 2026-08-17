@@ -347,6 +347,13 @@ void _showHealthDomainDailyBreakdown(
                             color: theme.colorScheme.onSurfaceVariant,
                           ),
                         ),
+                        _FoodContributorExtremes(
+                          contributors: day.contributorsFor(
+                            InsightCategory.health,
+                            domainKey,
+                          ),
+                          percentageLabel: 'share of score influence',
+                        ),
                         if (meals.isNotEmpty) ...[
                           const SizedBox(height: 10),
                           Divider(color: theme.colorScheme.outlineVariant),
@@ -530,6 +537,13 @@ void _showNutrientDailyBreakdown(
                           color: theme.colorScheme.onSurfaceVariant,
                         ),
                       ),
+                      _FoodContributorExtremes(
+                        contributors: day.contributorsFor(
+                          category,
+                          nutrientKey,
+                        ),
+                        percentageLabel: 'of this day’s ${friendlyMetricName(nutrientKey).toLowerCase()}',
+                      ),
                     ],
                   ),
                 ),
@@ -540,6 +554,122 @@ void _showNutrientDailyBreakdown(
       );
     },
   );
+}
+
+class _FoodContributorExtremes extends StatelessWidget {
+  const _FoodContributorExtremes({
+    required this.contributors,
+    required this.percentageLabel,
+  });
+
+  final List<FoodMetricContribution> contributors;
+  final String percentageLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    if (contributors.isEmpty) return const SizedBox.shrink();
+
+    final theme = Theme.of(context);
+    final highest = contributors.first;
+    final lowest = contributors.last;
+    final single = contributors.length == 1;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.42),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              single ? 'Food contributor' : 'Food contributors',
+              style: theme.textTheme.labelLarge?.copyWith(
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 8),
+            _FoodContributorRow(
+              label: single ? 'Only' : 'Highest',
+              contribution: highest,
+              percentageLabel: percentageLabel,
+            ),
+            if (!single) ...[
+              const SizedBox(height: 7),
+              _FoodContributorRow(
+                label: 'Lowest',
+                contribution: lowest,
+                percentageLabel: percentageLabel,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _FoodContributorRow extends StatelessWidget {
+  const _FoodContributorRow({
+    required this.label,
+    required this.contribution,
+    required this.percentageLabel,
+  });
+
+  final String label;
+  final FoodMetricContribution contribution;
+  final String percentageLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final percentage = contribution.percentage >= 10
+        ? contribution.percentage.toStringAsFixed(0)
+        : contribution.percentage.toStringAsFixed(1);
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.primary.withOpacity(0.10),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Text(
+            label,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.colorScheme.primary,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(
+                  text: contribution.foodName,
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+                TextSpan(
+                  text: ' · $percentage% $percentageLabel',
+                  style: TextStyle(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+            style: theme.textTheme.bodySmall,
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 class _MetricSelectors extends StatelessWidget {
