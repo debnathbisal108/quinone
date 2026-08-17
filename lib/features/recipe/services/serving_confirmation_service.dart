@@ -79,6 +79,8 @@ class ServingConfirmationService {
     required String analysisId,
     required List<Map<String, dynamic>> items,
     Map<String, dynamic>? profile,
+    List<Map<String, dynamic>> todayResults = const [],
+    bool includeShortfalls = true,
     int? localHour,
   }) async {
     final response = await _dio.post<dynamic>(
@@ -90,6 +92,8 @@ class ServingConfirmationService {
         'servings_eaten': 1.0,
         'analysis_id': analysisId,
         'label_items': items,
+        if (todayResults.isNotEmpty) 'today_results': todayResults,
+        'include_shortfalls': includeShortfalls,
         if (profile != null && profile.isNotEmpty) 'profile': profile,
         'local_hour': localHour ?? DateTime.now().hour,
       }),
