@@ -1,1127 +1,448 @@
-import '../../history/models/analysis_history_record.dart';
-import '../../result/models/analysis_result.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
-enum InsightCategory {
-  health,
-  macros,
-  micronutrients,
-}
+import '../../../history/providers/analysis_history_provider.dart';
+import '../../../profile/providers/profile_provider.dart';
 
-enum BalanceState {
-  low,
-  balanced,
-  high,
-  unknown,
-}
+import '../../../upload/models/analysis_job_progress.dart';
+import '../../models/draft_meal_guidance.dart';
+import '../../services/serving_confirmation_service.dart';
+import '../widgets/draft_meal_guidance_sheet.dart';
 
-class NutrientTargetBand {
-  const NutrientTargetBand({
-    required this.low,
-    required this.high,
-    required this.reference,
-    required this.unit,
-    required this.isUpperLimit,
-    required this.personalized,
+class ServingConfirmationScreen extends ConsumerStatefulWidget {
+  const ServingConfirmationScreen({
+    super.key,
+    required this.payload,
   });
 
-  final double? low;
-  final double? high;
-  final double? reference;
-  final String unit;
-  final bool isUpperLimit;
-  final bool personalized;
+  final Map<String, dynamic> payload;
 
-  BalanceState classify(double value) {
-    if (isUpperLimit) {
-      final ceiling = high ?? reference;
-      if (ceiling == null || ceiling <= 0) {
-        return BalanceState.unknown;
-      }
-      return value <= ceiling ? BalanceState.balanced : BalanceState.high;
-    }
-
-    final lower = low;
-    final upper = high;
-    if (lower == null || upper == null || lower <= 0 || upper <= 0) {
-      return BalanceState.unknown;
-    }
-    if (value < lower) return BalanceState.low;
-    if (value > upper) return BalanceState.high;
-    return BalanceState.balanced;
-  }
+  @override
+  ConsumerState<ServingConfirmationScreen> createState() =>
+      _ServingConfirmationScreenState();
 }
 
-class FoodMetricContribution {
-  const FoodMetricContribution({
-    required this.foodName,
-    required this.percentage,
-    this.amount,
-  });
+class _ServingConfirmationScreenState
+    extends ConsumerState<ServingConfirmationScreen> {
+  final _service = ServingConfirmationService();
+  final List<TextEditingController> _controllers = [];
+  late final List<Map<String, dynamic>> _items;
+  bool _submitting = false;
+  bool _guidanceEnabled = true;
+  bool _checkingGuidance = false;
+  int _revision = 0;
+  int _acceptedGuidanceRevision = -1;
+  AnalysisJobProgress? _progress;
 
-  final String foodName;
-  final double percentage;
-  final double? amount;
-}
+  @override
+  void initState() {
+    super.initState();
+    final raw = widget.payload['items'];
+    _items = raw is List
+        ? raw
+            .whereType<Map>()
+            .map((item) => Map<String, dynamic>.from(item))
+            .toList()
+        : <Map<String, dynamic>>[];
 
-class MealHealthImpact {
-  const MealHealthImpact({
-    required this.analysisId,
-    required this.mealName,
-    required this.calories,
-    required this.overallScore,
-    required this.healthScores,
-  });
-
-  final String analysisId;
-  final String mealName;
-  final double calories;
-  final double overallScore;
-  final Map<String, double> healthScores;
-}
-
-class DailyNutritionInsight {
-  const DailyNutritionInsight({
-    required this.date,
-    required this.mealCount,
-    required this.calories,
-    required this.macronutrients,
-    required this.micronutrients,
-    required this.healthScores,
-    required this.overallHealthScore,
-    required this.targets,
-    required this.mealImpacts,
-    required this.nutrientContributions,
-    required this.healthContributions,
-  });
-
-  final DateTime date;
-  final int mealCount;
-  final double calories;
-  final Map<String, double> macronutrients;
-  final Map<String, double> micronutrients;
-  final Map<String, double> healthScores;
-  final double overallHealthScore;
-  final Map<String, NutrientTargetBand> targets;
-  final List<MealHealthImpact> mealImpacts;
-  final Map<String, List<FoodMetricContribution>> nutrientContributions;
-  final Map<String, List<FoodMetricContribution>> healthContributions;
-
-  double? metricValue(InsightCategory category, String key) {
-    switch (category) {
-      case InsightCategory.health:
-        if (key == 'overall') return overallHealthScore;
-        return healthScores[key];
-      case InsightCategory.macros:
-        return _amountForTarget(macronutrients, key);
-      case InsightCategory.micronutrients:
-        return micronutrients[key];
-    }
-  }
-
-  NutrientTargetBand? targetFor(String key) => targets[key];
-
-  List<FoodMetricContribution> contributorsFor(
-    InsightCategory category,
-    String key,
-  ) {
-    if (category == InsightCategory.health) {
-      return healthContributions[key] ?? const [];
-    }
-    return nutrientContributions[key] ?? const [];
-  }
-}
-
-class NutrientBalanceSummary {
-  const NutrientBalanceSummary({
-    required this.key,
-    required this.label,
-    required this.unit,
-    required this.lowDays,
-    required this.balancedDays,
-    required this.highDays,
-    required this.trackedDays,
-    required this.averageValue,
-    required this.averagePercent,
-  });
-
-  final String key;
-  final String label;
-  final String unit;
-  final int lowDays;
-  final int balancedDays;
-  final int highDays;
-  final int trackedDays;
-  final double averageValue;
-  final double? averagePercent;
-
-  BalanceState get dominantState {
-    if (trackedDays == 0) return BalanceState.unknown;
-    final counts = <BalanceState, int>{
-      BalanceState.low: lowDays,
-      BalanceState.balanced: balancedDays,
-      BalanceState.high: highDays,
-    };
-    return counts.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
-  }
-}
-
-class HealthDomainTrend {
-  const HealthDomainTrend({
-    required this.key,
-    required this.label,
-    required this.averageScore,
-    required this.latestScore,
-    required this.previousAverageScore,
-  });
-
-  final String key;
-  final String label;
-  final double averageScore;
-  final double latestScore;
-  final double? previousAverageScore;
-
-  double? get delta =>
-      previousAverageScore == null ? null : averageScore - previousAverageScore!;
-}
-
-class MetricChange {
-  const MetricChange({
-    required this.key,
-    required this.label,
-    required this.currentAverage,
-    required this.previousAverage,
-    required this.unit,
-  });
-
-  final String key;
-  final String label;
-  final double currentAverage;
-  final double previousAverage;
-  final String unit;
-
-  double get percentChange {
-    if (previousAverage.abs() < 0.000001) return 0;
-    return (currentAverage - previousAverage) / previousAverage * 100;
-  }
-}
-
-class NutritionInsights {
-  const NutritionInsights({
-    required this.mealCount,
-    required this.daysWithMeals,
-    required this.totalCalories,
-    required this.averageDailyMacros,
-    required this.averageDailyMicros,
-    required this.targetAchievement,
-    required this.dailyInsights,
-    required this.previousDailyInsights,
-    required this.topFoodNames,
-  });
-
-  final int mealCount;
-  final int daysWithMeals;
-  final double totalCalories;
-  final Map<String, double> averageDailyMacros;
-  final Map<String, double> averageDailyMicros;
-  final Map<String, double> targetAchievement;
-  final List<DailyNutritionInsight> dailyInsights;
-  final List<DailyNutritionInsight> previousDailyInsights;
-  final List<MapEntry<String, int>> topFoodNames;
-
-  bool get isEmpty => mealCount == 0;
-
-  NutrientTargetBand? targetForDay(
-    DailyNutritionInsight day,
-    String nutrientKey,
-  ) =>
-      day.targetFor(nutrientKey) ?? _genericTargetFor(nutrientKey);
-
-  List<String> get healthDomainKeys {
-    final keys = <String>{};
-    for (final day in dailyInsights) {
-      keys.addAll(day.healthScores.keys);
-    }
-    final result = keys.toList()
-      ..sort((a, b) => friendlyMetricName(a).compareTo(friendlyMetricName(b)));
-    return result;
-  }
-
-  List<String> get macroKeys {
-    final keys = <String>{};
-    for (final day in dailyInsights) {
-      keys.addAll(day.macronutrients.keys);
-    }
-    const priority = [
-      'protein_g',
-      'carbohydrate_g',
-      'fat_g',
-      'fiber_g',
-      'saturated_fat_g',
-      'monounsaturated_fat_g',
-      'polyunsaturated_fat_g',
-      'trans_fat_g',
-      'omega_3_g',
-      'omega_6_g',
-      'cholesterol_mg',
-      'sugars_g',
-      'added_sugars_g',
-    ];
-    final ordered = <String>[];
-    for (final key in priority) {
-      if (keys.remove(key)) ordered.add(key);
-    }
-    ordered.addAll(keys.toList()..sort());
-    return ordered;
-  }
-
-  List<String> get micronutrientKeys {
-    final keys = <String>{};
-    for (final day in dailyInsights) {
-      keys.addAll(day.micronutrients.keys);
-    }
-    return keys.toList()
-      ..sort((a, b) => friendlyMetricName(a).compareTo(friendlyMetricName(b)));
-  }
-
-  factory NutritionInsights.fromRecords(
-    List<AnalysisHistoryRecord> records,
-    Duration period, {
-    DateTime? referenceDate,
-  }) {
-    final now = referenceDate ?? DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final days = period.inDays <= 0 ? 1 : period.inDays;
-    final currentStart = today.subtract(Duration(days: days - 1));
-    final previousEnd = currentStart.subtract(const Duration(days: 1));
-    final previousStart = previousEnd.subtract(Duration(days: days - 1));
-
-    final currentRecords = _recordsWithin(records, currentStart, today);
-    final previousRecords = _recordsWithin(records, previousStart, previousEnd);
-
-    if (currentRecords.isEmpty) {
-      return const NutritionInsights(
-        mealCount: 0,
-        daysWithMeals: 0,
-        totalCalories: 0,
-        averageDailyMacros: {},
-        averageDailyMicros: {},
-        targetAchievement: {},
-        dailyInsights: [],
-        previousDailyInsights: [],
-        topFoodNames: [],
+    for (final item in _items) {
+      final value = (item['quantity'] as num?)?.toDouble() ?? 1;
+      _controllers.add(
+        TextEditingController(text: _format(value)),
       );
     }
-
-    final currentDays = _buildDays(currentRecords);
-    final previousDays = _buildDays(previousRecords);
-
-    final foodCounts = <String, int>{};
-    var totalCalories = 0.0;
-    for (final record in currentRecords) {
-      totalCalories += record.calories;
-      for (final food in record.detectedFoods.toSet()) {
-        final key = food.trim();
-        if (key.isEmpty) {
-          continue;
-        }
-        foodCounts.update(key, (value) => value + 1, ifAbsent: () => 1);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _items.isNotEmpty) {
+        _evaluateGuidance(analysisCheckpoint: false);
       }
-    }
-
-    final averageMacros = _averageMaps(
-      currentDays.map((day) => day.macronutrients),
-    );
-    final averageMicros = _averageMaps(
-      currentDays.map((day) => day.micronutrients),
-    );
-
-    final achievementTotals = <String, double>{};
-    final achievementCounts = <String, int>{};
-    for (final day in currentDays) {
-      for (final entry in day.targets.entries) {
-        final amount = day.metricValue(
-          _isMacroKey(entry.key)
-              ? InsightCategory.macros
-              : InsightCategory.micronutrients,
-          entry.key,
-        );
-        final target = entry.value.reference ??
-            entry.value.high ??
-            entry.value.low;
-        if (amount == null || target == null || target <= 0) continue;
-        achievementTotals.update(
-          entry.key,
-          (value) => value + (amount / target * 100),
-          ifAbsent: () => amount / target * 100,
-        );
-        achievementCounts.update(
-          entry.key,
-          (value) => value + 1,
-          ifAbsent: () => 1,
-        );
-      }
-    }
-
-    final achievement = <String, double>{
-      for (final entry in achievementTotals.entries)
-        entry.key: entry.value / (achievementCounts[entry.key] ?? 1),
-    };
-
-    final topFoods = foodCounts.entries.toList()
-      ..sort((a, b) {
-        final count = b.value.compareTo(a.value);
-        return count != 0 ? count : a.key.compareTo(b.key);
-      });
-
-    return NutritionInsights(
-      mealCount: currentRecords.length,
-      daysWithMeals: currentDays.length,
-      totalCalories: totalCalories,
-      averageDailyMacros: Map.unmodifiable(averageMacros),
-      averageDailyMicros: Map.unmodifiable(averageMicros),
-      targetAchievement: Map.unmodifiable(achievement),
-      dailyInsights: List.unmodifiable(currentDays),
-      previousDailyInsights: List.unmodifiable(previousDays),
-      topFoodNames: topFoods.take(6).toList(growable: false),
-    );
-  }
-
-  List<NutrientBalanceSummary> balanceSummaries(
-    InsightCategory category,
-  ) {
-    if (category == InsightCategory.health) return const [];
-
-    final keys =
-        category == InsightCategory.macros ? macroKeys : micronutrientKeys;
-    final summaries = <NutrientBalanceSummary>[];
-
-    for (final key in keys) {
-      var low = 0;
-      var balanced = 0;
-      var high = 0;
-      var tracked = 0;
-      var amountSum = 0.0;
-      var percentSum = 0.0;
-      var percentCount = 0;
-      String unit = unitForMetric(key);
-
-      for (final day in dailyInsights) {
-        final amount = day.metricValue(category, key);
-        if (amount == null) continue;
-        final target = day.targetFor(key) ?? _genericTargetFor(key);
-        if (target == null) continue;
-
-        final state = target.classify(amount);
-        if (state == BalanceState.unknown) continue;
-
-        tracked += 1;
-        amountSum += amount;
-        unit = target.unit.isNotEmpty ? target.unit : unit;
-
-        final reference = target.reference ?? target.high ?? target.low;
-        if (reference != null && reference > 0) {
-          percentSum += amount / reference * 100;
-          percentCount += 1;
-        }
-
-        switch (state) {
-          case BalanceState.low:
-            low += 1;
-            break;
-          case BalanceState.balanced:
-            balanced += 1;
-            break;
-          case BalanceState.high:
-            high += 1;
-            break;
-          case BalanceState.unknown:
-            break;
-        }
-      }
-
-      if (tracked == 0) {
-        continue;
-      }
-      summaries.add(
-        NutrientBalanceSummary(
-          key: key,
-          label: friendlyMetricName(key),
-          unit: unit,
-          lowDays: low,
-          balancedDays: balanced,
-          highDays: high,
-          trackedDays: tracked,
-          averageValue: amountSum / tracked,
-          averagePercent: percentCount == 0 ? null : percentSum / percentCount,
-        ),
-      );
-    }
-
-    summaries.sort((a, b) {
-      final aConcern = a.lowDays + a.highDays;
-      final bConcern = b.lowDays + b.highDays;
-      final concern = bConcern.compareTo(aConcern);
-      if (concern != 0) return concern;
-      return a.label.compareTo(b.label);
     });
-    return summaries;
   }
 
-  List<HealthDomainTrend> healthDomainTrends() {
-    final current = _averageHealthScores(dailyInsights);
-    final previous = _averageHealthScores(previousDailyInsights);
-    final latest = dailyInsights.isEmpty
-        ? const <String, double>{}
-        : dailyInsights.last.healthScores;
-
-    final result = <HealthDomainTrend>[
-      for (final entry in current.entries)
-        HealthDomainTrend(
-          key: entry.key,
-          label: friendlyMetricName(entry.key),
-          averageScore: entry.value,
-          latestScore: latest[entry.key] ?? entry.value,
-          previousAverageScore: previous[entry.key],
-        ),
-    ];
-
-    result.sort((a, b) => a.averageScore.compareTo(b.averageScore));
-    return result;
+  @override
+  void dispose() {
+    for (final controller in _controllers) {
+      controller.dispose();
+    }
+    super.dispose();
   }
 
-  List<MetricChange> metricChanges(InsightCategory category) {
-    if (category == InsightCategory.health) return const [];
+  Future<void> _confirm() async {
+    if (_submitting || _checkingGuidance) return;
 
-    final current = category == InsightCategory.macros
-        ? averageDailyMacros
-        : averageDailyMicros;
-    final previous = _averageMaps(
-      previousDailyInsights.map(
-        (day) => category == InsightCategory.macros
-            ? day.macronutrients
-            : day.micronutrients,
-      ),
-    );
-
-    final changes = <MetricChange>[];
-    for (final entry in current.entries) {
-      final previousValue = previous[entry.key];
-      if (previousValue == null || previousValue <= 0) continue;
-      changes.add(
-        MetricChange(
-          key: entry.key,
-          label: friendlyMetricName(entry.key),
-          currentAverage: entry.value,
-          previousAverage: previousValue,
-          unit: unitForMetric(entry.key),
-        ),
-      );
-    }
-    changes.sort(
-      (a, b) => b.percentChange.abs().compareTo(a.percentChange.abs()),
-    );
-    return changes;
-  }
-}
-
-List<AnalysisHistoryRecord> _recordsWithin(
-  List<AnalysisHistoryRecord> records,
-  DateTime start,
-  DateTime end,
-) {
-  return records.where((record) {
-    final local = record.createdAt.toLocal();
-    final day = DateTime(local.year, local.month, local.day);
-    return !day.isBefore(start) && !day.isAfter(end);
-  }).toList(growable: false);
-}
-
-List<DailyNutritionInsight> _buildDays(
-  List<AnalysisHistoryRecord> records,
-) {
-  final byDay = <DateTime, List<AnalysisHistoryRecord>>{};
-  for (final record in records) {
-    final local = record.createdAt.toLocal();
-    final day = DateTime(local.year, local.month, local.day);
-    byDay.putIfAbsent(day, () => []).add(record);
-  }
-
-  final days = byDay.keys.toList()..sort();
-  return [
-    for (final day in days)
-      _buildDay(day, byDay[day]!..sort((a, b) => a.createdAt.compareTo(b.createdAt))),
-  ];
-}
-
-DailyNutritionInsight _buildDay(
-  DateTime day,
-  List<AnalysisHistoryRecord> records,
-) {
-  final macros = <String, double>{};
-  final micros = <String, double>{};
-  final weightedDomainTotals = <String, double>{};
-  final domainWeights = <String, double>{};
-  final mealImpacts = <MealHealthImpact>[];
-  final targets = <String, NutrientTargetBand>{};
-  final nutrientContributionAmounts =
-      <String, Map<String, _NamedAmount>>{};
-  final healthContributionWeights =
-      <String, Map<String, _NamedAmount>>{};
-
-  var calories = 0.0;
-  var weightedOverall = 0.0;
-  var overallWeight = 0.0;
-
-  for (final record in records) {
-    calories += record.calories;
-
-    for (final entry in record.macronutrients.entries) {
-      macros.update(
-        entry.key,
-        (value) => value + entry.value,
-        ifAbsent: () => entry.value,
-      );
-    }
-    for (final entry in record.micronutrients.entries) {
-      micros.update(
-        entry.key,
-        (value) => value + entry.value,
-        ifAbsent: () => entry.value,
-      );
+    final analysisId =
+        widget.payload['analysis_id']?.toString().trim() ?? '';
+    if (analysisId.isEmpty || _items.isEmpty) {
+      _message('The serving information is incomplete.');
+      return;
     }
 
-    final weight = record.calories > 0 ? record.calories : 1.0;
-    for (final entry in record.healthScores.entries) {
-      weightedDomainTotals.update(
-        entry.key,
-        (value) => value + entry.value * weight,
-        ifAbsent: () => entry.value * weight,
-      );
-      domainWeights.update(
-        entry.key,
-        (value) => value + weight,
-        ifAbsent: () => weight,
-      );
+    if (_confirmedItems() == null) {
+      _message('Enter a valid amount for every packaged food.');
+      return;
     }
 
-    var mealOverall = 0.0;
+    if (_guidanceEnabled && _acceptedGuidanceRevision != _revision) {
+      final proceed = await _evaluateGuidance(analysisCheckpoint: true);
+      if (!proceed || !mounted) return;
+    }
+
+    final confirmed = _confirmedItems();
+    if (confirmed == null) return;
+
+    setState(() {
+      _submitting = true;
+      _progress = null;
+    });
+
     try {
-      final parsed = AnalysisResult.fromJson(record.rawResult);
-      mealOverall = parsed.overallScore;
-      for (final targetEntry in parsed.nutrientTargets.entries) {
-        final band = _bandFromPersonalizedTarget(targetEntry.value);
-        if (band != null) {
-          targets[targetEntry.key] = band;
-        }
-      }
+      final result = await _service.confirm(
+        analysisId: analysisId,
+        items: confirmed,
+        onProgress: (progress) {
+          if (mounted) setState(() => _progress = progress);
+        },
+      );
+      await ref.read(analysisHistoryProvider.notifier).saveResult(result);
+      if (!mounted) return;
+      context.pushReplacement('/result', extra: result);
+    } catch (error) {
+      if (!mounted) return;
+      _message(
+        error.toString()
+            .replaceFirst('Bad state: ', '')
+            .replaceFirst('StateError: ', ''),
+      );
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
 
-      final nutrientKeys = <String>{
-        ...record.macronutrients.keys,
-        ...record.micronutrients.keys,
-      };
-      for (final nutrientKey in nutrientKeys) {
-        for (final contribution in parsed.contributionsFor(nutrientKey)) {
-          _addNamedAmount(
-            nutrientContributionAmounts,
-            nutrientKey,
-            contribution.foodName,
-            contribution.amount,
-          );
-        }
-      }
+  List<Map<String, dynamic>>? _confirmedItems() {
+    final confirmed = <Map<String, dynamic>>[];
+    for (var i = 0; i < _items.length; i++) {
+      final quantity = double.tryParse(_controllers[i].text.trim());
+      if (quantity == null || quantity <= 0) return null;
+      confirmed.add({
+        'food_id': _items[i]['food_id']?.toString() ?? '',
+        'quantity': quantity,
+        'unit': _items[i]['unit']?.toString() ?? 'serving',
+      });
+    }
+    return confirmed;
+  }
 
-      final healthWeights = _healthEvidenceWeightsByFood(record.rawResult);
-      for (final domainEntry in healthWeights.entries) {
-        for (final foodEntry in domainEntry.value.entries) {
-          // Daily health scores are meal-energy weighted, so food influence
-          // uses the same meal weight before percentages are calculated.
-          _addNamedAmount(
-            healthContributionWeights,
-            domainEntry.key,
-            foodEntry.value.name,
-            foodEntry.value.amount * weight,
-          );
+  List<DraftGuidanceAdjustableFood> _guidanceAdjustableFoods() {
+    final foods = <DraftGuidanceAdjustableFood>[];
+    for (var i = 0; i < _items.length; i++) {
+      final quantity = double.tryParse(_controllers[i].text.trim());
+      if (quantity == null || quantity <= 0) continue;
+      foods.add(DraftGuidanceAdjustableFood(
+        name: _items[i]['name']?.toString() ?? 'Packaged food',
+        quantity: quantity,
+        unit: _items[i]['unit']?.toString() ?? 'serving',
+      ));
+    }
+    return foods;
+  }
+
+  void _applyGuidanceQuantities(Map<String, double> quantities) {
+    var changed = false;
+    for (var i = 0; i < _items.length; i++) {
+      final name = _items[i]['name']?.toString() ?? 'Packaged food';
+      final quantity = quantities[_guidanceFoodKey(name)];
+      if (quantity == null || quantity <= 0) continue;
+      final current = double.tryParse(_controllers[i].text.trim());
+      if (current != null && (current - quantity).abs() < 0.0001) continue;
+      _controllers[i].text = _format(quantity);
+      changed = true;
+    }
+    if (changed) _revision += 1;
+  }
+
+  List<Map<String, dynamic>> _todayResultsForGuidance() {
+    final now = DateTime.now();
+    final currentAnalysisId =
+        widget.payload['analysis_id']?.toString().trim() ?? '';
+    return ref
+        .read(analysisHistoryProvider)
+        .where((record) => _sameLocalDay(record.createdAt, now))
+        .where(
+          (record) => currentAnalysisId.isEmpty ||
+              record.analysisId != currentAnalysisId,
+        )
+        .where((record) => record.rawResult.isNotEmpty)
+        .map((record) => Map<String, dynamic>.from(record.rawResult))
+        .toList(growable: false);
+  }
+
+  Future<bool> _evaluateGuidance({
+    required bool analysisCheckpoint,
+  }) async {
+    if (!_guidanceEnabled) return true;
+    final analysisId = widget.payload['analysis_id']?.toString().trim() ?? '';
+    final items = _confirmedItems();
+    if (analysisId.isEmpty || items == null || _checkingGuidance) return false;
+    final revision = _revision;
+    setState(() => _checkingGuidance = true);
+    try {
+      final DraftMealGuidance guidance = await _service.evaluateGuidance(
+        analysisId: analysisId,
+        items: items,
+        profile: ref.read(profileProvider).backendPayload,
+        todayResults: _todayResultsForGuidance(),
+        includeShortfalls: analysisCheckpoint,
+        localHour: DateTime.now().hour,
+      );
+      if (!mounted || revision != _revision) return false;
+      if (!guidance.hasAlerts) {
+        if (analysisCheckpoint) {
+          _acceptedGuidanceRevision = revision;
         }
+        return true;
       }
+      final result = await showDraftMealGuidanceSheet(
+        context,
+        guidance: guidance,
+        analysisCheckpoint: analysisCheckpoint,
+        adjustableFoods: _guidanceAdjustableFoods(),
+      );
+      if (!mounted) return false;
+      if (result.action == DraftMealGuidanceAction.searchSuggestion) {
+        _applyGuidanceQuantities(result.adjustedQuantities);
+        _message('Use Add recipe to search and add this suggested food.');
+        return false;
+      }
+      if (!result.accepted) return false;
+      _applyGuidanceQuantities(result.adjustedQuantities);
+      if (analysisCheckpoint) {
+        _acceptedGuidanceRevision = _revision;
+      }
+      return true;
     } catch (_) {
-      if (record.healthScores.isNotEmpty) {
-        mealOverall = record.healthScores.values.reduce((a, b) => a + b) /
-            record.healthScores.length;
+      if (!mounted) return false;
+      if (!analysisCheckpoint) {
+        _message('Meal guidance is unavailable right now. You can continue.');
+        return true;
       }
+      return await showDialog<bool>(
+            context: context,
+            builder: (dialogContext) => AlertDialog(
+              title: const Text('Guidance unavailable'),
+              content: const Text(
+                'The optional nutrient check could not be loaded. '
+                'You can still continue with the normal analysis.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext, false),
+                  child: const Text('Go back'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(dialogContext, true),
+                  child: const Text('Continue anyway'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+    } finally {
+      if (mounted) setState(() => _checkingGuidance = false);
     }
+  }
 
-    if (mealOverall > 0) {
-      weightedOverall += mealOverall * weight;
-      overallWeight += weight;
-    }
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
 
-    mealImpacts.add(
-      MealHealthImpact(
-        analysisId: record.analysisId,
-        mealName: record.mealName,
-        calories: record.calories,
-        overallScore: mealOverall,
-        healthScores: Map.unmodifiable(record.healthScores),
+    return Scaffold(
+      appBar: AppBar(title: const Text('Confirm serving')),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 120),
+        children: [
+          Text(
+            'How much did you consume?',
+            style: theme.textTheme.headlineMedium?.copyWith(
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'We read the nutrition label. Confirm the amount you actually consumed before Quinone calculates nutrients and health scores.',
+            style: theme.textTheme.bodyLarge?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 22),
+          ...List.generate(
+            _items.length,
+            (index) => Padding(
+              padding: const EdgeInsets.only(bottom: 14),
+              child: _ServingCard(
+                item: _items[index],
+                controller: _controllers[index],
+                onChanged: () => _revision += 1,
+              ),
+            ),
+          ),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            value: _guidanceEnabled,
+            onChanged: _submitting || _checkingGuidance
+                ? null
+                : (value) => setState(() => _guidanceEnabled = value),
+            title: const Text('Optional nutrient guidance'),
+            subtitle: const Text(
+              'Check nutrient excesses or shortfalls before analysis. You can continue anyway.',
+            ),
+            secondary: const Icon(Icons.balance_outlined),
+          ),
+          if (_checkingGuidance) ...[
+            const SizedBox(height: 8),
+            const LinearProgressIndicator(),
+            const SizedBox(height: 8),
+            const Text('Checking this serving’s nutrient balance…'),
+          ],
+          if (_progress != null) ...[
+            const SizedBox(height: 8),
+            LinearProgressIndicator(
+              value: _progress!.progress.clamp(0.0, 1.0),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              _progress!.message,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ],
+      ),
+      bottomNavigationBar: SafeArea(
+        minimum: const EdgeInsets.fromLTRB(20, 10, 20, 18),
+        child: FilledButton.icon(
+          onPressed: _submitting || _checkingGuidance ? null : _confirm,
+          icon: _submitting || _checkingGuidance
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.check_circle_outline_rounded),
+          label: Text(
+            _checkingGuidance
+                ? 'Checking…'
+                : _submitting
+                    ? 'Analyzing…'
+                    : 'Confirm & analyze',
+          ),
+        ),
       ),
     );
-
-    // Older records may have only the simplified locally stored targets.
-    for (final entry in record.nutrientTargets.entries) {
-      targets.putIfAbsent(
-        entry.key,
-        () => _bandAroundReference(
-          entry.value,
-          unitForMetric(entry.key),
-          personalized: true,
-        ),
-      );
-    }
   }
 
-  final healthScores = <String, double>{
-    for (final entry in weightedDomainTotals.entries)
-      entry.key: entry.value / (domainWeights[entry.key] ?? 1),
-  };
-
-  final overall = overallWeight > 0
-      ? weightedOverall / overallWeight
-      : healthScores.isEmpty
-          ? 0.0
-          : healthScores.values.reduce((a, b) => a + b) /
-              healthScores.length;
-
-  // Generic reference targets are only fallbacks for nutrients where the app
-  // already has a standard daily reference. Personalized targets always win.
-  for (final key in {...macros.keys, ...micros.keys}) {
-    final generic = _genericTargetFor(key);
-    if (generic != null) {
-      targets.putIfAbsent(key, () => generic);
-    }
+  void _message(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
-  final nutrientContributions = <String, List<FoodMetricContribution>>{};
-  for (final entry in nutrientContributionAmounts.entries) {
-    final total = macros[entry.key] ?? micros[entry.key] ?? 0.0;
-    if (total <= 0) continue;
-    final items = entry.value.values
-        .where((item) => item.amount > 0)
-        .map(
-          (item) => FoodMetricContribution(
-            foodName: item.name,
-            amount: item.amount,
-            percentage: (item.amount / total * 100).clamp(0.0, 100.0).toDouble(),
+  String _format(double value) {
+    if (value == value.roundToDouble()) {
+      return value.toStringAsFixed(0);
+    }
+    return value.toStringAsFixed(2);
+  }
+}
+
+String _guidanceFoodKey(String value) => value.trim().toLowerCase();
+
+bool _sameLocalDay(DateTime a, DateTime b) {
+  final left = a.toLocal();
+  final right = b.toLocal();
+  return left.year == right.year &&
+      left.month == right.month &&
+      left.day == right.day;
+}
+
+class _ServingCard extends StatelessWidget {
+  const _ServingCard({
+    required this.item,
+    required this.controller,
+    required this.onChanged,
+  });
+
+  final Map<String, dynamic> item;
+  final TextEditingController controller;
+  final VoidCallback onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final name = item['name']?.toString() ?? 'Packaged food';
+    final brand = item['brand']?.toString().trim();
+    final unit = item['unit']?.toString() ?? 'serving';
+    final servingValue =
+        (item['serving_size_value'] as num?)?.toDouble();
+    final servingUnit = item['serving_size_unit']?.toString();
+    final servingsPerContainer =
+        (item['servings_per_container'] as num?)?.toDouble();
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            name,
+            style: theme.textTheme.titleLarge?.copyWith(
+              fontWeight: FontWeight.w900,
+            ),
           ),
-        )
-        .toList(growable: false)
-      ..sort((a, b) => b.percentage.compareTo(a.percentage));
-    if (items.isNotEmpty) {
-      nutrientContributions[entry.key] = List.unmodifiable(items);
-    }
-  }
-
-  final healthContributions = <String, List<FoodMetricContribution>>{};
-  for (final entry in healthContributionWeights.entries) {
-    final totalWeight = entry.value.values.fold<double>(
-      0,
-      (sum, item) => sum + item.amount,
-    );
-    if (totalWeight <= 0) continue;
-    final items = entry.value.values
-        .where((item) => item.amount > 0)
-        .map(
-          (item) => FoodMetricContribution(
-            foodName: item.name,
-            percentage: item.amount / totalWeight * 100,
+          if (brand != null && brand.isNotEmpty) ...[
+            const SizedBox(height: 3),
+            Text(
+              brand,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+          if (servingValue != null && servingValue > 0) ...[
+            const SizedBox(height: 12),
+            Text(
+              'Label serving: ${_number(servingValue)} ${servingUnit ?? ''}'
+              '${servingsPerContainer != null && servingsPerContainer > 0 ? ' · ${_number(servingsPerContainer)} servings/container' : ''}',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+          const SizedBox(height: 16),
+          TextField(
+            controller: controller,
+            onChanged: (_) => onChanged(),
+            keyboardType:
+                const TextInputType.numberWithOptions(decimal: true),
+            decoration: InputDecoration(
+              labelText: 'Amount consumed',
+              suffixText: unit,
+              border: const OutlineInputBorder(),
+            ),
           ),
-        )
-        .toList(growable: false)
-      ..sort((a, b) => b.percentage.compareTo(a.percentage));
-    if (items.isNotEmpty) {
-      healthContributions[entry.key] = List.unmodifiable(items);
-    }
-  }
-
-  return DailyNutritionInsight(
-    date: day,
-    mealCount: records.length,
-    calories: calories,
-    macronutrients: Map.unmodifiable(macros),
-    micronutrients: Map.unmodifiable(micros),
-    healthScores: Map.unmodifiable(healthScores),
-    overallHealthScore: overall,
-    targets: Map.unmodifiable(targets),
-    mealImpacts: List.unmodifiable(mealImpacts),
-    nutrientContributions: Map.unmodifiable(nutrientContributions),
-    healthContributions: Map.unmodifiable(healthContributions),
-  );
-}
-
-class _NamedAmount {
-  _NamedAmount(this.name, this.amount);
-
-  final String name;
-  double amount;
-}
-
-void _addNamedAmount(
-  Map<String, Map<String, _NamedAmount>> destination,
-  String metricKey,
-  String foodName,
-  double amount,
-) {
-  if (!amount.isFinite || amount <= 0) return;
-  final cleanName = foodName.trim();
-  if (cleanName.isEmpty) return;
-  final normalized = cleanName.toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
-  final byFood = destination.putIfAbsent(metricKey, () => {});
-  final existing = byFood[normalized];
-  if (existing == null) {
-    byFood[normalized] = _NamedAmount(cleanName, amount);
-  } else {
-    existing.amount += amount;
-  }
-}
-
-Map<String, Map<String, _NamedAmount>> _healthEvidenceWeightsByFood(
-  Map<String, dynamic> rawResult,
-) {
-  final root = _unwrapInsightResult(rawResult);
-  final meal = _asMapLocal(root['meal']) ?? root;
-  final result = <String, Map<String, _NamedAmount>>{};
-
-  for (final rawFood in _asListLocal(meal['foods'])) {
-    final food = _asMapLocal(rawFood);
-    if (food == null) continue;
-    final foodName = _foodDisplayName(food);
-    if (foodName == null) continue;
-    _collectFoodHealthEvidence(food, foodName, result);
-  }
-  return result;
-}
-
-void _collectFoodHealthEvidence(
-  Map<String, dynamic> food,
-  String rootFoodName,
-  Map<String, Map<String, _NamedAmount>> destination,
-) {
-  final evidence = _asMapLocal(food['evidence']);
-  for (final rawItem in _asListLocal(evidence?['items'])) {
-    final item = _asMapLocal(rawItem);
-    if (item == null) continue;
-    final domain = item['domain']?.toString().trim();
-    if (domain == null || domain.isEmpty) continue;
-    final weight = _finiteDouble(item['effective_weight']).abs();
-    if (weight <= 0) continue;
-    _addNamedAmount(destination, domain, rootFoodName, weight);
-  }
-
-  // Match the backend scoring traversal: an aggregated DECOMPOSE parent
-  // already contains its components' evidence and must not be counted twice.
-  final route = food['analysis_route']?.toString().toUpperCase();
-  final nutrientStatus = food['nutrient_status']?.toString();
-  if (route == 'DECOMPOSE' && nutrientStatus == 'aggregated_from_components') {
-    return;
-  }
-
-  for (final childKey in const ['ingredients', 'spices']) {
-    for (final rawChild in _asListLocal(food[childKey])) {
-      final child = _asMapLocal(rawChild);
-      if (child == null) continue;
-      _collectFoodHealthEvidence(child, rootFoodName, destination);
-    }
-  }
-}
-
-Map<String, dynamic> _unwrapInsightResult(Map<String, dynamic> json) {
-  for (final key in const ['final_result', 'meal_analysis', 'data']) {
-    final nested = _asMapLocal(json[key]);
-    if (nested != null && nested.isNotEmpty) return nested;
-  }
-  return json;
-}
-
-Map<String, dynamic>? _asMapLocal(dynamic value) {
-  if (value is Map<String, dynamic>) return value;
-  if (value is Map) return Map<String, dynamic>.from(value);
-  return null;
-}
-
-List<dynamic> _asListLocal(dynamic value) => value is List ? value : const [];
-
-String? _foodDisplayName(Map<String, dynamic> food) {
-  for (final key in const ['display_name', 'name', 'canonical_name']) {
-    final value = food[key]?.toString().trim();
-    if (value != null && value.isNotEmpty) return value;
-  }
-  return null;
-}
-
-double _finiteDouble(dynamic value) {
-  if (value == null || value is bool) return 0;
-  final parsed = value is num
-      ? value.toDouble()
-      : double.tryParse(value.toString());
-  return parsed?.isFinite == true ? parsed! : 0;
-}
-
-NutrientTargetBand? _bandFromPersonalizedTarget(
-  PersonalizedNutrientTarget target,
-) {
-  final type = (target.targetType ?? '').toLowerCase();
-  final unit = target.unit.isNotEmpty ? target.unit : unitForMetric(target.key);
-
-  if (target.rangeLow != null &&
-      target.rangeHigh != null &&
-      target.rangeLow! > 0 &&
-      target.rangeHigh! > 0) {
-    return NutrientTargetBand(
-      low: target.rangeLow,
-      high: target.rangeHigh,
-      reference: target.resolvedValue ??
-          ((target.rangeLow! + target.rangeHigh!) / 2),
-      unit: unit,
-      isUpperLimit: false,
-      personalized: true,
+        ],
+      ),
     );
   }
 
-  final upper = target.upperLimit;
-  if ((type.contains('upper') || type.contains('limit')) &&
-      upper != null &&
-      upper > 0) {
-    return NutrientTargetBand(
-      low: null,
-      high: upper,
-      reference: upper,
-      unit: unit,
-      isUpperLimit: true,
-      personalized: true,
-    );
+  String _number(double value) {
+    return value == value.roundToDouble()
+        ? value.toStringAsFixed(0)
+        : value.toStringAsFixed(2);
   }
-
-  final resolved = target.resolvedValue ?? target.baselineValue;
-  if (resolved != null && resolved > 0) {
-    if (type.contains('upper') || type.contains('limit')) {
-      return NutrientTargetBand(
-        low: null,
-        high: resolved,
-        reference: resolved,
-        unit: unit,
-        isUpperLimit: true,
-        personalized: true,
-      );
-    }
-    return _bandAroundReference(
-      resolved,
-      unit,
-      personalized: true,
-    );
-  }
-  return null;
-}
-
-NutrientTargetBand _bandAroundReference(
-  double reference,
-  String unit, {
-  required bool personalized,
-}) {
-  return NutrientTargetBand(
-    low: reference * 0.8,
-    high: reference * 1.2,
-    reference: reference,
-    unit: unit,
-    isUpperLimit: false,
-    personalized: personalized,
-  );
-}
-
-NutrientTargetBand? _genericTargetFor(String key) {
-  const references = <String, double>{
-    'fiber_g': 28,
-    'saturated_fat_g': 20,
-    'added_sugars_g': 50,
-    'vitamin_a_ug': 900,
-    'vitamin_c_mg': 90,
-    'vitamin_d_ug': 20,
-    'vitamin_e_mg': 15,
-    'vitamin_k_ug': 120,
-    'thiamin_mg': 1.2,
-    'riboflavin_mg': 1.3,
-    'niacin_mg': 16,
-    'pantothenic_acid_mg': 5,
-    'vitamin_b6_mg': 1.7,
-    'folate_ug': 400,
-    'vitamin_b12_ug': 2.4,
-    'choline_mg': 550,
-    'calcium_mg': 1300,
-    'iron_mg': 18,
-    'magnesium_mg': 420,
-    'phosphorus_mg': 1250,
-    'potassium_mg': 4700,
-    'zinc_mg': 11,
-    'copper_mg': 0.9,
-    'manganese_mg': 2.3,
-    'selenium_ug': 55,
-  };
-  const upperLimits = <String, double>{
-    'sodium_mg': 2300,
-    'saturated_fat_g': 20,
-    'added_sugars_g': 50,
-  };
-
-  final upper = upperLimits[key];
-  if (upper != null) {
-    return NutrientTargetBand(
-      low: null,
-      high: upper,
-      reference: upper,
-      unit: unitForMetric(key),
-      isUpperLimit: true,
-      personalized: false,
-    );
-  }
-
-  final reference = references[key];
-  if (reference == null) return null;
-  return _bandAroundReference(
-    reference,
-    unitForMetric(key),
-    personalized: false,
-  );
-}
-
-Map<String, double> _averageMaps(
-  Iterable<Map<String, double>> maps,
-) {
-  final totals = <String, double>{};
-  final counts = <String, int>{};
-  for (final map in maps) {
-    for (final entry in map.entries) {
-      totals.update(
-        entry.key,
-        (value) => value + entry.value,
-        ifAbsent: () => entry.value,
-      );
-      counts.update(
-        entry.key,
-        (value) => value + 1,
-        ifAbsent: () => 1,
-      );
-    }
-  }
-  return {
-    for (final entry in totals.entries)
-      entry.key: entry.value / (counts[entry.key] ?? 1),
-  };
-}
-
-Map<String, double> _averageHealthScores(
-  List<DailyNutritionInsight> days,
-) {
-  final totals = <String, double>{};
-  final counts = <String, int>{};
-  for (final day in days) {
-    for (final entry in day.healthScores.entries) {
-      totals.update(
-        entry.key,
-        (value) => value + entry.value,
-        ifAbsent: () => entry.value,
-      );
-      counts.update(
-        entry.key,
-        (value) => value + 1,
-        ifAbsent: () => 1,
-      );
-    }
-  }
-  return {
-    for (final entry in totals.entries)
-      entry.key: entry.value / (counts[entry.key] ?? 1),
-  };
-}
-
-bool _isMacroKey(String key) {
-  return key.endsWith('_g') ||
-      key == 'protein' ||
-      key == 'carbs' ||
-      key == 'fat';
-}
-
-double? amountForMetric(
-  DailyNutritionInsight day,
-  InsightCategory category,
-  String key,
-) =>
-    day.metricValue(category, key);
-
-double? _amountForTarget(Map<String, double> macros, String key) {
-  const aliases = <String, List<String>>{
-    'protein_g': ['protein_g', 'protein'],
-    'carbohydrate_g': [
-      'carbohydrate_g',
-      'carbohydrates_g',
-      'carbs_g',
-      'carbs',
-    ],
-    'fat_g': ['fat_g', 'total_fat_g', 'fat'],
-    'fiber_g': ['fiber_g', 'fibre_g', 'dietary_fiber_g'],
-  };
-  for (final candidate in aliases[key] ?? [key]) {
-    final value = macros[candidate];
-    if (value != null) return value;
-  }
-  return null;
-}
-
-String friendlyMetricName(String value) {
-  const aliases = <String, String>{
-    'overall': 'Overall health score',
-    'protein_g': 'Protein',
-    'carbohydrate_g': 'Carbohydrates',
-    'carbohydrates_g': 'Carbohydrates',
-    'fat_g': 'Fat',
-    'fiber_g': 'Fiber',
-    'saturated_fat_g': 'Saturated fat',
-    'monounsaturated_fat_g': 'Monounsaturated fat',
-    'polyunsaturated_fat_g': 'Polyunsaturated fat',
-    'trans_fat_g': 'Trans fat',
-    'omega_3_g': 'Omega-3',
-    'omega_6_g': 'Omega-6',
-    'cholesterol_mg': 'Cholesterol',
-    'sugars_g': 'Total sugars',
-    'added_sugars_g': 'Added sugars',
-    'renal_health': 'Renal health',
-    'kidney_health': 'Renal health',
-    'cardiovascular_health': 'Cardiovascular health',
-    'metabolic_health': 'Metabolic health',
-    'digestive_health': 'Digestive health',
-    'bone_health': 'Bone health',
-  };
-  final direct = aliases[value];
-  if (direct != null) return direct;
-  return value
-      .replaceAll(RegExp(r'_(mg|ug|mcg|g)$'), '')
-      .replaceAll('_', ' ')
-      .split(RegExp(r'\s+'))
-      .where((word) => word.isNotEmpty)
-      .map(
-        (word) =>
-            '${word[0].toUpperCase()}${word.substring(1).toLowerCase()}',
-      )
-      .join(' ');
-}
-
-String unitForMetric(String key) {
-  if (key.endsWith('_ug') || key.endsWith('_mcg')) return 'µg';
-  if (key.endsWith('_mg')) return 'mg';
-  if (key.endsWith('_g')) return 'g';
-  return '';
-}
-
-String healthStatusLabel(double score) {
-  if (score >= 85) return 'Excellent';
-  if (score >= 70) return 'Good';
-  if (score >= 55) return 'Monitor';
-  if (score >= 40) return 'Needs attention';
-  return 'Significant dietary concern';
 }
