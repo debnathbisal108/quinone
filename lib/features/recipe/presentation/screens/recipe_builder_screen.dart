@@ -221,6 +221,8 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
         profile: ref.read(profileProvider).backendPayload,
         analysisId: widget.analysisId,
         labelItems: labels,
+        todayResults: _todayResultsForGuidance(),
+        includeShortfalls: false,
         localHour: DateTime.now().hour,
       );
       if (!mounted) return;
@@ -295,7 +297,9 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       _searchController.clear();
       _suggestions = const [];
       _draftRevision += 1;
-      _guidanceAcceptedRevision = _draftRevision;
+      // The immediate check covers excess only. Analyze must still run the
+      // complete shortfall review for this new recipe revision.
+      _guidanceAcceptedRevision = -1;
     });
   }
 
@@ -409,6 +413,22 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
           )
           .toList(growable: false);
 
+  List<Map<String, dynamic>> _todayResultsForGuidance() {
+    final now = DateTime.now();
+    final currentAnalysisId = widget.analysisId?.trim();
+    return ref
+        .read(analysisHistoryProvider)
+        .where((record) => _sameLocalDay(record.createdAt, now))
+        .where(
+          (record) => currentAnalysisId == null ||
+              currentAnalysisId.isEmpty ||
+              record.analysisId != currentAnalysisId,
+        )
+        .where((record) => record.rawResult.isNotEmpty)
+        .map((record) => Map<String, dynamic>.from(record.rawResult))
+        .toList(growable: false);
+  }
+
   bool _applyGuidanceQuantities(Map<String, double> quantities) {
     var changed = false;
     final updated = _ingredients.map((ingredient) {
@@ -451,11 +471,15 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
         profile: ref.read(profileProvider).backendPayload,
         analysisId: widget.analysisId,
         labelItems: labels,
+        todayResults: _todayResultsForGuidance(),
+        includeShortfalls: analysisCheckpoint,
         localHour: DateTime.now().hour,
       );
       if (!mounted || revision != _draftRevision) return false;
       if (!guidance.hasAlerts) {
-        _guidanceAcceptedRevision = revision;
+        if (analysisCheckpoint) {
+          _guidanceAcceptedRevision = revision;
+        }
         return true;
       }
       final result = await showDraftMealGuidanceSheet(
@@ -473,7 +497,9 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       }
       if (!result.accepted) return false;
       _applyGuidanceQuantities(result.adjustedQuantities);
-      _guidanceAcceptedRevision = _draftRevision;
+      if (analysisCheckpoint) {
+        _guidanceAcceptedRevision = _draftRevision;
+      }
       return true;
     } catch (error) {
       if (!mounted) return false;
@@ -1038,3 +1064,11 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
 }
 
 String _guidanceFoodKey(String value) => value.trim().toLowerCase();
+
+bool _sameLocalDay(DateTime a, DateTime b) {
+  final left = a.toLocal();
+  final right = b.toLocal();
+  return left.year == right.year &&
+      left.month == right.month &&
+      left.day == right.day;
+}
