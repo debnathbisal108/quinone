@@ -216,6 +216,10 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
 
     setState(() => _checkingGuidance = true);
     try {
+      if (ref.read(profileProvider).isLoading) {
+        await ref.read(profileProvider.notifier).loadProfile();
+        if (!mounted) return;
+      }
       final guidance = await _service.evaluateDraft(
         recipe: recipe,
         profile: ref.read(profileProvider).backendPayload,
@@ -466,6 +470,10 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
     final revision = _draftRevision;
     setState(() => _checkingGuidance = true);
     try {
+      if (ref.read(profileProvider).isLoading) {
+        await ref.read(profileProvider.notifier).loadProfile();
+        if (!mounted) return false;
+      }
       final DraftMealGuidance guidance = await _service.evaluateDraft(
         recipe: recipe,
         profile: ref.read(profileProvider).backendPayload,
