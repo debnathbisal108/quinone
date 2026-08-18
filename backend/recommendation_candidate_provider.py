@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import json
 import logging
 import os
@@ -22,7 +23,7 @@ from usda_recipe_service import search_usda_foods
 
 logger = logging.getLogger("quinone.recommendation_candidates")
 
-DYNAMIC_CANDIDATE_PROVIDER_VERSION = "1.1.0"
+DYNAMIC_CANDIDATE_PROVIDER_VERSION = "1.2.0"
 
 _ENABLE_DYNAMIC = os.environ.get(
     "ENABLE_DYNAMIC_RECOMMENDATION_DISCOVERY", "true"
@@ -343,16 +344,65 @@ def _generate_ideas_sync(prompt: str, maximum_ideas: int) -> list[dict[str, Any]
     return output
 
 
+async def _search_usda_recommendation_candidate(query: str) -> list[dict[str, Any]]:
+    """Search USDA without assuming a particular service-function revision.
+
+    v24 added ``include_branded`` and ``validation_pool_size`` to
+    ``search_usda_foods``. Incremental deployments can legitimately contain a
+    newer dynamic candidate provider beside the older v23 search service.
+    Recommendation discovery must degrade gracefully in that case rather than
+    falling back solely because of a Python signature mismatch.
+
+    On the modern service we keep the optimized non-branded, small validation
+    pool. On the legacy service we request a few results and filter branded
+    records below.
+    """
+    kwargs: dict[str, Any] = {"limit": 1}
+    try:
+        signature = inspect.signature(search_usda_foods)
+        parameters = signature.parameters
+        accepts_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        if accepts_kwargs or "include_branded" in parameters:
+            kwargs["include_branded"] = False
+        if accepts_kwargs or "validation_pool_size" in parameters:
+            kwargs["validation_pool_size"] = 3
+        if "include_branded" not in kwargs:
+            # Legacy searches return generic foods first, followed by branded
+            # foods. Ask for a few so a usable generic record is still likely
+            # to survive the provider-side branded filter.
+            kwargs["limit"] = 3
+    except (TypeError, ValueError):
+        # Some test doubles / wrapped callables do not expose a reliable
+        # signature. The common v23 contract is always safe.
+        kwargs = {"limit": 3}
+
+    try:
+        return await search_usda_foods(query, **kwargs)
+    except TypeError as error:
+        message = str(error)
+        if "unexpected keyword argument" not in message:
+            raise
+        # Last-resort compatibility for a runtime whose callable signature was
+        # obscured by a wrapper. Never let an optional optimization kwarg break
+        # recommendation discovery.
+        logger.warning(
+            "USDA search contract mismatch; retrying recommendation candidate "
+            "verification with legacy arguments only: %s",
+            error,
+        )
+        return await search_usda_foods(query, limit=3)
+
+
 async def _resolve_idea_searches(ideas: list[dict[str, Any]]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     if not ideas:
         return []
     searches = await asyncio.gather(
         *[
-            search_usda_foods(
+            _search_usda_recommendation_candidate(
                 str(idea["usda_search_query"]),
-                limit=1,
-                include_branded=False,
-                validation_pool_size=3,
             )
             for idea in ideas
         ],
