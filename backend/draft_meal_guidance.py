@@ -27,7 +27,7 @@ from recommendation_engine import (
 )
 
 
-GUIDANCE_ENGINE_VERSION = "1.7.0"
+GUIDANCE_ENGINE_VERSION = "2.1.0"
 
 _LABELS: dict[str, tuple[str, str]] = {
     "energy_kcal": ("Energy", "kcal"),
@@ -375,6 +375,36 @@ def _actual_upper_target(target: dict[str, Any]) -> float | None:
     return None
 
 
+def _food_applicable_upper_limit(target: dict[str, Any]) -> float | None:
+    """Return a UL only when this meal's nutrient measurement can be compared to it.
+
+    Several DRI ULs apply only to supplements/fortification, and vitamin A's
+    UL applies to preformed retinol rather than total vitamin-A RAE.  Comparing
+    ordinary food totals against those scopes would create false red alerts.
+    """
+    upper = _number(target.get("upper_limit"))
+    if upper is None or upper <= 0:
+        return None
+    scope = str(target.get("upper_limit_scope") or "").strip().lower()
+    if not scope:
+        return upper
+    if any(
+        token in scope
+        for token in (
+            "added_", "synthetic", "preformed_retinol",
+        )
+    ):
+        return None
+    # If an all-source ceiling explicitly includes food (for example the
+    # fluoride UL), the food amount is comparable even when the scope also
+    # mentions water/supplements. Supplement-only ULs remain excluded.
+    if scope == "all_intake" or scope == "all_sources" or "food" in scope:
+        return upper
+    if "supplement" in scope:
+        return None
+    return None
+
+
 def _meal_fraction(meal_name: str) -> float:
     lowered = meal_name.lower()
     if any(token in lowered for token in ("snack", "dessert", "drink")):
@@ -425,6 +455,7 @@ def _suggestions(
     foods: list[dict[str, Any]],
     local_hour: int,
     projected_totals: dict[str, float],
+    candidate_pool: Iterable[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     # Excess is corrected by changing the contributing food quantity inside
     # Meal Guidance. Never recommend another food for an excess alert.
@@ -432,8 +463,9 @@ def _suggestions(
         return []
 
     ranked: list[tuple[float, dict[str, Any]]] = []
+    candidates = FOOD_RECOMMENDATION_CATALOG if candidate_pool is None else tuple(candidate_pool)
 
-    for candidate in FOOD_RECOMMENDATION_CATALOG:
+    for candidate in candidates:
         if _candidate_already_present(candidate, foods):
             continue
         allowed, _, _ = _candidate_eligibility(candidate, profile)
@@ -462,7 +494,7 @@ def _suggestions(
             "reason": f"Add a source of {(_LABELS.get(nutrient_key) or (nutrient_key, ''))[0].lower()}.",
             "nutrient_basis": "idea_only_until_usda_selection",
         }
-        for _, candidate in ranked[:2]
+        for _, candidate in ranked[:3]
     ]
 
 
@@ -471,10 +503,19 @@ async def apply_personalized_guidance_safety(
     nutrient_result: dict[str, Any],
     *,
     profile: dict[str, Any] | None,
+    recommendation_candidates: Iterable[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     normalized = normalize_user_profile(profile)
     conditions = normalized.get("chronic_conditions") or []
     if not conditions:
+        return guidance
+    # The fast guidance endpoint intentionally returns low/excess alerts before
+    # candidate discovery. With no food suggestions there is nothing to
+    # disease/medication-safety simulate, so do not spend a full scoring pass.
+    if not any(
+        isinstance(alert, dict) and bool(alert.get("suggestions"))
+        for alert in guidance.get("alerts", [])
+    ):
         return guidance
     foods = _foods(nutrient_result)
     if not foods:
@@ -482,8 +523,9 @@ async def apply_personalized_guidance_safety(
     meal_type = str(nutrient_result.get("meal", {}).get("meal_type") or nutrient_result.get("meal", {}).get("meal_name") or "Draft meal")
     baseline = await _analyze_food_set(foods, normalized, meal_type=meal_type)
     before_domains = _domain_score_items(baseline)
-    catalog_by_query = {str(item.get("search_query") or "").strip().lower(): item for item in FOOD_RECOMMENDATION_CATALOG}
-    catalog_by_name = {str(item.get("name") or "").strip().lower(): item for item in FOOD_RECOMMENDATION_CATALOG}
+    candidates = FOOD_RECOMMENDATION_CATALOG if recommendation_candidates is None else tuple(recommendation_candidates)
+    catalog_by_query = {str(item.get("search_query") or "").strip().lower(): item for item in candidates}
+    catalog_by_name = {str(item.get("name") or "").strip().lower(): item for item in candidates}
     output = dict(guidance); filtered_alerts=[]; candidate_index=0
     for raw_alert in guidance.get("alerts", []):
         if not isinstance(raw_alert, dict):
@@ -524,6 +566,7 @@ def build_draft_meal_guidance(
     local_hour: int = 12,
     today_results: Iterable[dict[str, Any]] = (),
     include_shortfalls: bool = True,
+    recommendation_candidates: Iterable[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     normalized_profile = normalize_user_profile(profile)
     foods = _foods(nutrient_result)
@@ -639,18 +682,16 @@ def build_draft_meal_guidance(
                 foods=foods,
                 local_hour=local_hour,
                 projected_totals=projected_totals,
+                candidate_pool=recommendation_candidates,
             ),
         })
 
     caps = dict(_HARD_DAILY_CAPS)
     for key, target in targets.items() if isinstance(targets, dict) else []:
-        upper = _number(target.get("upper_limit")) if isinstance(target, dict) else None
-        upper_scope = str(target.get("upper_limit_scope") or "").lower()
-        is_food_applicable = not any(
-            token in upper_scope
-            for token in ("supplement", "added_folic_acid")
-        )
-        if upper is not None and upper > 0 and is_food_applicable:
+        if not isinstance(target, dict):
+            continue
+        upper = _food_applicable_upper_limit(target)
+        if upper is not None:
             caps[key] = min(caps.get(key, upper), upper)
 
     for key, cap in caps.items():
@@ -682,8 +723,14 @@ def build_draft_meal_guidance(
                 foods=foods,
                 local_hour=local_hour,
                 projected_totals=projected_totals,
+                candidate_pool=recommendation_candidates,
             ),
         })
+
+    # RDA/AI/minimum targets are adequacy references, not toxicity ceilings.
+    # Do NOT create an "excess" alert merely because intake is above 100% of
+    # such a target.  Micronutrient excess alerts above are emitted only from
+    # a real food-applicable UL (or an explicit maximum/range target).
 
     # Defensive invariant: an excess card must never leave the backend with a
     # value already at/below its own displayed reference.  This also protects
@@ -699,6 +746,60 @@ def build_draft_meal_guidance(
         for alert in alerts
         if alert.get("direction") == "excess"
     }
+
+    # Users still deserve visibility when an adequacy reference crosses 100%,
+    # even though an RDA/AI/minimum is not a toxicity ceiling. Keep this as a
+    # distinct informational state so the UI never conflates "above the daily
+    # reference" with "unsafe/excess". A genuine food-applicable UL breach is
+    # already emitted above as direction=excess and wins over this card.
+    above_reference_alerts: list[dict[str, Any]] = []
+    for key, target in targets.items() if isinstance(targets, dict) else []:
+        if (
+            key not in reported
+            or key in clinical_keys
+            or key in excess_nutrients
+            or not isinstance(target, dict)
+        ):
+            continue
+        target_type = str(target.get("target_type") or "").lower()
+        if "maximum" in target_type or "upper" in target_type or "range" in target_type:
+            continue
+        reference = _target_value(target)
+        if reference is None or reference <= 0:
+            continue
+        amount = max(0.0, projected_totals.get(key, 0.0))
+        ratio = amount / reference
+        if ratio <= 1.0:
+            continue
+        label, unit = _label_and_unit(key, target)
+        upper = _food_applicable_upper_limit(target)
+        upper_note = (
+            f" The applicable food-intake upper limit is {upper:g} {unit}."
+            if upper is not None and upper > reference
+            else " This reference is an adequacy goal, not an upper safety limit."
+        )
+        above_reference_alerts.append({
+            "direction": "above_reference",
+            "severity": "notice",
+            "nutrient": key,
+            "label": label,
+            "amount": round(amount, 2),
+            "unit": unit,
+            "reference": round(reference, 2),
+            "percentage": round(ratio * 100.0, 1),
+            "message": (
+                f"Today's projected {label.lower()} is above 100% of its daily reference."
+                f"{upper_note}"
+            ),
+            "contributors": _contributors(foods, key),
+            "suggestions": [],
+        })
+    above_reference_alerts.sort(
+        key=lambda item: (_number(item.get("percentage")) or 0.0),
+        reverse=True,
+    )
+    alerts.extend(above_reference_alerts)
+
     shortfall_keys = list(_MACRO_ORDER) if include_shortfalls else []
     if include_shortfalls and isinstance(targets, dict):
         shortfall_keys.extend(
@@ -754,11 +855,42 @@ def build_draft_meal_guidance(
                 foods=foods,
                 local_hour=local_hour,
                 projected_totals=projected_totals,
+                candidate_pool=recommendation_candidates,
             ),
         }
         shortfalls.append((0 if key in _MACROS else 1, ratio, alert))
     shortfalls.sort(key=lambda row: (row[0], row[1]))
     alerts.extend(alert for _, _, alert in shortfalls)
+
+    # Final no-duplicate invariant. A suggestion already present in the draft
+    # must never be returned, even if its USDA display name differs from the
+    # catalogue by punctuation, preparation text or singular/plural spelling.
+    duplicate_candidates = (
+        FOOD_RECOMMENDATION_CATALOG
+        if recommendation_candidates is None
+        else tuple(recommendation_candidates)
+    )
+    catalog_by_query = {
+        str(item.get("search_query") or "").strip().lower(): item
+        for item in duplicate_candidates
+    }
+    catalog_by_name = {
+        str(item.get("name") or "").strip().lower(): item
+        for item in duplicate_candidates
+    }
+    for alert in alerts:
+        filtered = []
+        for suggestion in alert.get("suggestions", []) or []:
+            if not isinstance(suggestion, dict):
+                continue
+            candidate = (
+                catalog_by_query.get(str(suggestion.get("search_query") or "").strip().lower())
+                or catalog_by_name.get(str(suggestion.get("name") or "").strip().lower())
+            )
+            if candidate is not None and _candidate_already_present(candidate, foods):
+                continue
+            filtered.append(suggestion)
+        alert["suggestions"] = filtered
 
     severity_order = {"critical": 0, "warning": 1, "notice": 2}
     alerts.sort(key=lambda item: severity_order.get(str(item.get("severity")), 9))
@@ -773,6 +905,9 @@ def build_draft_meal_guidance(
             "critical_count": sum(item["severity"] == "critical" for item in alerts),
             "warning_count": sum(item["severity"] == "warning" for item in alerts),
             "low_count": sum(item["direction"] == "low" for item in alerts),
+            "above_reference_count": sum(
+                item["direction"] == "above_reference" for item in alerts
+            ),
         },
         "data_quality": {
             "foods_checked": len(foods),
@@ -793,7 +928,8 @@ def build_draft_meal_guidance(
         ),
         "disclaimer": (
             "Meal shortfalls use an estimated share of daily targets and appear only after Analyze is tapped. "
-            "Food suggestions appear only for shortfalls. Excess alerts are adjusted by changing food "
-            "quantity in 10% steps."
+            "Food suggestions appear only for shortfalls and load separately so they never block analysis. "
+            "Values above 100% of an adequacy reference are shown as informational alerts; only real "
+            "upper-limit/range excesses use quantity reduction in 10% steps."
         ),
     }
