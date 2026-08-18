@@ -4,18 +4,24 @@ from __future__ import annotations
 
 import copy
 import math
+import re
 from typing import Any, Iterable
 
-from evidence_engine import attach_evidence
+from evidence_engine import DOMAIN_HEALTH_LABEL, attach_evidence
 from feature_engineering import compute_features
 from health_domain_scoring import attach_domain_scores
 from nutrient_target_engine import attach_nutrient_targets, calculate_nutrient_targets
 from nutrient_target_data import CANONICAL_KEY_COMPATIBILITY
 from personalization_engine import attach_personalization, normalize_user_profile
 from recommendation_catalog import FOOD_RECOMMENDATION_CATALOG
+from recommendation_candidate_provider import (
+    discover_recommendation_candidates,
+    rehydrate_usda_candidate,
+)
 
 
-RECOMMENDATION_ENGINE_VERSION = "2.3.0"
+RECOMMENDATION_ENGINE_VERSION = "2.6.1"
+RECOMMENDATION_APPLY_CONTRACT_VERSION = 2
 
 _FALLBACK_TARGETS: dict[str, dict[str, Any]] = {
     "energy_kcal": {"type": "range", "low": 1800.0, "high": 2400.0},
@@ -46,7 +52,12 @@ _NUTRIENT_LABELS = {
     "vitamin_d_ug": "vitamin D", "vitamin_b12_ug": "vitamin B12",
     "folate_ug": "folate", "omega3_g": "omega-3", "sodium_mg": "sodium",
     "saturated_fat_g": "saturated fat", "added_sugars_g": "added sugar",
-    "trans_fat_g": "trans fat",
+    "trans_fat_g": "trans fat", "phosphorus_mg": "phosphorus",
+    "calcium_mg": "calcium", "iron_mg": "iron", "magnesium_mg": "magnesium",
+    "zinc_mg": "zinc", "vitamin_a_ug": "vitamin A", "vitamin_c_mg": "vitamin C",
+    "vitamin_d_ug": "vitamin D", "vitamin_b6_mg": "vitamin B6",
+    "selenium_ug": "selenium", "iodine_ug": "iodine", "copper_mg": "copper",
+    "manganese_mg": "manganese",
 }
 
 _NUTRIENT_UNITS = {
@@ -59,6 +70,11 @@ _NUTRIENT_UNITS = {
     "saturated_fat_g": "g",
     "added_sugars_g": "g",
     "trans_fat_g": "g",
+    "phosphorus_mg": "mg", "calcium_mg": "mg", "iron_mg": "mg",
+    "magnesium_mg": "mg", "zinc_mg": "mg", "vitamin_a_ug": "µg",
+    "vitamin_c_mg": "mg", "vitamin_d_ug": "µg", "vitamin_b6_mg": "mg",
+    "selenium_ug": "µg", "iodine_ug": "µg", "copper_mg": "mg",
+    "manganese_mg": "mg",
 }
 
 
@@ -174,6 +190,38 @@ def _sum_nutrients(foods: Iterable[dict[str, Any]]) -> dict[str, float]:
     return totals
 
 
+def _food_applicable_target_upper(raw: dict[str, Any]) -> float | None:
+    upper = _number(raw.get("upper_limit"))
+    if upper is None or upper <= 0:
+        return None
+    scope = str(raw.get("upper_limit_scope") or "").strip().lower()
+    if not scope:
+        return upper
+    if any(
+        token in scope
+        for token in ("added_", "synthetic", "preformed_retinol")
+    ):
+        return None
+    # Some all-source ULs explicitly include both food and supplements. If
+    # food is named in the scope, food intake alone can legitimately be
+    # compared with that ceiling. Supplement-only ULs remain excluded.
+    if scope == "all_intake" or scope == "all_sources" or "food" in scope:
+        return upper
+    if "supplement" in scope:
+        return None
+    return None
+
+
+def _attach_food_upper(
+    target: dict[str, Any], raw: dict[str, Any]
+) -> dict[str, Any]:
+    result = dict(target)
+    upper = _food_applicable_target_upper(raw)
+    if upper is not None:
+        result["upper_limit"] = upper
+    return result
+
+
 def _resolved_targets(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
     targets = copy.deepcopy(_FALLBACK_TARGETS)
     calculated = calculate_nutrient_targets(profile).get("targets", {})
@@ -214,11 +262,11 @@ def _resolved_targets(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
             continue
 
         if key == "energy_kcal" and resolved is not None and resolved > 0:
-            targets[key] = {
+            targets[key] = _attach_food_upper({
                 "type": "range",
                 "low": round(resolved * 0.9, 2),
                 "high": round(resolved * 1.1, 2),
-            }
+            }, raw)
             continue
 
         # The carbohydrate registry contains both the 130 g RDA and an AMDR.
@@ -226,25 +274,29 @@ def _resolved_targets(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
         # limit. When energy is known, use the adult/age>=1 AMDR (45-65% kcal).
         if key == "carbohydrate_g" and (age_months is None or age_months >= 12):
             if resolved_energy is not None and resolved_energy > 0:
-                targets[key] = {
+                targets[key] = _attach_food_upper({
                     "type": "range",
                     "low": round(resolved_energy * 0.45 / 4.0, 2),
                     "high": round(resolved_energy * 0.65 / 4.0, 2),
-                }
+                }, raw)
             # If energy is unavailable, retain the generic reference range.
             continue
 
         if low is not None and high is not None and low > 0 and high > 0:
-            targets[key] = {"type": "range", "low": low, "high": high}
+            targets[key] = _attach_food_upper(
+                {"type": "range", "low": low, "high": high}, raw
+            )
         elif upper is not None and upper > 0 and (
             "upper" in target_type or "maximum" in target_type or "limit" in target_type
         ):
-            targets[key] = {"type": "maximum", "value": upper}
+            targets[key] = _attach_food_upper(
+                {"type": "maximum", "value": upper}, raw
+            )
         elif resolved is not None and resolved > 0:
-            targets[key] = {
+            targets[key] = _attach_food_upper({
                 "type": "maximum" if "maximum" in target_type or "upper" in target_type else "minimum",
                 "value": resolved,
-            }
+            }, raw)
     return targets
 
 
@@ -268,7 +320,11 @@ def _target_score(totals: dict[str, float], targets: dict[str, dict[str, Any]]) 
             )
         else:
             goal = float(target["value"])
-            score = min(100.0, current / goal * 100.0)
+            upper = _number(target.get("upper_limit"))
+            if upper is not None and upper > 0 and current > upper:
+                score = max(0.0, 100.0 - ((current - upper) / upper * 160.0))
+            else:
+                score = min(100.0, current / goal * 100.0)
         values.append(score)
     return round(sum(values) / len(values), 2) if values else 0.0
 
@@ -362,26 +418,58 @@ def _scaled_candidate_food(candidate: dict[str, Any], grams: float, index: int) 
     nutrients = {
         key: round(float(value) * factor, 4)
         for key, value in candidate["nutrients"].items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
     }
-    return {
+    fdc_id = candidate.get("fdc_id")
+    dynamic_usda = isinstance(fdc_id, int)
+    food = {
         "id": f"recommendation_{index:03d}",
         "name": candidate["name"],
         "display_name": candidate["name"],
         "canonical_name": candidate["search_query"],
-        "category": "Recommended foundational food",
-        "food_source": "Generic",
+        "category": candidate.get("food_category") or "Recommended foundational food",
+        "food_source": "USDA FoodData Central" if dynamic_usda else "Generic",
         "analysis_route": "DIRECT_USDA",
         "quantity": grams,
         "estimated_weight_g": grams,
         "unit": "g",
-        "preparation": "ready to eat",
+        "preparation": "as listed by USDA" if dynamic_usda else "ready to eat",
         "edible_fraction": 1.0,
         "ingredients": [],
         "spices": [],
         "nutrients": nutrients,
         "all_nutrients": [],
-        "nutrient_status": "recommendation_catalog_estimate",
+        "nutrient_status": (
+            "recommendation_usda_verified"
+            if dynamic_usda
+            else "recommendation_catalog_estimate"
+        ),
+        "nutrient_source": (
+            "USDA FoodData Central"
+            if dynamic_usda
+            else "recommendation_catalog"
+        ),
     }
+    if dynamic_usda:
+        food["resolver"] = {
+            "status": "resolved",
+            "fdc_id": fdc_id,
+            "matched_description": candidate.get("search_query"),
+            "matched_name": candidate.get("search_query"),
+            "data_type": candidate.get("data_type"),
+            "match_query": candidate.get("search_query"),
+            "confidence": 1.0,
+            "source": "dynamic_recommendation_usda",
+        }
+        food["nutrient_basis"] = {
+            "source": "USDA FoodData Central",
+            "fdc_id": fdc_id,
+            "matched_name": candidate.get("search_query"),
+            "data_type": candidate.get("data_type"),
+            "scaled_weight_g": grams,
+            "per_100g_basis": "verified_before_recommendation",
+        }
+    return food
 
 
 def _normalized_values(value: Any) -> set[str]:
@@ -466,8 +554,16 @@ def _personalized_upper_limit_safe(candidate: dict[str, Any], profile: dict[str,
     factor = grams / 100.0
     reasons=[]
     for key,target in targets.items():
-        if target.get("type") != "maximum": continue
-        ceiling=_number(target.get("value")); contribution=(_number(nutrients.get(key)) or 0.0)*factor
+        upper = _number(target.get("upper_limit"))
+        if target.get("type") == "maximum":
+            value = _number(target.get("value"))
+            ceiling = min(
+                candidate for candidate in (value, upper)
+                if candidate is not None and candidate > 0
+            ) if any(candidate is not None and candidate > 0 for candidate in (value, upper)) else None
+        else:
+            ceiling = upper
+        contribution=(_number(nutrients.get(key)) or 0.0)*factor
         if ceiling is None or ceiling <= 0 or contribution <= 0: continue
         before=max(0.0,_number(current_totals.get(key)) or 0.0); after=before+contribution
         if before <= ceiling and after > ceiling: reasons.append(f"personalized_{key}_limit")
@@ -682,10 +778,23 @@ def _meal_compatibility(
     if not current_has_animal_main and source in {"meat", "fish", "egg"}:
         return False, "preserve_vegetarian_meal"
 
-    milk_bowl = any(
-        term in meal_text
-        for term in ("milk", "yogurt", "oat", "porridge", "cereal", "smoothie")
+    # Do not classify every recipe containing oats as a breakfast/milk bowl.
+    # That old heuristic made a paneer + oats + fruit recipe reject otherwise
+    # reasonable side foods and could empty both shortfall and module
+    # recommendations. Require an explicit bowl-style meal description, or an
+    # actual milk/yogurt + oat/cereal combination.
+    meal_type_text = str(
+        _unwrap_result(current_result).get("meal", {}).get("meal_type") or ""
+    ).lower()
+    explicit_bowl = any(
+        term in meal_type_text
+        for term in ("porridge", "cereal", "smoothie", "oatmeal", "breakfast bowl")
     )
+    dairy_bowl = (
+        any(term in meal_text for term in ("milk", "yogurt"))
+        and any(term in meal_text for term in ("oat", "cereal", "granola"))
+    )
+    milk_bowl = explicit_bowl or dairy_bowl
     if milk_bowl and source in {"meat", "fish"}:
         return False, "incompatible_with_milk_or_breakfast_bowl"
     if milk_bowl:
@@ -709,27 +818,54 @@ def _candidate_already_present(
     candidate: dict[str, Any],
     current_foods: list[dict[str, Any]],
 ) -> bool:
+    """Return True when the catalogue food is already part of the meal.
+
+    Recommendation names and USDA descriptions frequently differ only by
+    punctuation, preparation words or singular/plural spelling (for example
+    ``blueberry`` vs ``Blueberries, raw``).  A duplicate suggestion is more
+    harmful than a conservative match here, so compare lightly stemmed
+    identity tokens in addition to exact normalized names.
+    """
     ignored = {
         "raw", "cooked", "boiled", "steamed", "roasted", "baked",
         "plain", "low", "fat", "firm", "unsalted", "without", "salt",
+        "fresh", "frozen", "prepared", "ready", "eat",
     }
-    candidate_tokens = {
-        token
-        for token in str(
-            candidate.get("name") or candidate.get("search_query") or ""
-        ).lower().replace("-", " ").split()
-        if len(token) >= 4 and token not in ignored
-    }
+
+    def stem(token: str) -> str:
+        if token.endswith("ies") and len(token) > 5:
+            return token[:-3] + "y"
+        if token.endswith("es") and len(token) > 5:
+            return token[:-2]
+        if token.endswith("s") and len(token) > 4 and not token.endswith("ss"):
+            return token[:-1]
+        return token
+
+    def identity_tokens(value: Any) -> set[str]:
+        return {
+            stem(token)
+            for token in re.findall(r"[a-z0-9]+", str(value or "").lower())
+            if len(token) >= 4 and token not in ignored
+        }
+
+    candidate_tokens = identity_tokens(
+        " ".join(
+            str(value or "")
+            for value in (candidate.get("name"), candidate.get("search_query"))
+        )
+    )
     if not candidate_tokens:
         return False
     for food in current_foods:
-        food_tokens = set(
-            str(
-                food.get("canonical_name")
-                or food.get("display_name")
-                or food.get("name")
-                or ""
-            ).lower().replace("-", " ").split()
+        food_tokens = identity_tokens(
+            " ".join(
+                str(value or "")
+                for value in (
+                    food.get("canonical_name"),
+                    food.get("display_name"),
+                    food.get("name"),
+                )
+            )
         )
         if candidate_tokens & food_tokens:
             return True
@@ -785,6 +921,7 @@ def _target_domains(result: dict[str, Any], maximum: int = 2) -> list[tuple[str,
 
 
 _REDUCTION_FEATURE_NUTRIENTS: dict[str, tuple[str, ...]] = {
+    "energy_density": ("energy_kcal",),
     "sodium_density": ("sodium_mg",),
     "added_sugar_density": ("added_sugars_g", "sugars_g"),
     "total_sugar_density": ("sugars_g",),
@@ -802,9 +939,64 @@ def _negative_features(domain: dict[str, Any]) -> set[str]:
     return {str(item).strip().lower() for item in values or [] if str(item).strip()}
 
 
+def _negative_contributors(domain: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = domain.get("negative_contributors")
+    return [dict(item) for item in raw or [] if isinstance(item, dict)]
+
+
+def _is_low_adequacy_signal(item: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(item.get(key) or "").strip().lower()
+        for key in ("rule_id", "rule_name")
+    )
+    if any(token in text for token in ("high ", "high_", "load", "excess")):
+        return False
+    return any(
+        token in text
+        for token in ("low ", "low_", "insufficient", "inadequate", "deficien", "adequacy")
+    )
+
+
+def _reduction_nutrients_for_domain(domain: dict[str, Any]) -> set[str]:
+    """Map adverse *excess* evidence to nutrients worth reducing.
+
+    A negative feature name alone is not enough: ``protein_density`` can be
+    negative because protein is too LOW (muscle/healthy-aging) or because the
+    load is high (renal).  The old feature-only mapping treated both as
+    reduction signals and could therefore reject every protein-containing
+    candidate for a low-protein domain.
+    """
+    nutrients: set[str] = set()
+    contributors = _negative_contributors(domain)
+    if contributors:
+        for item in contributors:
+            feature = str(item.get("feature") or "").strip().lower()
+            mapped = _REDUCTION_FEATURE_NUTRIENTS.get(feature, ())
+            if not mapped or _is_low_adequacy_signal(item):
+                continue
+            if feature == "protein_density":
+                text = " ".join(
+                    str(item.get(key) or "").lower()
+                    for key in ("rule_id", "rule_name")
+                )
+                if not any(token in text for token in ("high", "load", "excess")):
+                    continue
+            nutrients.update(mapped)
+        return nutrients
+
+    # Legacy score payloads may expose only top_negative_features.  Preserve
+    # reduction behavior for unambiguous excess features, but deliberately do
+    # NOT infer protein reduction without a rule-level direction.
+    for feature in _negative_features(domain):
+        if feature == "protein_density":
+            continue
+        nutrients.update(_REDUCTION_FEATURE_NUTRIENTS.get(feature, ()))
+    return nutrients
+
+
 def _requires_reduction(domain: dict[str, Any]) -> bool:
     features = _negative_features(domain)
-    return bool(features & set(_REDUCTION_FEATURE_NUTRIENTS)) or any(
+    return bool(_reduction_nutrients_for_domain(domain)) or any(
         token in feature
         for feature in features
         for token in ("processed", "ultra_processed", "refined", "liquid_sugar")
@@ -814,7 +1006,10 @@ def _requires_reduction(domain: dict[str, Any]) -> bool:
 def _candidate_portions(candidate: dict[str, Any], calorie_cap: float) -> list[float]:
     serving = max(5.0, float(candidate.get("serving_g") or 100.0))
     per100_energy = max(0.0, float((candidate.get("nutrients") or {}).get("energy_kcal", 0.0)))
-    portions = {round(max(5.0, serving * factor), 1) for factor in (0.5, 0.75, 1.0)}
+    portions = {
+        round(max(5.0, serving * factor), 1)
+        for factor in (0.5, 0.75, 1.0, 1.25, 1.5)
+    }
     if per100_energy > 0:
         portions = {
             round(max(5.0, min(value, calorie_cap * 100.0 / per100_energy)), 1)
@@ -848,6 +1043,30 @@ async def _analyze_food_set(
     scored = await attach_domain_scores(evidenced)
     return await attach_personalization(scored, profile)
 
+
+
+def _shortfall_nutrient_keys(
+    totals: dict[str, float],
+    targets: dict[str, dict[str, Any]],
+    *,
+    maximum: int = 10,
+) -> list[str]:
+    """Return the most under-covered adequacy nutrients for candidate planning."""
+    ranked: list[tuple[float, str]] = []
+    for key, target in targets.items():
+        current = max(0.0, totals.get(key, 0.0))
+        kind = str(target.get("type") or "minimum")
+        if kind == "maximum":
+            continue
+        if kind == "range":
+            goal = _number(target.get("low"))
+        else:
+            goal = _number(target.get("value"))
+        if goal is None or goal <= 0 or current >= goal:
+            continue
+        ranked.append((current / goal, key))
+    ranked.sort(key=lambda row: (row[0], row[1]))
+    return [key for _, key in ranked[: max(1, maximum)]]
 
 def _priority_changes(
     before: dict[str, float],
@@ -902,45 +1121,49 @@ def _exceeded_nutrient_targets(
 ) -> list[tuple[float, str, float, dict[str, Any]]]:
     """Material nutrient excesses that deserve an explicit portion action.
 
-    Protein RDA/AI is a reference rather than a medical UL, so it receives a
-    20% tolerance before being treated as an excess-guidance trigger.
+    Minimum/RDA targets are never called excessive merely for being >100%. A
+    real food-applicable UL can trigger an excess for any reported nutrient.
+    Protein has a separate 20% balance-guidance buffer because it generally
+    has no medical UL in the target registry.
     """
     rows: list[tuple[float, str, float, dict[str, Any]]] = []
-    eligible = {
+    direct_balance_keys = {
         "energy_kcal", "protein_g", "carbohydrate_g", "fat_g",
         "sodium_mg", "saturated_fat_g", "added_sugars_g", "trans_fat_g",
     }
-    for key in eligible:
-        target = targets.get(key)
+    for key, target in targets.items():
         if not isinstance(target, dict):
             continue
         current = max(0.0, totals.get(key, 0.0))
+        if current <= 0:
+            continue
         kind = target.get("type")
         limit: float | None = None
-        scoring_target: dict[str, Any]
-        if kind == "range":
+        scoring_target: dict[str, Any] | None = None
+
+        upper = _number(target.get("upper_limit"))
+        if upper is not None and upper > 0 and current > upper:
+            limit = upper
+            scoring_target = {"type": "maximum", "value": upper}
+        elif key in direct_balance_keys and kind == "range":
             high = _number(target.get("high"))
             if high is not None and high > 0 and current > high:
                 limit = high
                 scoring_target = target
-            else:
-                continue
-        elif kind == "maximum":
+        elif key in direct_balance_keys and kind == "maximum":
             value = _number(target.get("value"))
             if value is not None and value > 0 and current > value:
                 limit = value
                 scoring_target = target
-            else:
-                continue
         elif key == "protein_g" and kind == "minimum":
             value = _number(target.get("value"))
-            if value is None or value <= 0:
-                continue
-            limit = value * 1.20
-            if current <= limit:
-                continue
-            scoring_target = {"type": "maximum", "value": limit}
-        else:
+            if value is not None and value > 0:
+                guidance_limit = value * 1.20
+                if current > guidance_limit:
+                    limit = guidance_limit
+                    scoring_target = {"type": "maximum", "value": guidance_limit}
+
+        if limit is None or scoring_target is None:
             continue
         rows.append((current / max(limit, 0.0001), key, limit, scoring_target))
     rows.sort(reverse=True)
@@ -1247,7 +1470,10 @@ def _domain_label(key: str, item: dict[str, Any]) -> str:
         # This score describes dietary support signals; it is not a diagnosis
         # or a measurement of kidney function.
         return "Renal dietary-support"
-    return str(item.get("health_domain") or key.replace("_", " ").title())
+    explicit = str(item.get("health_domain") or "").strip()
+    if explicit and _domain_token(explicit) != _domain_token(key):
+        return explicit
+    return DOMAIN_HEALTH_LABEL.get(key, key.replace("_", " ").title())
 
 
 def _domain_delta(
@@ -1375,7 +1601,11 @@ async def recommend_after_analysis(
     # module.  Normal flow is still score-first; an explicit preferred-domain
     # request moves that domain to the front without discarding the low-score
     # modules that follow it.
-    target_window = max(3, min(maximum_results, 5))
+    # Search breadth must not be tied to the number of cards eventually shown.
+    # A few of the very weakest domains may have no safe/compatible candidate,
+    # so inspect every low domain exposed by _target_domains (up to eight) and
+    # still return only `maximum_results` cards at the end.
+    target_window = min(len(ranked_targets), 8)
     if requested:
         preferred = [
             item for item in ranked_targets if item[0].strip().lower() in requested
@@ -1390,7 +1620,28 @@ async def recommend_after_analysis(
     before_totals = _sum_nutrients(current_foods)
     before_balance = _target_score(before_totals, targets)
 
+    planner_domains = [
+        {
+            "key": key,
+            "label": _domain_label(key, item),
+            "score": round(float(item.get("score") or 0.0), 2),
+            "negative_features": sorted(_negative_features(item)),
+        }
+        for key, item in targets_to_improve
+    ]
+    candidate_pool, candidate_provider = await discover_recommendation_candidates(
+        current_result=current_result,
+        current_foods=current_foods,
+        profile=normalized_profile,
+        target_domains=planner_domains,
+        target_nutrients=_shortfall_nutrient_keys(before_totals, targets),
+        local_hour=hour,
+        maximum_candidates=16,
+        fallback_candidates=FOOD_RECOMMENDATION_CATALOG,
+    )
+
     evaluated: list[dict[str, Any]] = []
+    soft_domain_candidates: list[dict[str, Any]] = []
     candidate_index = 0
 
     # Nutrient-balance excesses get explicit current-meal portion actions even
@@ -1506,7 +1757,7 @@ async def recommend_after_analysis(
 
     for target_key, target_item in targets_to_improve:
         reduction_first = _requires_reduction(target_item)
-        for candidate in FOOD_RECOMMENDATION_CATALOG:
+        for candidate in candidate_pool:
             if _candidate_already_present(candidate, current_foods):
                 continue
             allowed, audit, _ = _candidate_eligibility(candidate, normalized_profile)
@@ -1533,7 +1784,7 @@ async def recommend_after_analysis(
                 old, new, target_delta = _domain_delta(
                     before_domains, after_domains, target_key
                 )
-                if target_delta < 0.25:
+                if target_delta <= 0.05:
                     continue
                 collateral = _collateral_decline(before_domains, after_domains, target_key)
                 if collateral > 3.0:
@@ -1548,6 +1799,8 @@ async def recommend_after_analysis(
                     action="add",
                     food={
                         "catalog_id": candidate["id"],
+                        **({"fdc_id": candidate["fdc_id"]} if isinstance(candidate.get("fdc_id"), int) else {}),
+                        "candidate_source": candidate.get("candidate_source", "curated_fallback"),
                         "name": candidate["name"],
                         "search_query": candidate["search_query"],
                         "quantity": round(grams, 1),
@@ -1572,15 +1825,23 @@ async def recommend_after_analysis(
                     + (after_overall - before_overall)
                     - collateral * 3.0
                 )
-                evaluated.append(item)
+                if target_delta >= 0.25:
+                    evaluated.append(item)
+                elif collateral <= 1.0:
+                    # Do not return an empty weakest-score card when there is a
+                    # genuine, safe positive movement that simply falls below
+                    # the normal 0.25-point materiality threshold. This is a
+                    # fallback only; strong candidates always outrank it.
+                    item["_soft_domain_fallback"] = True
+                    item["warnings"] = [
+                        *item.get("warnings", []),
+                        "The modeled target-domain improvement is small; re-analyze after applying the portion.",
+                    ]
+                    soft_domain_candidates.append(item)
 
         # When a domain's evidence points to excess, simulate reducing the
         # current food contributing most to that implicated nutrient.
-        implicated = {
-            nutrient
-            for feature in _negative_features(target_item)
-            for nutrient in _REDUCTION_FEATURE_NUTRIENTS.get(feature, ())
-        }
+        implicated = _reduction_nutrients_for_domain(target_item)
         for nutrient_key in implicated:
             offender = max(
                 current_foods,
@@ -1644,7 +1905,7 @@ async def recommend_after_analysis(
 
             # Also simulate a real swap when a compatible catalogue food
             # carries materially less of the implicated excess nutrient.
-            for candidate in FOOD_RECOMMENDATION_CATALOG:
+            for candidate in candidate_pool:
                 if _candidate_already_present(candidate, current_foods):
                     continue
                 allowed, audit, _ = _candidate_eligibility(candidate, normalized_profile)
@@ -1686,6 +1947,8 @@ async def recommend_after_analysis(
                     action="replace",
                     food={
                         "catalog_id": candidate["id"],
+                        **({"fdc_id": candidate["fdc_id"]} if isinstance(candidate.get("fdc_id"), int) else {}),
+                        "candidate_source": candidate.get("candidate_source", "curated_fallback"),
                         "name": candidate["name"],
                         "search_query": candidate["search_query"],
                         "quantity": round(grams, 1),
@@ -1718,6 +1981,24 @@ async def recommend_after_analysis(
                 )
                 evaluated.append(replacement_item)
             break
+
+    # Explicit nutrient-balance actions may exist even when no health-domain
+    # addition survives the normal materiality threshold. In that case, add
+    # the best safe small-gain domain candidates rather than showing no module
+    # recommendation at all. Medical, diet, compatibility, upper-limit and
+    # protected-domain checks have already run above.
+    if not any(
+        not item.get("_nutrient_priority")
+        for item in evaluated
+    ):
+        soft_domain_candidates.sort(
+            key=lambda item: (
+                item.get("_target_delta", 0.0),
+                -item.get("_collateral", 0.0),
+            ),
+            reverse=True,
+        )
+        evaluated.extend(soft_domain_candidates)
 
     evaluated.sort(
         key=lambda item: (item.get("_utility", 0.0), item.get("_target_delta", 0.0)),
@@ -1837,10 +2118,11 @@ async def recommend_after_analysis(
             for key, item in targets_to_improve
         ],
         "recommendations": selected,
+        "candidate_provider": candidate_provider,
         "message": (
-            "No safe, meal-compatible module improvement was found from the current catalogue."
+            "No safe, meal-compatible module improvement was found from the verified candidate pool."
             if not selected
-            else "Each option was simulated inside this meal and ranked by its target-module improvement."
+            else "Each option was USDA-verified, simulated inside this meal, and ranked by its target-module improvement."
         ),
         "disclaimer": (
             "These are dietary-support estimates, not diagnoses or treatment. "
@@ -1856,6 +2138,16 @@ def _catalog_candidate(catalog_id: str) -> dict[str, Any] | None:
     )
 
 
+async def _candidate_for_recommendation_food(
+    food_spec: dict[str, Any],
+) -> dict[str, Any] | None:
+    fdc_id = food_spec.get("fdc_id")
+    grams = _number(food_spec.get("quantity")) or 100.0
+    if isinstance(fdc_id, int) or (isinstance(fdc_id, str) and fdc_id.isdigit()):
+        return await rehydrate_usda_candidate(int(fdc_id), serving_g=grams)
+    return _catalog_candidate(str(food_spec.get("catalog_id") or ""))
+
+
 async def apply_recommendation(
     *,
     current_result: dict[str, Any],
@@ -1863,38 +2155,63 @@ async def apply_recommendation(
     profile: dict[str, Any] | None,
     local_hour: int,
     recommendation_id: str,
+    recommendation_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Apply a freshly validated recommendation to the existing meal."""
-    recommendation_set = await recommend_after_analysis(
-        current_result=current_result,
-        today_results=today_results,
-        profile=profile,
-        local_hour=local_hour,
-        maximum_results=8,
-    )
-    recommendation = next(
-        (
-            item for item in recommendation_set.get("recommendations", [])
-            if item.get("id") == recommendation_id
-        ),
-        None,
-    )
+    """Apply a recommendation after revalidating it against current data.
+
+    Dynamic recommendations are not regenerated from Gemini at apply time.
+    The client echoes the selected recommendation payload, but its nutrient,
+    diet and safety claims are NOT trusted: an exact FDC id is rehydrated from
+    USDA and run through the eligibility + full simulation pipeline again.
+    Legacy clients that send only recommendation_id retain the old regeneration
+    path (and therefore still work with the curated fallback catalogue).
+    """
+    recommendation: dict[str, Any] | None = None
+    if isinstance(recommendation_payload, dict):
+        payload_id = str(recommendation_payload.get("id") or "")
+        if payload_id and payload_id != recommendation_id:
+            raise ValueError("The selected recommendation payload does not match its id.")
+        recommendation = copy.deepcopy(recommendation_payload)
+
+    if recommendation is None:
+        recommendation_set = await recommend_after_analysis(
+            current_result=current_result,
+            today_results=today_results,
+            profile=profile,
+            local_hour=local_hour,
+            maximum_results=8,
+        )
+        recommendation = next(
+            (
+                item for item in recommendation_set.get("recommendations", [])
+                if item.get("id") == recommendation_id
+            ),
+            None,
+        )
     if recommendation is None:
         raise ValueError("That recommendation is no longer available for this meal.")
 
     normalized_profile = normalize_user_profile(profile)
     _, current_foods = _collect_day_foods(current_result, [])
+    if not current_foods:
+        raise ValueError("The current meal no longer contains nutrient-bearing foods.")
     foods = copy.deepcopy(current_foods)
     action = str(recommendation.get("action") or "")
     food_spec = recommendation.get("food") or {}
+    if not isinstance(food_spec, dict):
+        raise ValueError("The recommended food specification is invalid.")
     applied_food_name = str(food_spec.get("name") or "Food")
+    hour = max(0, min(local_hour, 23))
+
     if action == "add":
-        candidate = _catalog_candidate(str(food_spec.get("catalog_id") or ""))
+        candidate = await _candidate_for_recommendation_food(food_spec)
         if candidate is None:
-            raise ValueError("The recommended food is no longer in the catalogue.")
+            raise ValueError("The recommended food could not be revalidated.")
+        if _candidate_already_present(candidate, current_foods):
+            raise ValueError("That food is already part of this meal.")
         allowed, _, reasons = _candidate_eligibility(candidate, normalized_profile)
         compatible, compatibility_reason = _meal_compatibility(
-            candidate, current_result, current_foods, max(0, min(local_hour, 23))
+            candidate, current_result, current_foods, hour
         )
         if not allowed or not compatible:
             detail = ", ".join(reasons or [compatibility_reason])
@@ -1902,7 +2219,19 @@ async def apply_recommendation(
         grams = _number(food_spec.get("quantity"))
         if grams is None or grams <= 0:
             raise ValueError("The recommended quantity is invalid.")
+        upper_safe, upper_reasons = _personalized_upper_limit_safe(
+            candidate,
+            normalized_profile,
+            _sum_nutrients(current_foods),
+            serving_g=grams,
+        )
+        if not upper_safe:
+            raise ValueError(
+                "The recommendation would now exceed a personalized limit: "
+                + ", ".join(upper_reasons)
+            )
         foods.append(_scaled_candidate_food(candidate, grams, len(foods) + 1))
+
     elif action == "adjust_portion":
         wanted = str(food_spec.get("name") or "").strip().lower()
         new_quantity = _number(food_spec.get("quantity"))
@@ -1921,20 +2250,32 @@ async def apply_recommendation(
             changed = True
         if not changed:
             raise ValueError("The original food could not be found in this meal.")
+
     elif action == "replace":
-        candidate = _catalog_candidate(str(food_spec.get("catalog_id") or ""))
+        candidate = await _candidate_for_recommendation_food(food_spec)
         replaces = recommendation.get("replaces") or {}
-        wanted = str(replaces.get("name") or "").strip().lower()
+        wanted = str(replaces.get("name") or "").strip().lower() if isinstance(replaces, dict) else ""
         grams = _number(food_spec.get("quantity"))
         if candidate is None or not wanted or grams is None or grams <= 0:
             raise ValueError("The replacement recommendation is invalid.")
         allowed, _, reasons = _candidate_eligibility(candidate, normalized_profile)
         compatible, compatibility_reason = _meal_compatibility(
-            candidate, current_result, current_foods, max(0, min(local_hour, 23))
+            candidate, current_result, current_foods, hour
         )
         if not allowed or not compatible:
             detail = ", ".join(reasons or [compatibility_reason])
             raise ValueError(f"The replacement is no longer safe for this profile: {detail}.")
+        upper_safe, upper_reasons = _personalized_upper_limit_safe(
+            candidate,
+            normalized_profile,
+            _sum_nutrients(current_foods),
+            serving_g=grams,
+        )
+        if not upper_safe:
+            raise ValueError(
+                "The replacement would now exceed a personalized limit: "
+                + ", ".join(upper_reasons)
+            )
         replacement = _scaled_candidate_food(candidate, grams, len(foods) + 1)
         changed = False
         for index, food in enumerate(foods):
@@ -1950,7 +2291,29 @@ async def apply_recommendation(
 
     root = _unwrap_result(current_result)
     meal_type = str(root.get("meal", {}).get("meal_type") or "Current meal")
+    baseline = await _analyze_food_set(current_foods, normalized_profile, meal_type=meal_type)
     combined = await _analyze_food_set(foods, normalized_profile, meal_type=meal_type)
+
+    # The echoed payload can never force an addition that no longer improves
+    # its claimed target. Recompute the target domain from the fresh pipeline.
+    target = recommendation.get("target_domain")
+    target_key = str(target.get("key") or "") if isinstance(target, dict) else ""
+    if target_key and not target_key.startswith("nutrient:"):
+        before_domains = _domain_score_items(baseline)
+        after_domains = _domain_score_items(combined)
+        if target_key in before_domains and target_key in after_domains:
+            _, _, delta = _domain_delta(before_domains, after_domains, target_key)
+            if action in {"add", "replace"} and delta <= 0.05:
+                raise ValueError(
+                    "That food no longer improves the selected health module after revalidation."
+                )
+            if _protected_domain_decline_items(
+                before_domains, after_domains, normalized_profile
+            ) > 0.75:
+                raise ValueError(
+                    "That change would now worsen a health domain protected by your profile."
+                )
+
     combined = attach_nutrient_targets(combined, normalized_profile)
     analysis_id = _result_identity(current_result, "current")
     combined["analysis_id"] = analysis_id
@@ -1963,5 +2326,8 @@ async def apply_recommendation(
         "combined_with_existing_meal": True,
         "replaces_history_analysis_id": analysis_id,
         "engine_version": RECOMMENDATION_ENGINE_VERSION,
+        "apply_contract_version": RECOMMENDATION_APPLY_CONTRACT_VERSION,
+        "revalidated_from_usda": isinstance(food_spec.get("fdc_id"), int),
     }
     return combined
+
