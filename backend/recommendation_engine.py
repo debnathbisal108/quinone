@@ -14,7 +14,7 @@ from personalization_engine import attach_personalization, normalize_user_profil
 from recommendation_catalog import FOOD_RECOMMENDATION_CATALOG
 
 
-RECOMMENDATION_ENGINE_VERSION = "2.0.0"
+RECOMMENDATION_ENGINE_VERSION = "2.1.0"
 
 _FALLBACK_TARGETS: dict[str, dict[str, Any]] = {
     "energy_kcal": {"type": "range", "low": 1800.0, "high": 2400.0},
@@ -327,6 +327,95 @@ def _profile_conditions(profile: dict[str, Any]) -> set[str]:
     )
 
 
+_CONDITION_ALIASES = {
+    "diabetes": {"type_2_diabetes", "diabetes", "prediabetes", "insulin_resistance"},
+    "hypertension": {"hypertension", "high_blood_pressure"},
+    "ckd": {"chronic_kidney_disease", "ckd", "kidney_disease"},
+    "heart_failure": {"heart_failure", "chf"},
+    "dyslipidemia": {"dyslipidemia", "high_cholesterol", "hyperlipidemia", "coronary_artery_disease", "cardiovascular_disease", "heart_disease"},
+    "fatty_liver": {"fatty_liver", "nafld", "masld"},
+}
+_CONDITION_PROTECTED_DOMAINS = {
+    "diabetes": {"glycemic_control", "metabolic_syndrome"},
+    "hypertension": {"blood_pressure", "cardiovascular_health"},
+    "ckd": {"renal_health"},
+    "heart_failure": {"cardiovascular_health", "blood_pressure"},
+    "dyslipidemia": {"cardiovascular_health"},
+    "fatty_liver": {"hepatic_health", "metabolic_syndrome"},
+}
+
+def _active_condition_groups(profile: dict[str, Any]) -> set[str]:
+    conditions = _profile_conditions(profile)
+    return {group for group, aliases in _CONDITION_ALIASES.items() if conditions & aliases}
+
+def _domain_token(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_").replace("&", "and")
+
+def _protected_domain_tokens(profile: dict[str, Any]) -> set[str]:
+    out: set[str] = set()
+    for group in _active_condition_groups(profile):
+        out.update(_CONDITION_PROTECTED_DOMAINS.get(group, set()))
+    return out
+
+def _medical_candidate_burden(candidate: dict[str, Any], profile: dict[str, Any], *, serving_g: float | None = None) -> list[str]:
+    groups = _active_condition_groups(profile)
+    if not groups:
+        return []
+    nutrients = candidate.get("nutrients") if isinstance(candidate.get("nutrients"), dict) else {}
+    grams = max(0.0, serving_g if serving_g is not None else (_number(candidate.get("serving_g")) or 100.0))
+    factor = grams / 100.0
+    def amount(key: str) -> float:
+        return max(0.0, (_number(nutrients.get(key)) or 0.0) * factor)
+    energy, carb, fiber, sugars = amount("energy_kcal"), amount("carbohydrate_g"), amount("fiber_g"), amount("sugars_g")
+    added, sodium, sat, trans = amount("added_sugars_g"), amount("sodium_mg"), amount("saturated_fat_g"), amount("trans_fat_g")
+    reasons=[]
+    if "diabetes" in groups and (added > 8.0 or (carb > 45.0 and fiber < 4.0 and sugars > 12.0)):
+        reasons.append("diabetes_glycemic_burden")
+    if "hypertension" in groups and sodium > 500.0:
+        reasons.append("hypertension_sodium_burden")
+    if "heart_failure" in groups and sodium > 400.0:
+        reasons.append("heart_failure_sodium_burden")
+    if "dyslipidemia" in groups:
+        sat_energy_pct = (sat * 9.0 / energy * 100.0) if energy > 0 else 0.0
+        if trans > 0.5 or sat > 5.0 or (sat > 3.0 and sat_energy_pct > 15.0):
+            reasons.append("cardiovascular_fat_burden")
+    if "fatty_liver" in groups and added > 8.0:
+        reasons.append("hepatic_added_sugar_burden")
+    return reasons
+
+def _personalized_upper_limit_safe(candidate: dict[str, Any], profile: dict[str, Any], current_totals: dict[str, float], *, serving_g: float | None = None) -> tuple[bool, list[str]]:
+    targets = _resolved_targets(profile)
+    nutrients = candidate.get("nutrients") if isinstance(candidate.get("nutrients"), dict) else {}
+    grams = max(0.0, serving_g if serving_g is not None else (_number(candidate.get("serving_g")) or 100.0))
+    factor = grams / 100.0
+    reasons=[]
+    for key,target in targets.items():
+        if target.get("type") != "maximum": continue
+        ceiling=_number(target.get("value")); contribution=(_number(nutrients.get(key)) or 0.0)*factor
+        if ceiling is None or ceiling <= 0 or contribution <= 0: continue
+        before=max(0.0,_number(current_totals.get(key)) or 0.0); after=before+contribution
+        if before <= ceiling and after > ceiling: reasons.append(f"personalized_{key}_limit")
+        elif before > ceiling and contribution > max(ceiling*0.02,0.01): reasons.append(f"personalized_{key}_already_high")
+    return not reasons, sorted(set(reasons))
+
+def _protected_domain_decline_numbers(before: dict[str,float], after: dict[str,float], profile: dict[str,Any]) -> float:
+    protected=_protected_domain_tokens(profile)
+    if not protected: return 0.0
+    vals=[float(old)-float(after[k]) for k,old in before.items() if k in after and _domain_token(k) in protected]
+    return max(vals, default=0.0)
+
+def _protected_domain_decline_items(before: dict[str,dict[str,Any]], after: dict[str,dict[str,Any]], profile: dict[str,Any]) -> float:
+    protected=_protected_domain_tokens(profile)
+    if not protected: return 0.0
+    vals=[]
+    for k,old_item in before.items():
+        if k not in after: continue
+        tokens={_domain_token(k),_domain_token(old_item.get("health_domain") if isinstance(old_item,dict) else k)}
+        if not tokens & protected: continue
+        old=_number(old_item.get("score")); new=_number(after[k].get("score"))
+        if old is not None and new is not None: vals.append(old-new)
+    return max(vals, default=0.0)
+
 def _candidate_source(candidate: dict[str, Any]) -> str:
     tags = _normalized_values(candidate.get("diet_tags") or [])
     if "pescatarian" in tags:
@@ -439,6 +528,11 @@ def _candidate_eligibility(
     } and potassium > 300.0:
         medical_verified = False
         reasons.append("potassium_medication_uncertainty")
+
+    burden_reasons = _medical_candidate_burden(candidate, profile)
+    if burden_reasons:
+        medical_verified = False
+        reasons.extend(burden_reasons)
 
     audit = {
         "diet_verified": diet_verified,
@@ -767,7 +861,12 @@ async def _recommend_after_analysis_v1(
         addition = _scaled_candidate_food(candidate, serving, candidate_index)
         simulated_foods = [*copy.deepcopy(day_foods), addition]
         totals = _sum_nutrients(simulated_foods)
+        upper_safe, _ = _personalized_upper_limit_safe(candidate, normalized_profile, baseline_totals, serving_g=serving)
+        if not upper_safe:
+            continue
         simulated_score, domains = await _score_food_set(simulated_foods, normalized_profile)
+        if _protected_domain_decline_numbers(simulated_baseline_domains, domains, normalized_profile) > 0.75:
+            continue
         balance = _target_score(totals, targets)
         score_delta = simulated_score - simulated_baseline_score
         predicted_score = max(0.0, min(100.0, baseline_score + score_delta))
@@ -1148,12 +1247,17 @@ async def recommend_after_analysis(
                 candidate_index += 1
                 addition = _scaled_candidate_food(candidate, grams, candidate_index)
                 simulated_foods = [*copy.deepcopy(current_foods), addition]
+                upper_safe, _ = _personalized_upper_limit_safe(candidate, normalized_profile, before_totals, serving_g=grams)
+                if not upper_safe:
+                    continue
                 simulated = await _analyze_food_set(
                     simulated_foods,
                     normalized_profile,
                     meal_type=meal_type,
                 )
                 after_domains = _domain_score_items(simulated)
+                if _protected_domain_decline_items(before_domains, after_domains, normalized_profile) > 0.75:
+                    continue
                 old, new, target_delta = _domain_delta(
                     before_domains, after_domains, target_key
                 )
@@ -1298,6 +1402,8 @@ async def recommend_after_analysis(
                     meal_type=meal_type,
                 )
                 replaced_domains = _domain_score_items(replaced_analysis)
+                if _protected_domain_decline_items(before_domains, replaced_domains, normalized_profile) > 0.75:
+                    continue
                 _, _, replacement_delta = _domain_delta(
                     before_domains, replaced_domains, target_key
                 )
