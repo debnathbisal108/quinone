@@ -85,6 +85,10 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
         .toList(growable: false);
 
     try {
+      if (ref.read(profileProvider).isLoading) {
+        await ref.read(profileProvider.notifier).loadProfile();
+        if (!mounted) return;
+      }
       final recommendations = await _recommendationService.afterAnalysis(
         currentResult: widget.rawResult,
         todayResults: todayResults,
