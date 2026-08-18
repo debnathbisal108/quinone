@@ -10,15 +10,18 @@ from evidence_engine import attach_evidence
 from feature_engineering import compute_features
 from health_domain_scoring import attach_domain_scores
 from nutrient_target_engine import attach_nutrient_targets, calculate_nutrient_targets
+from nutrient_target_data import CANONICAL_KEY_COMPATIBILITY
 from personalization_engine import attach_personalization, normalize_user_profile
 from recommendation_catalog import FOOD_RECOMMENDATION_CATALOG
 
 
-RECOMMENDATION_ENGINE_VERSION = "2.1.0"
+RECOMMENDATION_ENGINE_VERSION = "2.2.0"
 
 _FALLBACK_TARGETS: dict[str, dict[str, Any]] = {
     "energy_kcal": {"type": "range", "low": 1800.0, "high": 2400.0},
     "protein_g": {"type": "minimum", "value": 50.0},
+    "carbohydrate_g": {"type": "range", "low": 220.0, "high": 330.0},
+    "fat_g": {"type": "range", "low": 62.4, "high": 93.6},
     "fiber_g": {"type": "minimum", "value": 28.0},
     "calcium_mg": {"type": "minimum", "value": 1000.0},
     "iron_mg": {"type": "minimum", "value": 18.0},
@@ -36,13 +39,26 @@ _FALLBACK_TARGETS: dict[str, dict[str, Any]] = {
 }
 
 _NUTRIENT_LABELS = {
-    "energy_kcal": "energy", "protein_g": "protein", "fiber_g": "fiber",
+    "energy_kcal": "energy", "protein_g": "protein",
+    "carbohydrate_g": "carbohydrate", "fat_g": "total fat", "fiber_g": "fiber",
     "calcium_mg": "calcium", "iron_mg": "iron", "magnesium_mg": "magnesium",
     "potassium_mg": "potassium", "vitamin_c_mg": "vitamin C",
     "vitamin_d_ug": "vitamin D", "vitamin_b12_ug": "vitamin B12",
     "folate_ug": "folate", "omega3_g": "omega-3", "sodium_mg": "sodium",
     "saturated_fat_g": "saturated fat", "added_sugars_g": "added sugar",
     "trans_fat_g": "trans fat",
+}
+
+_NUTRIENT_UNITS = {
+    "energy_kcal": "kcal",
+    "protein_g": "g",
+    "carbohydrate_g": "g",
+    "fat_g": "g",
+    "fiber_g": "g",
+    "sodium_mg": "mg",
+    "saturated_fat_g": "g",
+    "added_sugars_g": "g",
+    "trans_fat_g": "g",
 }
 
 
@@ -116,16 +132,44 @@ def _collect_day_foods(
     return day_foods, current_foods
 
 
+_ALIAS_SCALES: dict[tuple[str, str], float] = {
+    ("vitamin_d_ug", "vitamin_d_iu"): 0.025,
+    ("copper_mg", "copper_ug"): 0.001,
+    ("copper_mg", "copper_mcg"): 0.001,
+}
+
+
+def _canonical_nutrients(raw: Any) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        return {}
+    numeric: dict[str, float] = {}
+    for key, value in raw.items():
+        parsed = _number(value)
+        if parsed is not None:
+            numeric[str(key)] = parsed
+    output = dict(numeric)
+    for canonical, compatibility in CANONICAL_KEY_COMPATIBILITY.items():
+        candidates = [canonical, *[
+            str(key) for key in compatibility.get("accepted_input_keys", [])
+            if str(key) != canonical
+        ]]
+        for alias in candidates:
+            value = numeric.get(alias)
+            if value is None:
+                continue
+            output[canonical] = value * _ALIAS_SCALES.get((canonical, alias), 1.0)
+            break
+    return output
+
+
+def _nutrient_amount(food: dict[str, Any], nutrient_key: str) -> float:
+    return max(0.0, _canonical_nutrients(food.get("nutrients")).get(nutrient_key, 0.0))
+
+
 def _sum_nutrients(foods: Iterable[dict[str, Any]]) -> dict[str, float]:
     totals: dict[str, float] = {}
     for food in foods:
-        nutrients = food.get("nutrients")
-        if not isinstance(nutrients, dict):
-            continue
-        for key, raw in nutrients.items():
-            value = _number(raw)
-            if value is None:
-                continue
+        for key, value in _canonical_nutrients(food.get("nutrients")).items():
             totals[key] = round(totals.get(key, 0.0) + value, 4)
     return totals
 
@@ -135,14 +179,31 @@ def _resolved_targets(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
     calculated = calculate_nutrient_targets(profile).get("targets", {})
     if not isinstance(calculated, dict):
         return targets
+
+    energy_item = calculated.get("energy_kcal")
+    resolved_energy = (
+        _number(energy_item.get("resolved_value"))
+        if isinstance(energy_item, dict)
+        else None
+    )
+    age_months = _number(profile.get("age_months"))
+
     for key, raw in calculated.items():
         if not isinstance(raw, dict):
             continue
+        if raw.get("status") == "requires_clinical_input":
+            # Do not replace a clinically unresolved nutrient with a generic
+            # automatic target. Candidate eligibility handles the fail-closed
+            # medical restrictions separately.
+            targets.pop(key, None)
+            continue
+
         target_type = str(raw.get("target_type") or "").lower()
         resolved = _number(raw.get("resolved_value"))
         low = _number(raw.get("range_low"))
         high = _number(raw.get("range_high"))
         upper = _number(raw.get("upper_limit"))
+
         if key == "sodium_mg":
             # Sodium AI is not a goal to actively fill. Keep a ceiling; for
             # sodium-sensitive profiles, a lower resolved value may tighten it.
@@ -151,6 +212,7 @@ def _resolved_targets(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 if resolved is not None and resolved > 0:
                     targets[key] = {"type": "maximum", "value": min(2300.0, resolved)}
             continue
+
         if key == "energy_kcal" and resolved is not None and resolved > 0:
             targets[key] = {
                 "type": "range",
@@ -158,6 +220,20 @@ def _resolved_targets(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 "high": round(resolved * 1.1, 2),
             }
             continue
+
+        # The carbohydrate registry contains both the 130 g RDA and an AMDR.
+        # For excess/portion guidance, the RDA must not be misused as an upper
+        # limit. When energy is known, use the adult/age>=1 AMDR (45-65% kcal).
+        if key == "carbohydrate_g" and (age_months is None or age_months >= 12):
+            if resolved_energy is not None and resolved_energy > 0:
+                targets[key] = {
+                    "type": "range",
+                    "low": round(resolved_energy * 0.45 / 4.0, 2),
+                    "high": round(resolved_energy * 0.65 / 4.0, 2),
+                }
+            # If energy is unavailable, retain the generic reference range.
+            continue
+
         if low is not None and high is not None and low > 0 and high > 0:
             targets[key] = {"type": "range", "low": low, "high": high}
         elif upper is not None and upper > 0 and (
@@ -775,9 +851,15 @@ def _priority_changes(
         new = after.get(key, 0.0)
         kind = target.get("type")
         if kind == "range":
-            goal = float(target["low"])
-            old_gap = max(0.0, goal - old)
-            new_gap = max(0.0, goal - new)
+            low, high = float(target["low"]), float(target["high"])
+            if old > high:
+                goal = high
+                old_gap = old - high
+                new_gap = max(0.0, new - high)
+            else:
+                goal = low
+                old_gap = max(0.0, low - old)
+                new_gap = max(0.0, low - new)
         elif kind == "maximum":
             goal = float(target["value"])
             old_gap = max(0.0, old - goal)
@@ -803,6 +885,69 @@ def _priority_changes(
         {key: value for key, value in item.items() if key != "_priority"}
         for item in changes[:4]
     ]
+
+
+def _exceeded_nutrient_targets(
+    totals: dict[str, float],
+    targets: dict[str, dict[str, Any]],
+) -> list[tuple[float, str, float, dict[str, Any]]]:
+    """Material nutrient excesses that deserve an explicit portion action.
+
+    Protein RDA/AI is a reference rather than a medical UL, so it receives a
+    20% tolerance before being treated as an excess-guidance trigger.
+    """
+    rows: list[tuple[float, str, float, dict[str, Any]]] = []
+    eligible = {
+        "energy_kcal", "protein_g", "carbohydrate_g", "fat_g",
+        "sodium_mg", "saturated_fat_g", "added_sugars_g", "trans_fat_g",
+    }
+    for key in eligible:
+        target = targets.get(key)
+        if not isinstance(target, dict):
+            continue
+        current = max(0.0, totals.get(key, 0.0))
+        kind = target.get("type")
+        limit: float | None = None
+        scoring_target: dict[str, Any]
+        if kind == "range":
+            high = _number(target.get("high"))
+            if high is not None and high > 0 and current > high:
+                limit = high
+                scoring_target = target
+            else:
+                continue
+        elif kind == "maximum":
+            value = _number(target.get("value"))
+            if value is not None and value > 0 and current > value:
+                limit = value
+                scoring_target = target
+            else:
+                continue
+        elif key == "protein_g" and kind == "minimum":
+            value = _number(target.get("value"))
+            if value is None or value <= 0:
+                continue
+            limit = value * 1.20
+            if current <= limit:
+                continue
+            scoring_target = {"type": "maximum", "value": limit}
+        else:
+            continue
+        rows.append((current / max(limit, 0.0001), key, limit, scoring_target))
+    rows.sort(reverse=True)
+    return rows
+
+
+def _scaled_existing_food(food: dict[str, Any], factor: float) -> dict[str, Any]:
+    reduced = copy.deepcopy(food)
+    for key, value in (reduced.get("nutrients") or {}).items():
+        numeric = _number(value)
+        reduced["nutrients"][key] = None if numeric is None else round(numeric * factor, 4)
+    quantity = _number(reduced.get("estimated_weight_g")) or _number(reduced.get("quantity"))
+    if quantity is not None:
+        reduced["quantity"] = round(quantity * factor, 1)
+        reduced["estimated_weight_g"] = round(quantity * factor, 1)
+    return reduced
 
 
 def _reason(action: str, changes: list[dict[str, Any]], context: str) -> str:
@@ -920,12 +1065,12 @@ async def _recommend_after_analysis_v1(
     for nutrient_key in excess_keys[:2]:
         offender = max(
             current_foods,
-            key=lambda food: _number((food.get("nutrients") or {}).get(nutrient_key)) or 0.0,
+            key=lambda food: _nutrient_amount(food, nutrient_key),
             default=None,
         )
         if offender is None:
             continue
-        contribution = _number((offender.get("nutrients") or {}).get(nutrient_key)) or 0.0
+        contribution = _nutrient_amount(offender, nutrient_key)
         quantity = _number(offender.get("estimated_weight_g")) or _number(offender.get("quantity"))
         if contribution <= 0 or quantity is None or quantity <= 10:
             continue
@@ -1232,6 +1377,118 @@ async def recommend_after_analysis(
 
     evaluated: list[dict[str, Any]] = []
     candidate_index = 0
+
+    # Nutrient-balance excesses get explicit current-meal portion actions even
+    # when the corresponding health module is not one of the two weakest. This
+    # prevents obvious carbohydrate/protein/fat/limit excesses from being
+    # hidden behind unrelated domain recommendations.
+    for excess_ratio, nutrient_key, limit, scoring_target in _exceeded_nutrient_targets(
+        before_totals, targets
+    )[:4]:
+        offender = max(
+            current_foods,
+            key=lambda food: _nutrient_amount(food, nutrient_key),
+            default=None,
+        )
+        if offender is None:
+            continue
+        contribution = _nutrient_amount(offender, nutrient_key)
+        quantity = _number(offender.get("estimated_weight_g")) or _number(offender.get("quantity"))
+        if contribution <= 0 or quantity is None or quantity <= 10:
+            continue
+
+        excess_amount = max(0.0, before_totals.get(nutrient_key, 0.0) - limit)
+        reduction_needed = excess_amount / contribution if contribution > 0 else 0.1
+        # General recommendations propose the smallest useful 10% step, capped
+        # at a 50% reduction. Meal Guidance itself remains fully interactive in
+        # 10% +/- steps before analysis.
+        reduction_step = math.ceil(max(0.1, min(reduction_needed, 0.5)) * 10.0) / 10.0
+        factor = max(0.5, min(0.9, 1.0 - reduction_step))
+        reduced = _scaled_existing_food(offender, factor)
+        simulated_foods = [
+            reduced if food.get("id") == offender.get("id") else copy.deepcopy(food)
+            for food in current_foods
+        ]
+        after_totals = _sum_nutrients(simulated_foods)
+        after_amount = max(0.0, after_totals.get(nutrient_key, 0.0))
+        if after_amount >= before_totals.get(nutrient_key, 0.0):
+            continue
+        simulated = await _analyze_food_set(
+            simulated_foods, normalized_profile, meal_type=meal_type
+        )
+        after_domains = _domain_score_items(simulated)
+        if _protected_domain_decline_items(before_domains, after_domains, normalized_profile) > 0.75:
+            continue
+        after_overall, _ = _overall_score(simulated)
+        before_metric = _target_score(
+            {nutrient_key: before_totals.get(nutrient_key, 0.0)},
+            {nutrient_key: scoring_target},
+        )
+        after_metric = _target_score(
+            {nutrient_key: after_amount},
+            {nutrient_key: scoring_target},
+        )
+        metric_delta = after_metric - before_metric
+        if metric_delta <= 0:
+            continue
+        label = _NUTRIENT_LABELS.get(nutrient_key, nutrient_key.replace("_", " "))
+        unit = _NUTRIENT_UNITS.get(nutrient_key, "")
+        new_quantity = _number(reduced.get("estimated_weight_g")) or _number(reduced.get("quantity"))
+        if new_quantity is None or new_quantity <= 0:
+            continue
+        reference_word = "guidance reference" if nutrient_key == "protein_g" and targets.get(nutrient_key, {}).get("type") == "minimum" else "target range"
+        evaluated.append({
+            "action": "adjust_portion",
+            "scope": "current_meal",
+            "food": {
+                "name": str(offender.get("display_name") or offender.get("name") or "Food"),
+                "quantity": round(new_quantity, 1),
+                "original_quantity": round(quantity, 1),
+                "unit": "g",
+            },
+            "baseline_score": before_overall,
+            "predicted_score": after_overall,
+            "score_delta": round(after_overall - before_overall, 2),
+            "predicted_score_low": round(max(0.0, after_overall - 1.5), 1),
+            "predicted_score_high": round(min(100.0, after_overall + 1.5), 1),
+            "target_domain": {
+                "key": f"nutrient:{nutrient_key}",
+                "label": f"{label.title()} balance",
+                "before": round(before_metric, 2),
+                "after": round(after_metric, 2),
+                "delta": round(metric_delta, 2),
+                "confidence": 0.9,
+            },
+            "nutrient_effects": [{
+                "nutrient": nutrient_key,
+                "label": label,
+                "before": round(before_totals.get(nutrient_key, 0.0), 2),
+                "after": round(after_amount, 2),
+                "target": round(limit, 2),
+                "improvement": round(before_totals.get(nutrient_key, 0.0) - after_amount, 2),
+            }],
+            "reason": (
+                f"{label.title()} is above the {reference_word}. Reducing this current-meal portion "
+                f"moves it from {before_totals.get(nutrient_key, 0.0):.1f} to {after_amount:.1f} {unit} "
+                f"toward {limit:.1f} {unit}."
+            ),
+            "warnings": [
+                "This is a nutrition-balance portion suggestion; confirm the portion you actually eat."
+            ],
+            "confidence": 0.9,
+            "eligibility": {
+                "diet_verified": True,
+                "allergen_verified": True,
+                "medical_constraints_verified": True,
+                "preference_verified": True,
+            },
+            "combined_meal": True,
+            "_target_delta": metric_delta,
+            "_collateral": 0.0,
+            "_utility": 100.0 + (excess_ratio - 1.0) * 40.0 + metric_delta,
+            "_nutrient_priority": True,
+        })
+
     for target_key, target_item in targets_to_improve:
         reduction_first = _requires_reduction(target_item)
         for candidate in FOOD_RECOMMENDATION_CATALOG:
@@ -1312,13 +1569,13 @@ async def recommend_after_analysis(
         for nutrient_key in implicated:
             offender = max(
                 current_foods,
-                key=lambda food: _number((food.get("nutrients") or {}).get(nutrient_key)) or 0.0,
+                key=lambda food: _nutrient_amount(food, nutrient_key),
                 default=None,
             )
             if offender is None:
                 continue
             quantity = _number(offender.get("estimated_weight_g")) or _number(offender.get("quantity"))
-            contribution = _number((offender.get("nutrients") or {}).get(nutrient_key)) or 0.0
+            contribution = _nutrient_amount(offender, nutrient_key)
             if quantity is None or quantity <= 10 or contribution <= 0:
                 continue
             reduced = copy.deepcopy(offender)
@@ -1382,10 +1639,7 @@ async def recommend_after_analysis(
                 if not allowed or not compatible:
                     continue
                 grams = float(candidate.get("serving_g") or 100.0)
-                replacement_load = (
-                    _number((candidate.get("nutrients") or {}).get(nutrient_key))
-                    or 0.0
-                ) * grams / 100.0
+                replacement_load = _nutrient_amount(candidate, nutrient_key) * grams / 100.0
                 if replacement_load >= contribution * 0.5:
                     continue
                 candidate_index += 1
@@ -1459,8 +1713,16 @@ async def recommend_after_analysis(
     domain_counts: dict[str, int] = {}
     ordered: list[dict[str, Any]] = []
     preferred_identities: set[tuple[str, str]] = set()
-    # Ensure each weak module gets its best eligible option before filling
-    # remaining slots by utility.
+    # Explicit nutrient excess corrections should never disappear behind weak
+    # health-domain additions. Put them first, then guarantee each weak module
+    # its best eligible option before filling remaining slots by utility.
+    for item in evaluated:
+        if item.get("_nutrient_priority"):
+            ordered.append(item)
+            preferred_identities.add((
+                str(item.get("action") or ""),
+                str((item.get("food") or {}).get("name") or "").lower(),
+            ))
     for target_key, _ in targets_to_improve:
         best = next(
             (
