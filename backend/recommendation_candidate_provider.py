@@ -23,7 +23,7 @@ from usda_recipe_service import search_usda_foods
 
 logger = logging.getLogger("quinone.recommendation_candidates")
 
-DYNAMIC_CANDIDATE_PROVIDER_VERSION = "1.2.0"
+DYNAMIC_CANDIDATE_PROVIDER_VERSION = "1.3.0"
 
 _ENABLE_DYNAMIC = os.environ.get(
     "ENABLE_DYNAMIC_RECOMMENDATION_DISCOVERY", "true"
@@ -56,32 +56,18 @@ _IDEA_SCHEMA: dict[str, Any] = {
                             ],
                         },
                     },
-                    "food_group": {
-                        "type": "string",
-                        "enum": ["plant", "dairy", "egg", "fish", "meat"],
-                    },
-                    "allergens": {
-                        "type": "array",
-                        "items": {
-                            "type": "string",
-                            "enum": [
-                                "milk", "dairy", "egg", "fish", "shellfish",
-                                "tree_nuts", "peanut", "soy", "wheat",
-                                "gluten", "sesame",
-                            ],
-                        },
-                    },
-                    "why_candidate": {"type": "string"},
                 },
                 "required": [
                     "name", "usda_search_query", "serving_g", "meal_roles",
-                    "food_group", "allergens", "why_candidate",
                 ],
+                "additionalProperties": False,
             },
         }
     },
     "required": ["foods"],
+    "additionalProperties": False,
 }
+
 
 _PREPARATION_TOKENS = {
     "raw", "cooked", "boiled", "steamed", "roasted", "baked", "fried",
@@ -290,33 +276,110 @@ Context JSON:
 """.strip()
 
 
-def _parse_json_text(text: str) -> dict[str, Any]:
+def _strip_json_fence(text: str) -> str:
     raw = (text or "").strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
         raw = re.sub(r"\s*```$", "", raw)
-    parsed = json.loads(raw)
-    if not isinstance(parsed, dict):
-        raise ValueError("Gemini recommendation planner returned a non-object response.")
-    return parsed
+    return raw.strip()
 
 
-def _generate_ideas_sync(prompt: str, maximum_ideas: int) -> list[dict[str, Any]]:
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key:
+def _salvage_food_objects(raw: str) -> list[dict[str, Any]]:
+    """Recover complete food objects from a truncated planner response.
+
+    Structured-output responses can still be cut off by transport/model output
+    limits. A malformed *last* object must not discard all complete candidates
+    that appeared before it. ``JSONDecoder.raw_decode`` lets us consume complete
+    objects one-by-one and stop safely at the first incomplete tail.
+    """
+    key_match = re.search(r'"foods"\s*:\s*\[', raw)
+    if key_match is None:
         return []
-    from google import genai
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=_GEMINI_MODEL,
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json",
-            "response_json_schema": _IDEA_SCHEMA,
-            "max_output_tokens": 4096,
-        },
-    )
-    payload = _parse_json_text(response.text or "")
+    decoder = json.JSONDecoder()
+    index = key_match.end()
+    recovered: list[dict[str, Any]] = []
+    while index < len(raw):
+        while index < len(raw) and raw[index] in " \t\r\n,":
+            index += 1
+        if index >= len(raw) or raw[index] == "]":
+            break
+        if raw[index] != "{":
+            # Unexpected planner text inside the array: advance to the next
+            # plausible object boundary rather than failing the whole plan.
+            next_object = raw.find("{", index + 1)
+            if next_object < 0:
+                break
+            index = next_object
+        try:
+            value, next_index = decoder.raw_decode(raw, index)
+        except json.JSONDecodeError:
+            break
+        if isinstance(value, dict):
+            recovered.append(value)
+        index = next_index
+    return recovered
+
+
+def _parse_json_text(text: str) -> dict[str, Any]:
+    """Parse Gemini JSON, preserving complete candidates if the tail is cut."""
+    raw = _strip_json_fence(text)
+    if not raw:
+        raise ValueError("Gemini recommendation planner returned an empty response.")
+
+    # Normal structured-output path.
+    strict_error: json.JSONDecodeError | None = None
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("Gemini recommendation planner returned a non-object response.")
+        return parsed
+    except json.JSONDecodeError as error:
+        strict_error = error
+
+    # Some SDK/model combinations may wrap an otherwise-valid JSON object in a
+    # short prefix/suffix. Prefer the largest complete object before salvage.
+    first_object = raw.find("{")
+    last_object = raw.rfind("}")
+    if 0 <= first_object < last_object:
+        try:
+            parsed = json.loads(raw[first_object:last_object + 1])
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    recovered = _salvage_food_objects(raw)
+    if recovered:
+        logger.warning(
+            "Recovered %d complete Gemini recommendation candidates from a "
+            "truncated/malformed JSON response.",
+            len(recovered),
+        )
+        return {"foods": recovered, "_recovered_from_truncated_json": True}
+
+    # Preserve the original decoder detail for diagnostics while allowing the
+    # caller to retry/fallback without crashing the recommendation endpoint.
+    if strict_error is not None:
+        raise strict_error
+    raise ValueError("Gemini recommendation planner returned invalid JSON.")
+
+
+def _payload_from_gemini_response(response: Any) -> dict[str, Any]:
+    """Prefer the SDK's parsed structured result over reparsing response.text."""
+    parsed = getattr(response, "parsed", None)
+    if isinstance(parsed, dict):
+        return parsed
+    if parsed is not None and hasattr(parsed, "model_dump"):
+        try:
+            dumped = parsed.model_dump()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            pass
+    return _parse_json_text(str(getattr(response, "text", "") or ""))
+
+
+def _normalize_planned_ideas(payload: dict[str, Any], maximum_ideas: int) -> list[dict[str, Any]]:
     raw_foods = payload.get("foods")
     if not isinstance(raw_foods, list):
         return []
@@ -338,10 +401,61 @@ def _generate_ideas_sync(prompt: str, maximum_ideas: int) -> list[dict[str, Any]
         clean["usda_search_query"] = query
         clean["name"] = name
         clean["serving_g"] = round(max(5.0, min(serving, 500.0)), 1)
+        roles = clean.get("meal_roles")
+        clean["meal_roles"] = roles if isinstance(roles, list) else []
         output.append(clean)
         if len(output) >= maximum_ideas:
             break
     return output
+
+
+def _generate_ideas_sync(prompt: str, maximum_ideas: int) -> list[dict[str, Any]]:
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        return []
+    from google import genai
+
+    client = genai.Client(api_key=api_key)
+    last_error: Exception | None = None
+    # One retry is reserved specifically for malformed/empty structured output.
+    # Recommendation discovery is asynchronous, but it still must not spin on
+    # an LLM failure or add unbounded latency.
+    for attempt in range(2):
+        attempt_limit = maximum_ideas if attempt == 0 else min(maximum_ideas, 10)
+        retry_note = "" if attempt == 0 else (
+            "\nRETRY: Keep the JSON extremely compact. Return no prose and no more "
+            f"than {attempt_limit} food objects."
+        )
+        try:
+            response = client.models.generate_content(
+                model=_GEMINI_MODEL,
+                contents=prompt + retry_note,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_json_schema": _IDEA_SCHEMA,
+                    # The compact schema usually consumes far less than this;
+                    # extra headroom prevents the final JSON string being cut.
+                    "max_output_tokens": 8192,
+                    "temperature": 0.35,
+                },
+            )
+            payload = _payload_from_gemini_response(response)
+            ideas = _normalize_planned_ideas(payload, attempt_limit)
+            if ideas:
+                return ideas
+            last_error = ValueError("Gemini planner returned no valid food objects.")
+        except Exception as error:
+            last_error = error
+            if attempt == 0:
+                logger.warning(
+                    "Gemini recommendation planner produced unusable structured "
+                    "output; retrying once with a shorter response: %s",
+                    error,
+                )
+                continue
+    if last_error is not None:
+        raise last_error
+    return []
 
 
 async def _search_usda_recommendation_candidate(query: str) -> list[dict[str, Any]]:
