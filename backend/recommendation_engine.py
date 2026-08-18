@@ -15,7 +15,7 @@ from personalization_engine import attach_personalization, normalize_user_profil
 from recommendation_catalog import FOOD_RECOMMENDATION_CATALOG
 
 
-RECOMMENDATION_ENGINE_VERSION = "2.2.0"
+RECOMMENDATION_ENGINE_VERSION = "2.3.0"
 
 _FALLBACK_TARGETS: dict[str, dict[str, Any]] = {
     "energy_kcal": {"type": "range", "low": 1800.0, "high": 2400.0},
@@ -762,17 +762,26 @@ def _domain_score_items(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _target_domains(result: dict[str, Any], maximum: int = 2) -> list[tuple[str, dict[str, Any]]]:
-    ranked: list[tuple[float, str, dict[str, Any]]] = []
+    """Return weak health domains in true score order.
+
+    Confidence/coverage describe certainty; they must not let a 60-point
+    mid-range domain outrank a 42-point domain.  They are therefore only
+    tie-breakers after the score itself.  Domains with literally no usable
+    evidence signal are skipped, but a low-confidence displayed score remains
+    eligible and carries that lower confidence into the recommendation UI.
+    """
+    ranked: list[tuple[float, float, float, str, dict[str, Any]]] = []
     for key, item in _domain_score_items(result).items():
         score = float(item["score"])
         confidence = float(item.get("confidence") or 0.25)
         coverage = float(item.get("coverage") or 0.25)
-        if score >= 70.0 or confidence < 0.20:
+        if score >= 70.0:
             continue
-        priority = max(0.0, 70.0 - score) * max(confidence, 0.25) * max(coverage, 0.25)
-        ranked.append((priority, key, item))
-    ranked.sort(key=lambda row: (row[0], -float(row[2]["score"])), reverse=True)
-    return [(key, item) for _, key, item in ranked[:maximum]]
+        if confidence <= 0.0 and coverage <= 0.0:
+            continue
+        ranked.append((score, -confidence, -coverage, key, item))
+    ranked.sort(key=lambda row: (row[0], row[1], row[2], row[3]))
+    return [(key, item) for _, _, _, key, item in ranked[:maximum]]
 
 
 _REDUCTION_FEATURE_NUTRIENTS: dict[str, tuple[str, ...]] = {
@@ -1361,16 +1370,22 @@ async def recommend_after_analysis(
         for key in preferred_domain_keys or []
         if str(key).strip()
     }
+    # Evaluate enough domains to avoid a catalogue miss on the absolute
+    # weakest score causing the engine to jump straight to one mid-range
+    # module.  Normal flow is still score-first; an explicit preferred-domain
+    # request moves that domain to the front without discarding the low-score
+    # modules that follow it.
+    target_window = max(3, min(maximum_results, 5))
     if requested:
         preferred = [
             item for item in ranked_targets if item[0].strip().lower() in requested
         ]
         remaining = [item for item in ranked_targets if item not in preferred]
         targets_to_improve = [*preferred, *remaining][
-            : max(2, min(len(preferred), 4))
+            : max(target_window, min(len(preferred), 5))
         ]
     else:
-        targets_to_improve = ranked_targets[:2]
+        targets_to_improve = ranked_targets[:target_window]
     targets = _resolved_targets(normalized_profile)
     before_totals = _sum_nutrients(current_foods)
     before_balance = _target_score(before_totals, targets)
@@ -1713,34 +1728,66 @@ async def recommend_after_analysis(
     domain_counts: dict[str, int] = {}
     ordered: list[dict[str, Any]] = []
     preferred_identities: set[tuple[str, str]] = set()
-    # Explicit nutrient excess corrections should never disappear behind weak
-    # health-domain additions. Put them first, then guarantee each weak module
-    # its best eligible option before filling remaining slots by utility.
-    for item in evaluated:
-        if item.get("_nutrient_priority"):
-            ordered.append(item)
-            preferred_identities.add((
-                str(item.get("action") or ""),
-                str((item.get("food") or {}).get("name") or "").lower(),
-            ))
+    # The card is titled "weakest score", so the first feasible health-domain
+    # recommendation must come from the lowest score, not from whichever
+    # mid-range domain has the highest confidence/coverage.  We then preserve
+    # one explicit nutrient-excess action (when present), followed by the best
+    # option for each next-lowest domain. Remaining options fill by utility.
+    domain_best: list[dict[str, Any]] = []
     for target_key, _ in targets_to_improve:
         best = next(
             (
                 item for item in evaluated
                 if str((item.get("target_domain") or {}).get("key") or "") == target_key
-                and (
-                    str(item.get("action") or ""),
-                    str((item.get("food") or {}).get("name") or "").lower(),
-                ) not in preferred_identities
             ),
             None,
         )
         if best is not None:
-            ordered.append(best)
-            preferred_identities.add((
-                str(best.get("action") or ""),
-                str((best.get("food") or {}).get("name") or "").lower(),
-            ))
+            domain_best.append(best)
+
+    if domain_best:
+        first = domain_best[0]
+        ordered.append(first)
+        preferred_identities.add((
+            str(first.get("action") or ""),
+            str((first.get("food") or {}).get("name") or "").lower(),
+        ))
+
+    first_nutrient = next(
+        (item for item in evaluated if item.get("_nutrient_priority")),
+        None,
+    )
+    if first_nutrient is not None:
+        identity = (
+            str(first_nutrient.get("action") or ""),
+            str((first_nutrient.get("food") or {}).get("name") or "").lower(),
+        )
+        if identity not in preferred_identities:
+            ordered.append(first_nutrient)
+            preferred_identities.add(identity)
+
+    for best in domain_best[1:]:
+        identity = (
+            str(best.get("action") or ""),
+            str((best.get("food") or {}).get("name") or "").lower(),
+        )
+        if identity in preferred_identities:
+            continue
+        ordered.append(best)
+        preferred_identities.add(identity)
+
+    for item in evaluated:
+        if not item.get("_nutrient_priority"):
+            continue
+        identity = (
+            str(item.get("action") or ""),
+            str((item.get("food") or {}).get("name") or "").lower(),
+        )
+        if identity in preferred_identities:
+            continue
+        ordered.append(item)
+        preferred_identities.add(identity)
+
     ordered.extend(item for item in evaluated if item not in ordered)
     for item in ordered:
         target_key = str((item.get("target_domain") or {}).get("key") or "")
