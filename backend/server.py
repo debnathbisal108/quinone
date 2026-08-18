@@ -44,9 +44,24 @@ from nutrient_target_engine import (
     attach_nutrient_targets,
 )
 from draft_meal_guidance import build_draft_meal_guidance, apply_personalized_guidance_safety
-from recommendation_engine import apply_recommendation, recommend_after_analysis
+from recommendation_engine import (
+    RECOMMENDATION_APPLY_CONTRACT_VERSION,
+    apply_recommendation,
+    recommend_after_analysis,
+)
 from recommendation_catalog import FOOD_RECOMMENDATION_CATALOG
 from recommendation_candidate_provider import discover_recommendation_candidates
+
+
+# The apply endpoint sends the selected dynamic recommendation back to the
+# engine for exact USDA rehydration and revalidation.  Refuse to start with a
+# stale recommendation_engine.py instead of failing later with a runtime 500 or
+# silently regenerating a different Gemini candidate.
+if RECOMMENDATION_APPLY_CONTRACT_VERSION < 2:
+    raise RuntimeError(
+        "recommendation_engine.py is incompatible with server.py: "
+        "recommendation apply contract v2 is required."
+    )
 
 
 APP_NAME = "Quinone API"
