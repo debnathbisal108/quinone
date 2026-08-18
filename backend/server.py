@@ -45,6 +45,8 @@ from nutrient_target_engine import (
 )
 from draft_meal_guidance import build_draft_meal_guidance, apply_personalized_guidance_safety
 from recommendation_engine import apply_recommendation, recommend_after_analysis
+from recommendation_catalog import FOOD_RECOMMENDATION_CATALOG
+from recommendation_candidate_provider import discover_recommendation_candidates
 
 
 APP_NAME = "Quinone API"
@@ -200,6 +202,11 @@ class ApplyPostAnalysisRecommendationRequest(BaseModel):
     profile: dict[str, Any] | None = None
     local_hour: int = Field(default=12, ge=0, le=23)
     recommendation_id: str = Field(min_length=1, max_length=100)
+    # Echoing the selected card avoids regenerating a non-deterministic Gemini
+    # candidate set at apply time. The backend rehydrates any dynamic food from
+    # its exact USDA FDC id and re-runs all safety/scoring checks; client-sent
+    # nutrient or safety claims are never trusted.
+    recommendation: dict[str, Any] | None = None
 
 
 class DraftMealGuidanceRequest(ManualRecipeRequest):
@@ -248,6 +255,7 @@ async def apply_post_analysis_recommendation(
             profile=request.profile,
             local_hour=request.local_hour,
             recommendation_id=request.recommendation_id,
+            recommendation_payload=request.recommendation,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -305,8 +313,13 @@ async def _draft_guidance_nutrient_result(
     for index, (item, resolved) in enumerate(zip(request.ingredients, validated), start=1):
         grams = float(item.grams) * portion_fraction
         total_weight += grams
+        # Keep the same stable identity on the backend and Flutter side so a
+        # 10% Meal Guidance quantity adjustment is applied to the exact USDA
+        # ingredient that was simulated. Name-only matching could fail when a
+        # display label changed between search, guidance and final analysis.
+        guidance_food_id = f"guidance_fdc_{resolved['fdc_id']}"
         foods.append({
-            "id": f"guidance_{index:04d}",
+            "id": guidance_food_id,
             "name": item.name.strip() or item.description,
             "display_name": item.name.strip() or item.description,
             "canonical_name": item.description,
@@ -342,27 +355,72 @@ async def _draft_guidance_nutrient_result(
     return await attach_nutrients(prepared), effective_profile
 
 
-@app.post("/meal-guidance/evaluate")
-@app.post("/api/v1/meal-guidance/evaluate", include_in_schema=False)
-async def evaluate_draft_meal_guidance(
-    request: DraftMealGuidanceRequest,
-) -> dict[str, Any]:
-    """Return optional pre-analysis nutrient alerts for an editable draft."""
+def _validate_draft_guidance_request(request: DraftMealGuidanceRequest) -> None:
     if request.servings_eaten > request.servings_made:
         raise HTTPException(
             status_code=422,
             detail="servings_eaten cannot exceed servings_made",
         )
+
+
+def _guidance_low_nutrients(guidance: dict[str, Any]) -> list[str]:
+    return [
+        str(item.get("nutrient") or "")
+        for item in guidance.get("alerts", [])
+        if isinstance(item, dict)
+        and item.get("direction") == "low"
+        and str(item.get("nutrient") or "").strip()
+    ]
+
+
+async def _base_draft_guidance(
+    request: DraftMealGuidanceRequest,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[str]]:
+    """Build the deterministic alert payload without recommendation discovery.
+
+    This is deliberately the fast path used by /meal-guidance/evaluate. Gemini,
+    USDA candidate searches, and full candidate simulations are deferred to the
+    separate suggestions endpoint so they can never hold the user at Analyze.
+    """
+    nutrient_result, effective_profile = await _draft_guidance_nutrient_result(request)
+    guidance = build_draft_meal_guidance(
+        nutrient_result,
+        profile=effective_profile,
+        local_hour=request.local_hour,
+        today_results=request.today_results,
+        include_shortfalls=request.include_shortfalls,
+        recommendation_candidates=(),
+    )
+    low_nutrients = _guidance_low_nutrients(guidance)
+    guidance["suggestions_pending"] = bool(low_nutrients)
+    guidance["suggestions_status"] = "pending" if low_nutrients else "not_needed"
+    guidance["candidate_provider"] = {
+        "mode": "deferred" if low_nutrients else "not_needed",
+        "reason": (
+            "food_suggestions_load_asynchronously"
+            if low_nutrients
+            else "no_food_addition_shortfall"
+        ),
+    }
+    safe = await apply_personalized_guidance_safety(
+        guidance,
+        nutrient_result,
+        profile=effective_profile,
+        recommendation_candidates=(),
+    )
+    return safe, nutrient_result, effective_profile, low_nutrients
+
+
+@app.post("/meal-guidance/evaluate")
+@app.post("/api/v1/meal-guidance/evaluate", include_in_schema=False)
+async def evaluate_draft_meal_guidance(
+    request: DraftMealGuidanceRequest,
+) -> dict[str, Any]:
+    """Return nutrient alerts immediately; food discovery is intentionally deferred."""
+    _validate_draft_guidance_request(request)
     try:
-        nutrient_result, effective_profile = await _draft_guidance_nutrient_result(request)
-        guidance = build_draft_meal_guidance(
-            nutrient_result,
-            profile=effective_profile,
-            local_hour=request.local_hour,
-            today_results=request.today_results,
-            include_shortfalls=request.include_shortfalls,
-        )
-        return await apply_personalized_guidance_safety(guidance, nutrient_result, profile=effective_profile)
+        guidance, _, _, _ = await _base_draft_guidance(request)
+        return guidance
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
@@ -370,6 +428,83 @@ async def evaluate_draft_meal_guidance(
         raise HTTPException(
             status_code=500,
             detail="Meal guidance could not be calculated right now. You can continue without it.",
+        ) from error
+
+
+@app.post("/meal-guidance/suggestions")
+@app.post("/api/v1/meal-guidance/suggestions", include_in_schema=False)
+async def load_draft_meal_guidance_suggestions(
+    request: DraftMealGuidanceRequest,
+) -> dict[str, Any]:
+    """Enrich low-nutrient alerts with optional foods after the sheet is visible.
+
+    This endpoint is allowed to spend time on Gemini planning, USDA verification,
+    and personalized full-meal simulation because the core alert/analysis path
+    never waits for it.
+    """
+    _validate_draft_guidance_request(request)
+    try:
+        _, nutrient_result, effective_profile, low_nutrients = await _base_draft_guidance(request)
+        if not low_nutrients:
+            guidance = build_draft_meal_guidance(
+                nutrient_result,
+                profile=effective_profile,
+                local_hour=request.local_hour,
+                today_results=request.today_results,
+                include_shortfalls=request.include_shortfalls,
+                recommendation_candidates=(),
+            )
+            guidance["suggestions_pending"] = False
+            guidance["suggestions_status"] = "not_needed"
+            guidance["candidate_provider"] = {
+                "mode": "not_needed",
+                "reason": "no_food_addition_shortfall",
+            }
+            return await apply_personalized_guidance_safety(
+                guidance,
+                nutrient_result,
+                profile=effective_profile,
+                recommendation_candidates=(),
+            )
+
+        current_foods = [
+            food for food in nutrient_result.get("meal", {}).get("foods", [])
+            if isinstance(food, dict)
+        ]
+        candidate_pool, candidate_provider = await discover_recommendation_candidates(
+            current_result=nutrient_result,
+            current_foods=current_foods,
+            profile=normalize_user_profile(effective_profile),
+            target_domains=[],
+            target_nutrients=low_nutrients[:12],
+            local_hour=request.local_hour,
+            maximum_candidates=16,
+            fallback_candidates=FOOD_RECOMMENDATION_CATALOG,
+        )
+        guidance = build_draft_meal_guidance(
+            nutrient_result,
+            profile=effective_profile,
+            local_hour=request.local_hour,
+            today_results=request.today_results,
+            include_shortfalls=request.include_shortfalls,
+            recommendation_candidates=candidate_pool,
+        )
+        guidance["candidate_provider"] = candidate_provider
+        guidance["suggestions_pending"] = False
+        guidance["suggestions_status"] = "ready"
+        return await apply_personalized_guidance_safety(
+            guidance,
+            nutrient_result,
+            profile=effective_profile,
+            recommendation_candidates=candidate_pool,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Draft meal guidance suggestion discovery failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Food suggestions are temporarily unavailable. The nutrient alerts are still valid.",
         ) from error
 
 
