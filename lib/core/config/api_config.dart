@@ -45,6 +45,9 @@ class ApiConfig {
   static const String draftMealGuidanceEndpoint =
       "/meal-guidance/evaluate";
 
+  static const String draftMealGuidanceSuggestionsEndpoint =
+      "/meal-guidance/suggestions";
+
   static String analysisJobEndpoint(String jobId) =>
       "/analyze/jobs/$jobId";
 
