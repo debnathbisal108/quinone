@@ -202,6 +202,45 @@ class RecipeService {
     }
   }
 
+  Future<DraftMealGuidance> evaluateDraftSuggestions({
+    required ManualRecipe recipe,
+    Map<String, dynamic>? profile,
+    String? analysisId,
+    List<Map<String, dynamic>> labelItems = const [],
+    List<Map<String, dynamic>> todayResults = const [],
+    bool includeShortfalls = true,
+    int? localHour,
+  }) async {
+    final payload = recipe.toBackendJson(profile: profile)
+      ..addAll({
+        if (analysisId?.trim().isNotEmpty == true)
+          'analysis_id': analysisId!.trim(),
+        if (labelItems.isNotEmpty) 'label_items': labelItems,
+        if (todayResults.isNotEmpty) 'today_results': todayResults,
+        'include_shortfalls': includeShortfalls,
+        'local_hour': localHour ?? DateTime.now().hour,
+      });
+    try {
+      final response = await _dio.post<dynamic>(
+        _absoluteUrl(ApiConfig.draftMealGuidanceSuggestionsEndpoint),
+        data: jsonEncode(payload),
+        options: Options(
+          responseType: ResponseType.json,
+          contentType: Headers.jsonContentType,
+          headers: const {'Accept': 'application/json'},
+          receiveTimeout: const Duration(seconds: 60),
+        ),
+      );
+      return DraftMealGuidance.fromJson(_asMap(response.data));
+    } on DioException catch (error, stackTrace) {
+      throw _mapDioError(
+        error,
+        operation: 'load meal guidance food suggestions',
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
   Future<Map<String, dynamic>> analyzeConfirmedMixedMeal({
     required String analysisId,
     required ManualRecipe recipe,
