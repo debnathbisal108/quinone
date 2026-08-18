@@ -455,11 +455,17 @@ async def validate_or_recover_usda_food(
     )
 
 
-async def search_usda_foods(query: str, *, limit: int = 8) -> list[dict[str, Any]]:
+async def search_usda_foods(
+    query: str,
+    *,
+    limit: int = 8,
+    include_branded: bool = True,
+    validation_pool_size: int | None = None,
+) -> list[dict[str, Any]]:
     cleaned = _clean_query(query)
     if len(cleaned) < 2:
         return []
-    cache_key = cleaned.lower()
+    cache_key = f"{cleaned.lower()}|branded={1 if include_branded else 0}"
     now = time.time()
 
     async with _cache_lock:
@@ -486,9 +492,15 @@ async def search_usda_foods(query: str, *, limit: int = 8) -> list[dict[str, Any
         # Query core and branded datasets separately so branded products cannot
         # crowd foundational foods out of USDA's first relevance page. The two
         # requests run concurrently, so this does not add a serial round-trip.
-        responses = await asyncio.gather(
+        requests = [
             client.post(USDA_SEARCH_URL, params=params, json=preferred_payload),
-            client.post(USDA_SEARCH_URL, params=params, json=branded_payload),
+        ]
+        if include_branded:
+            requests.append(
+                client.post(USDA_SEARCH_URL, params=params, json=branded_payload)
+            )
+        responses = await asyncio.gather(
+            *requests,
             return_exceptions=True,
         )
         preferred_foods: list[dict[str, Any]] = []
@@ -572,9 +584,14 @@ async def search_usda_foods(query: str, *, limit: int = 8) -> list[dict[str, Any
 
         # Validate the best-scoring candidates concurrently. Search can return
         # historical IDs that the Food Details API no longer serves.
+        validation_count = (
+            max(1, int(validation_pool_size))
+            if validation_pool_size is not None
+            else max(16, limit * 2)
+        )
         pool = [
             candidate
-            for _, candidate in normalized[: max(16, limit * 2)]
+            for _, candidate in normalized[:validation_count]
         ]
         usability = await asyncio.gather(
             *[
