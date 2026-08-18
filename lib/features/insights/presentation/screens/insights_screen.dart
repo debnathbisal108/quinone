@@ -1514,6 +1514,9 @@ class _NutritionBalanceSection extends StatelessWidget {
     final high = summaries
         .where((item) => item.dominantState == BalanceState.high)
         .toList();
+    final unknown = summaries
+        .where((item) => item.dominantState == BalanceState.unknown)
+        .toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1521,7 +1524,7 @@ class _NutritionBalanceSection extends StatelessWidget {
         const _SectionTitle('Nutrition balance'),
         const SizedBox(height: 6),
         Text(
-          'Based on how often each nutrient was below, within, or above its available daily target/reference.',
+          'Every measured nutrient is listed. Quinone uses the personalized target when available, otherwise a standard daily reference; nutrients without a defensible reference stay visible as unavailable.',
           style: theme.textTheme.bodyMedium?.copyWith(
             color: theme.colorScheme.onSurfaceVariant,
           ),
@@ -1546,6 +1549,13 @@ class _NutritionBalanceSection extends StatelessWidget {
             title: 'Frequently above target',
             color: theme.colorScheme.error,
             items: high,
+            onTap: onTap,
+          ),
+        if (unknown.isNotEmpty)
+          _BalanceGroup(
+            title: 'Reference unavailable',
+            color: theme.colorScheme.onSurfaceVariant,
+            items: unknown,
             onTap: onTap,
           ),
       ],
@@ -1588,31 +1598,43 @@ class _BalanceGroup extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
-          ...items.take(7).map(
-            (item) => InkWell(
-              onTap: () => onTap(item.key),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 7),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        item.label,
-                        style: const TextStyle(fontWeight: FontWeight.w700),
+          ...items.map(
+            (item) {
+              final hasReference =
+                  item.dominantState != BalanceState.unknown;
+              return InkWell(
+                onTap: hasReference ? () => onTap(item.key) : null,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 7),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          item.label,
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
                       ),
-                    ),
-                    Text(
-                      _balanceFrequency(item),
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
+                      Flexible(
+                        child: Text(
+                          _balanceFrequency(item),
+                          textAlign: TextAlign.end,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 4),
-                    const Icon(Icons.chevron_right_rounded, size: 18),
-                  ],
+                      const SizedBox(width: 4),
+                      Icon(
+                        hasReference
+                            ? Icons.chevron_right_rounded
+                            : Icons.info_outline_rounded,
+                        size: 18,
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ),
+              );
+            },
           ),
         ],
       ),
@@ -1998,7 +2020,9 @@ String _balanceFrequency(NutrientBalanceSummary item) {
     case BalanceState.high:
       return '${item.highDays} of ${item.trackedDays} days high';
     case BalanceState.unknown:
-      return 'No target data';
+      return item.trackedDays == 1
+          ? 'No daily reference'
+          : '${item.trackedDays} days · no daily reference';
   }
 }
 
