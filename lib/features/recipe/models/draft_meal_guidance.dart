@@ -4,12 +4,14 @@ class DraftMealGuidance {
     required this.message,
     required this.disclaimer,
     required this.canContinue,
+    required this.suggestionsPending,
   });
 
   final List<DraftNutrientAlert> alerts;
   final String message;
   final String disclaimer;
   final bool canContinue;
+  final bool suggestionsPending;
 
   bool get hasAlerts => alerts.isNotEmpty;
 
@@ -27,6 +29,7 @@ class DraftMealGuidance {
       message: json['message']?.toString() ?? '',
       disclaimer: json['disclaimer']?.toString() ?? '',
       canContinue: json['can_continue'] != false,
+      suggestionsPending: json['suggestions_pending'] == true,
     );
   }
 }
@@ -59,6 +62,8 @@ class DraftNutrientAlert {
   final List<DraftFoodSuggestion> suggestions;
 
   bool get isExcess => direction == 'excess';
+  bool get isLow => direction == 'low';
+  bool get isAboveReference => direction == 'above_reference';
   bool get requiresClinicalInput => direction == 'clinical';
 
   factory DraftNutrientAlert.fromJson(Map<String, dynamic> json) {
