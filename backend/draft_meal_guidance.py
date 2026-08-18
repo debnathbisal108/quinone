@@ -15,13 +15,18 @@ from nutrient_target_engine import calculate_nutrient_targets
 from personalization_engine import normalize_user_profile
 from recommendation_catalog import FOOD_RECOMMENDATION_CATALOG
 from recommendation_engine import (
+    _analyze_food_set,
     _candidate_already_present,
     _candidate_eligibility,
+    _domain_score_items,
     _meal_compatibility,
+    _personalized_upper_limit_safe,
+    _protected_domain_decline_items,
+    _scaled_candidate_food,
 )
 
 
-GUIDANCE_ENGINE_VERSION = "1.4.0"
+GUIDANCE_ENGINE_VERSION = "1.5.0"
 
 _LABELS: dict[str, tuple[str, str]] = {
     "energy_kcal": ("Energy", "kcal"),
@@ -241,6 +246,7 @@ def _suggestions(
     draft_result: dict[str, Any],
     foods: list[dict[str, Any]],
     local_hour: int,
+    projected_totals: dict[str, float],
 ) -> list[dict[str, Any]]:
     # Excess is corrected by changing the contributing food quantity inside
     # Meal Guidance. Never recommend another food for an excess alert.
@@ -257,6 +263,9 @@ def _suggestions(
         if not allowed or not compatible:
             continue
         serving = float(candidate.get("serving_g") or 100.0)
+        upper_safe, _ = _personalized_upper_limit_safe(candidate, profile, projected_totals, serving_g=serving)
+        if not upper_safe:
+            continue
         per100 = _number((candidate.get("nutrients") or {}).get(nutrient_key)) or 0.0
         amount = per100 * serving / 100.0
         if amount <= 0:
@@ -277,6 +286,57 @@ def _suggestions(
         }
         for _, candidate in ranked[:2]
     ]
+
+
+async def apply_personalized_guidance_safety(
+    guidance: dict[str, Any],
+    nutrient_result: dict[str, Any],
+    *,
+    profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    normalized = normalize_user_profile(profile)
+    conditions = normalized.get("chronic_conditions") or []
+    if not conditions:
+        return guidance
+    foods = _foods(nutrient_result)
+    if not foods:
+        return guidance
+    meal_type = str(nutrient_result.get("meal", {}).get("meal_type") or nutrient_result.get("meal", {}).get("meal_name") or "Draft meal")
+    baseline = await _analyze_food_set(foods, normalized, meal_type=meal_type)
+    before_domains = _domain_score_items(baseline)
+    catalog_by_query = {str(item.get("search_query") or "").strip().lower(): item for item in FOOD_RECOMMENDATION_CATALOG}
+    catalog_by_name = {str(item.get("name") or "").strip().lower(): item for item in FOOD_RECOMMENDATION_CATALOG}
+    output = dict(guidance); filtered_alerts=[]; candidate_index=0
+    for raw_alert in guidance.get("alerts", []):
+        if not isinstance(raw_alert, dict):
+            continue
+        alert = dict(raw_alert); safe_suggestions=[]
+        for raw_suggestion in alert.get("suggestions", []):
+            if not isinstance(raw_suggestion, dict):
+                continue
+            suggestion = dict(raw_suggestion)
+            query = str(suggestion.get("search_query") or "").strip().lower(); name = str(suggestion.get("name") or "").strip().lower()
+            candidate = catalog_by_query.get(query) or catalog_by_name.get(name)
+            if candidate is None:
+                continue
+            allowed,audit,reasons = _candidate_eligibility(candidate, normalized)
+            if not allowed:
+                continue
+            grams = _number(suggestion.get("quantity")) or _number(candidate.get("serving_g")) or 100.0
+            candidate_index += 1
+            addition = _scaled_candidate_food(candidate, grams, candidate_index)
+            simulated = await _analyze_food_set([*foods, addition], normalized, meal_type=meal_type)
+            after_domains = _domain_score_items(simulated)
+            protected_decline = _protected_domain_decline_items(before_domains, after_domains, normalized)
+            if protected_decline > 0.75:
+                continue
+            suggestion["personalization_safety"] = {**audit, "condition_domains_verified": True, "max_protected_domain_decline": round(protected_decline,3), "profile_applied": True, "rejection_reasons": reasons}
+            safe_suggestions.append(suggestion)
+        alert["suggestions"] = safe_suggestions
+        filtered_alerts.append(alert)
+    output["alerts"] = filtered_alerts
+    output["personalization_safety_applied"] = True
+    return output
 
 
 def build_draft_meal_guidance(
@@ -412,6 +472,7 @@ def build_draft_meal_guidance(
                 draft_result=nutrient_result,
                 foods=foods,
                 local_hour=local_hour,
+                projected_totals=projected_totals,
             ),
         })
 
@@ -458,6 +519,7 @@ def build_draft_meal_guidance(
                 draft_result=nutrient_result,
                 foods=foods,
                 local_hour=local_hour,
+                projected_totals=projected_totals,
             ),
         })
 
@@ -516,6 +578,7 @@ def build_draft_meal_guidance(
                 draft_result=nutrient_result,
                 foods=foods,
                 local_hour=local_hour,
+                projected_totals=projected_totals,
             ),
         }
         shortfalls.append((0 if key in _MACROS else 1, ratio, alert))
