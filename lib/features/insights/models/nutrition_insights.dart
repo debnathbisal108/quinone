@@ -42,6 +42,14 @@ class NutrientTargetBand {
 
     final lower = low;
     final upper = high;
+
+    // Minimum/reference nutrients (fiber, most vitamins/minerals, RDA/AI
+    // targets) should not become "high" merely for exceeding the reference.
+    // They are high only when an actual upper limit is supplied as `high`.
+    if (lower != null && lower > 0 && upper == null) {
+      return value < lower ? BalanceState.low : BalanceState.balanced;
+    }
+
     if (lower == null || upper == null || lower <= 0 || upper <= 0) {
       return BalanceState.unknown;
     }
@@ -118,7 +126,8 @@ class DailyNutritionInsight {
     }
   }
 
-  NutrientTargetBand? targetFor(String key) => targets[key];
+  NutrientTargetBand? targetFor(String key) =>
+      targets[_canonicalMetricKey(key)];
 
   List<FoodMetricContribution> contributorsFor(
     InsightCategory category,
@@ -127,7 +136,7 @@ class DailyNutritionInsight {
     if (category == InsightCategory.health) {
       return healthContributions[key] ?? const [];
     }
-    return nutrientContributions[key] ?? const [];
+    return nutrientContributions[_canonicalMetricKey(key)] ?? const [];
   }
 }
 
@@ -139,6 +148,7 @@ class NutrientBalanceSummary {
     required this.lowDays,
     required this.balancedDays,
     required this.highDays,
+    required this.unknownDays,
     required this.trackedDays,
     required this.averageValue,
     required this.averagePercent,
@@ -150,12 +160,15 @@ class NutrientBalanceSummary {
   final int lowDays;
   final int balancedDays;
   final int highDays;
+  final int unknownDays;
   final int trackedDays;
   final double averageValue;
   final double? averagePercent;
 
+  int get classifiedDays => lowDays + balancedDays + highDays;
+
   BalanceState get dominantState {
-    if (trackedDays == 0) return BalanceState.unknown;
+    if (classifiedDays == 0) return BalanceState.unknown;
     final counts = <BalanceState, int>{
       BalanceState.low: lowDays,
       BalanceState.balanced: balancedDays,
@@ -234,7 +247,8 @@ class NutritionInsights {
     DailyNutritionInsight day,
     String nutrientKey,
   ) =>
-      day.targetFor(nutrientKey) ?? _genericTargetFor(nutrientKey);
+      day.targetFor(_canonicalMetricKey(nutrientKey)) ??
+      _genericTargetFor(_canonicalMetricKey(nutrientKey));
 
   List<String> get healthDomainKeys {
     final keys = <String>{};
@@ -251,6 +265,10 @@ class NutritionInsights {
     for (final day in dailyInsights) {
       keys.addAll(day.macronutrients.keys);
     }
+    // Calories are shown separately and are not a macronutrient balance row.
+    keys.remove('energy_kcal');
+    keys.remove('calories');
+    keys.remove('calories_kcal');
     const priority = [
       'protein_g',
       'carbohydrate_g',
@@ -395,11 +413,13 @@ class NutritionInsights {
         category == InsightCategory.macros ? macroKeys : micronutrientKeys;
     final summaries = <NutrientBalanceSummary>[];
 
-    for (final key in keys) {
+    for (final rawKey in keys) {
+      final key = _canonicalMetricKey(rawKey);
       var low = 0;
       var balanced = 0;
       var high = 0;
-      var tracked = 0;
+      var unknown = 0;
+      var observed = 0;
       var amountSum = 0.0;
       var percentSum = 0.0;
       var percentCount = 0;
@@ -408,15 +428,22 @@ class NutritionInsights {
       for (final day in dailyInsights) {
         final amount = day.metricValue(category, key);
         if (amount == null) continue;
-        final target = day.targetFor(key) ?? _genericTargetFor(key);
-        if (target == null) continue;
 
-        final state = target.classify(amount);
-        if (state == BalanceState.unknown) continue;
-
-        tracked += 1;
+        observed += 1;
         amountSum += amount;
+
+        final target = targetForDay(day, key);
+        if (target == null) {
+          unknown += 1;
+          continue;
+        }
+
         unit = target.unit.isNotEmpty ? target.unit : unit;
+        final state = target.classify(amount);
+        if (state == BalanceState.unknown) {
+          unknown += 1;
+          continue;
+        }
 
         final reference = target.reference ?? target.high ?? target.low;
         if (reference != null && reference > 0) {
@@ -435,13 +462,16 @@ class NutritionInsights {
             high += 1;
             break;
           case BalanceState.unknown:
+            unknown += 1;
             break;
         }
       }
 
-      if (tracked == 0) {
-        continue;
-      }
+      // A measured nutrient must never silently disappear from Nutrition
+      // balance. If Quinone has no defensible target/reference, keep the row
+      // visible as "Reference unavailable" instead of dropping it.
+      if (observed == 0) continue;
+
       summaries.add(
         NutrientBalanceSummary(
           key: key,
@@ -450,14 +480,22 @@ class NutritionInsights {
           lowDays: low,
           balancedDays: balanced,
           highDays: high,
-          trackedDays: tracked,
-          averageValue: amountSum / tracked,
+          unknownDays: unknown,
+          trackedDays: observed,
+          averageValue: amountSum / observed,
           averagePercent: percentCount == 0 ? null : percentSum / percentCount,
         ),
       );
     }
 
     summaries.sort((a, b) {
+      // Actionable classified nutrients first, then unclassified rows. Within
+      // each group, surface the nutrients most often outside their range.
+      final aUnknown = a.dominantState == BalanceState.unknown ? 1 : 0;
+      final bUnknown = b.dominantState == BalanceState.unknown ? 1 : 0;
+      final unknownOrder = aUnknown.compareTo(bUnknown);
+      if (unknownOrder != 0) return unknownOrder;
+
       final aConcern = a.lowDays + a.highDays;
       final bConcern = b.lowDays + b.highDays;
       final concern = bConcern.compareTo(aConcern);
@@ -575,16 +613,19 @@ DailyNutritionInsight _buildDay(
   for (final record in records) {
     calories += record.calories;
 
-    for (final entry in record.macronutrients.entries) {
+    final canonicalMacros = _canonicalMetricEntries(record.macronutrients);
+    final canonicalMicros = _canonicalMetricEntries(record.micronutrients);
+
+    for (final entry in canonicalMacros) {
       macros.update(
-        entry.key,
+        entry.canonicalKey,
         (value) => value + entry.value,
         ifAbsent: () => entry.value,
       );
     }
-    for (final entry in record.micronutrients.entries) {
+    for (final entry in canonicalMicros) {
       micros.update(
-        entry.key,
+        entry.canonicalKey,
         (value) => value + entry.value,
         ifAbsent: () => entry.value,
       );
@@ -611,21 +652,21 @@ DailyNutritionInsight _buildDay(
       for (final targetEntry in parsed.nutrientTargets.entries) {
         final band = _bandFromPersonalizedTarget(targetEntry.value);
         if (band != null) {
-          targets[targetEntry.key] = band;
+          targets[_canonicalMetricKey(targetEntry.key)] = band;
         }
       }
 
-      final nutrientKeys = <String>{
-        ...record.macronutrients.keys,
-        ...record.micronutrients.keys,
-      };
-      for (final nutrientKey in nutrientKeys) {
-        for (final contribution in parsed.contributionsFor(nutrientKey)) {
+      final canonicalNutrients = <_CanonicalMetricEntry>[
+        ...canonicalMacros,
+        ...canonicalMicros,
+      ];
+      for (final nutrient in canonicalNutrients) {
+        for (final contribution in parsed.contributionsFor(nutrient.sourceKey)) {
           _addNamedAmount(
             nutrientContributionAmounts,
-            nutrientKey,
+            nutrient.canonicalKey,
             contribution.foodName,
-            contribution.amount,
+            contribution.amount * nutrient.conversionFactor,
           );
         }
       }
@@ -667,11 +708,14 @@ DailyNutritionInsight _buildDay(
 
     // Older records may have only the simplified locally stored targets.
     for (final entry in record.nutrientTargets.entries) {
+      final canonicalKey = _canonicalMetricKey(entry.key);
+      final convertedValue =
+          entry.value * _metricConversionFactor(entry.key, canonicalKey);
       targets.putIfAbsent(
-        entry.key,
+        canonicalKey,
         () => _bandAroundReference(
-          entry.value,
-          unitForMetric(entry.key),
+          convertedValue,
+          unitForMetric(canonicalKey),
           personalized: true,
         ),
       );
@@ -870,6 +914,7 @@ NutrientTargetBand? _bandFromPersonalizedTarget(
   final type = (target.targetType ?? '').toLowerCase();
   final unit = target.unit.isNotEmpty ? target.unit : unitForMetric(target.key);
 
+  // Explicit clinical/AMDR ranges are true two-sided ranges.
   if (target.rangeLow != null &&
       target.rangeHigh != null &&
       target.rangeLow! > 0 &&
@@ -886,34 +931,37 @@ NutrientTargetBand? _bandFromPersonalizedTarget(
   }
 
   final upper = target.upperLimit;
-  if ((type.contains('upper') || type.contains('limit')) &&
-      upper != null &&
-      upper > 0) {
-    return NutrientTargetBand(
-      low: null,
-      high: upper,
-      reference: upper,
-      unit: unit,
-      isUpperLimit: true,
-      personalized: true,
-    );
-  }
-
   final resolved = target.resolvedValue ?? target.baselineValue;
-  if (resolved != null && resolved > 0) {
-    if (type.contains('upper') || type.contains('limit')) {
+
+  // Maximum-style nutrients such as sodium/saturated fat have no "too low"
+  // state in this balance UI.
+  if (type.contains('upper') ||
+      type.contains('limit') ||
+      type.contains('maximum')) {
+    final ceiling = target.rangeHigh ?? upper ?? resolved;
+    if (ceiling != null && ceiling > 0) {
       return NutrientTargetBand(
         low: null,
-        high: resolved,
-        reference: resolved,
+        high: ceiling,
+        reference: ceiling,
         unit: unit,
         isUpperLimit: true,
         personalized: true,
       );
     }
-    return _bandAroundReference(
-      resolved,
-      unit,
+  }
+
+  if (resolved != null && resolved > 0) {
+    // RDA/AI/reference targets are minimum-style for balance purposes. Keep a
+    // small 20% tolerance below the reference. If the target engine supplied
+    // a real tolerable upper limit, use that as the only "high" boundary.
+    final high = upper != null && upper > resolved ? upper : null;
+    return NutrientTargetBand(
+      low: resolved * 0.8,
+      high: high,
+      reference: resolved,
+      unit: unit,
+      isUpperLimit: false,
       personalized: true,
     );
   }
@@ -935,11 +983,35 @@ NutrientTargetBand _bandAroundReference(
   );
 }
 
-NutrientTargetBand? _genericTargetFor(String key) {
-  const references = <String, double>{
+NutrientTargetBand _minimumAroundReference(
+  double reference,
+  String unit, {
+  required bool personalized,
+}) {
+  return NutrientTargetBand(
+    low: reference * 0.8,
+    high: null,
+    reference: reference,
+    unit: unit,
+    isUpperLimit: false,
+    personalized: personalized,
+  );
+}
+
+NutrientTargetBand? _genericTargetFor(String rawKey) {
+  final key = _canonicalMetricKey(rawKey);
+
+  // General adult Nutrition Facts / daily-reference fallbacks. They are used
+  // only when the backend did not provide a personalized target. Personalized
+  // targets always win in _buildDay().
+  const balancedReferences = <String, double>{
+    'protein_g': 50,
+    'carbohydrate_g': 275,
+    'fat_g': 78,
+  };
+
+  const minimumReferences = <String, double>{
     'fiber_g': 28,
-    'saturated_fat_g': 20,
-    'added_sugars_g': 50,
     'vitamin_a_ug': 900,
     'vitamin_c_mg': 90,
     'vitamin_d_ug': 20,
@@ -953,6 +1025,7 @@ NutrientTargetBand? _genericTargetFor(String key) {
     'folate_ug': 400,
     'vitamin_b12_ug': 2.4,
     'choline_mg': 550,
+    'biotin_ug': 30,
     'calcium_mg': 1300,
     'iron_mg': 18,
     'magnesium_mg': 420,
@@ -962,11 +1035,18 @@ NutrientTargetBand? _genericTargetFor(String key) {
     'copper_mg': 0.9,
     'manganese_mg': 2.3,
     'selenium_ug': 55,
+    'iodine_ug': 150,
+    'chromium_ug': 35,
+    'molybdenum_ug': 45,
+    'chloride_mg': 2300,
   };
+
+  // Upper-reference nutrients must not be treated like "needs more" targets.
   const upperLimits = <String, double>{
     'sodium_mg': 2300,
     'saturated_fat_g': 20,
     'added_sugars_g': 50,
+    'cholesterol_mg': 300,
   };
 
   final upper = upperLimits[key];
@@ -981,13 +1061,181 @@ NutrientTargetBand? _genericTargetFor(String key) {
     );
   }
 
-  final reference = references[key];
-  if (reference == null) return null;
-  return _bandAroundReference(
-    reference,
+  final balancedReference = balancedReferences[key];
+  if (balancedReference != null) {
+    return _bandAroundReference(
+      balancedReference,
+      unitForMetric(key),
+      personalized: false,
+    );
+  }
+
+  final minimumReference = minimumReferences[key];
+  if (minimumReference == null) return null;
+  return _minimumAroundReference(
+    minimumReference,
     unitForMetric(key),
     personalized: false,
   );
+}
+
+class _CanonicalMetricEntry {
+  const _CanonicalMetricEntry({
+    required this.canonicalKey,
+    required this.sourceKey,
+    required this.value,
+    required this.conversionFactor,
+  });
+
+  final String canonicalKey;
+  final String sourceKey;
+  final double value;
+  final double conversionFactor;
+}
+
+const _metricAliasGroups = <String, List<String>>{
+  'energy_kcal': ['energy_kcal', 'calories_kcal', 'calories'],
+  'protein_g': ['protein_g', 'protein'],
+  'carbohydrate_g': [
+    'carbohydrate_g',
+    'carbohydrates_g',
+    'carbs_g',
+    'carbs',
+  ],
+  'fat_g': ['fat_g', 'total_fat_g', 'fat'],
+  'fiber_g': ['fiber_g', 'fibre_g', 'dietary_fiber_g'],
+  'saturated_fat_g': ['saturated_fat_g', 'total_saturated_fat_g'],
+  'monounsaturated_fat_g': [
+    'monounsaturated_fat_g',
+    'total_monounsaturated_fat_g',
+  ],
+  'polyunsaturated_fat_g': [
+    'polyunsaturated_fat_g',
+    'total_polyunsaturated_fat_g',
+  ],
+  'trans_fat_g': ['trans_fat_g', 'total_trans_fat_g'],
+  'omega_3_g': ['omega_3_g', 'omega3_g'],
+  'omega_6_g': ['omega_6_g', 'omega6_g'],
+  'cholesterol_mg': ['cholesterol_mg', 'cholesterol'],
+  'sugars_g': ['sugars_g', 'total_sugars_g', 'sugar_g', 'sugars'],
+  'added_sugars_g': ['added_sugars_g', 'added_sugar_g', 'added_sugars'],
+  'vitamin_a_ug': ['vitamin_a_ug_rae', 'vitamin_a_ug'],
+  'vitamin_c_mg': ['vitamin_c_mg'],
+  'vitamin_d_ug': ['vitamin_d_ug', 'vitamin_d_mcg', 'vitamin_d_iu'],
+  'vitamin_e_mg': [
+    'vitamin_e_mg_alpha_tocopherol',
+    'alpha_tocopherol_mg',
+    'vitamin_e_mg',
+  ],
+  'vitamin_k_ug': ['vitamin_k_ug', 'vitamin_k_mcg'],
+  'thiamin_mg': ['thiamin_mg', 'vitamin_b1_mg'],
+  'riboflavin_mg': ['riboflavin_mg', 'vitamin_b2_mg'],
+  'niacin_mg': ['niacin_mg_ne', 'niacin_mg'],
+  'pantothenic_acid_mg': ['pantothenic_acid_mg', 'vitamin_b5_mg'],
+  'vitamin_b6_mg': ['vitamin_b6_mg'],
+  'folate_ug': ['folate_ug_dfe', 'folate_ug'],
+  'vitamin_b12_ug': ['vitamin_b12_ug', 'vitamin_b12_mcg'],
+  'choline_mg': ['choline_mg'],
+  'biotin_ug': ['biotin_ug', 'biotin_mcg', 'vitamin_b7_ug', 'vitamin_b7_mcg'],
+  'calcium_mg': ['calcium_mg'],
+  'iron_mg': ['iron_mg'],
+  'magnesium_mg': ['magnesium_mg'],
+  'phosphorus_mg': ['phosphorus_mg'],
+  'potassium_mg': ['potassium_mg'],
+  'sodium_mg': ['sodium_mg'],
+  'zinc_mg': ['zinc_mg'],
+  'copper_mg': ['copper_mg', 'copper_ug', 'copper_mcg'],
+  'manganese_mg': ['manganese_mg'],
+  'selenium_ug': ['selenium_ug', 'selenium_mcg'],
+  'iodine_ug': ['iodine_ug', 'iodine_mcg'],
+  'chromium_ug': ['chromium_ug', 'chromium_mcg'],
+  'molybdenum_ug': ['molybdenum_ug', 'molybdenum_mcg'],
+  'fluoride_mg': ['fluoride_mg'],
+  'chloride_mg': ['chloride_mg'],
+};
+
+final Map<String, String> _canonicalMetricByAlias = {
+  for (final group in _metricAliasGroups.entries)
+    for (final alias in group.value) alias: group.key,
+};
+
+String _canonicalMetricKey(String rawKey) {
+  final key = rawKey.trim().toLowerCase();
+  return _canonicalMetricByAlias[key] ?? key;
+}
+
+double _metricConversionFactor(String sourceKey, String canonicalKey) {
+  final source = sourceKey.trim().toLowerCase();
+  if (canonicalKey == 'vitamin_d_ug' && source == 'vitamin_d_iu') {
+    return 0.025;
+  }
+  if (canonicalKey == 'copper_mg' &&
+      (source == 'copper_ug' || source == 'copper_mcg')) {
+    return 0.001;
+  }
+  return 1.0;
+}
+
+List<_CanonicalMetricEntry> _canonicalMetricEntries(
+  Map<String, double> source,
+) {
+  if (source.isEmpty) return const [];
+
+  final normalizedSource = <String, MapEntry<String, double>>{};
+  for (final entry in source.entries) {
+    normalizedSource[entry.key.trim().toLowerCase()] = entry;
+  }
+
+  final result = <_CanonicalMetricEntry>[];
+  final consumed = <String>{};
+
+  // Pick one preferred representation for each nutrient so payloads carrying
+  // both canonical and alias forms are not double-counted.
+  for (final group in _metricAliasGroups.entries) {
+    MapEntry<String, double>? selected;
+    String? selectedAlias;
+    for (final alias in group.value) {
+      final candidate = normalizedSource[alias];
+      if (candidate != null) {
+        selected = candidate;
+        selectedAlias = alias;
+        break;
+      }
+    }
+    if (selected == null || selectedAlias == null) continue;
+
+    for (final alias in group.value) {
+      if (normalizedSource.containsKey(alias)) consumed.add(alias);
+    }
+
+    final factor = _metricConversionFactor(selectedAlias, group.key);
+    result.add(
+      _CanonicalMetricEntry(
+        canonicalKey: group.key,
+        sourceKey: selected.key,
+        value: selected.value * factor,
+        conversionFactor: factor,
+      ),
+    );
+  }
+
+  // Preserve nutrients that are not yet in the alias registry. They remain
+  // visible in Insights and will appear under "Reference unavailable" rather
+  // than being silently discarded.
+  for (final normalized in normalizedSource.entries) {
+    if (consumed.contains(normalized.key)) continue;
+    final original = normalized.value;
+    result.add(
+      _CanonicalMetricEntry(
+        canonicalKey: normalized.key,
+        sourceKey: original.key,
+        value: original.value,
+        conversionFactor: 1.0,
+      ),
+    );
+  }
+
+  return result;
 }
 
 Map<String, double> _averageMaps(
@@ -1040,11 +1288,24 @@ Map<String, double> _averageHealthScores(
   };
 }
 
-bool _isMacroKey(String key) {
-  return key.endsWith('_g') ||
-      key == 'protein' ||
-      key == 'carbs' ||
-      key == 'fat';
+bool _isMacroKey(String rawKey) {
+  final key = _canonicalMetricKey(rawKey);
+  return const <String>{
+    'energy_kcal',
+    'protein_g',
+    'carbohydrate_g',
+    'fat_g',
+    'fiber_g',
+    'saturated_fat_g',
+    'monounsaturated_fat_g',
+    'polyunsaturated_fat_g',
+    'trans_fat_g',
+    'omega_3_g',
+    'omega_6_g',
+    'cholesterol_mg',
+    'sugars_g',
+    'added_sugars_g',
+  }.contains(key);
 }
 
 double? amountForMetric(
@@ -1054,26 +1315,22 @@ double? amountForMetric(
 ) =>
     day.metricValue(category, key);
 
-double? _amountForTarget(Map<String, double> macros, String key) {
-  const aliases = <String, List<String>>{
-    'protein_g': ['protein_g', 'protein'],
-    'carbohydrate_g': [
-      'carbohydrate_g',
-      'carbohydrates_g',
-      'carbs_g',
-      'carbs',
-    ],
-    'fat_g': ['fat_g', 'total_fat_g', 'fat'],
-    'fiber_g': ['fiber_g', 'fibre_g', 'dietary_fiber_g'],
-  };
-  for (final candidate in aliases[key] ?? [key]) {
-    final value = macros[candidate];
-    if (value != null) return value;
+double? _amountForTarget(Map<String, double> macros, String rawKey) {
+  final key = _canonicalMetricKey(rawKey);
+  final direct = macros[key];
+  if (direct != null) return direct;
+
+  for (final alias in _metricAliasGroups[key] ?? [key]) {
+    final value = macros[alias];
+    if (value != null) {
+      return value * _metricConversionFactor(alias, key);
+    }
   }
   return null;
 }
 
 String friendlyMetricName(String value) {
+  final canonical = _canonicalMetricKey(value);
   const aliases = <String, String>{
     'overall': 'Overall health score',
     'protein_g': 'Protein',
@@ -1090,6 +1347,23 @@ String friendlyMetricName(String value) {
     'cholesterol_mg': 'Cholesterol',
     'sugars_g': 'Total sugars',
     'added_sugars_g': 'Added sugars',
+    'vitamin_a_ug': 'Vitamin A',
+    'vitamin_c_mg': 'Vitamin C',
+    'vitamin_d_ug': 'Vitamin D',
+    'vitamin_e_mg': 'Vitamin E',
+    'vitamin_k_ug': 'Vitamin K',
+    'thiamin_mg': 'Thiamin (B1)',
+    'riboflavin_mg': 'Riboflavin (B2)',
+    'niacin_mg': 'Niacin (B3)',
+    'pantothenic_acid_mg': 'Pantothenic acid (B5)',
+    'vitamin_b6_mg': 'Vitamin B6',
+    'folate_ug': 'Folate',
+    'vitamin_b12_ug': 'Vitamin B12',
+    'biotin_ug': 'Biotin (B7)',
+    'iodine_ug': 'Iodine',
+    'chromium_ug': 'Chromium',
+    'molybdenum_ug': 'Molybdenum',
+    'chloride_mg': 'Chloride',
     'renal_health': 'Renal health',
     'kidney_health': 'Renal health',
     'cardiovascular_health': 'Cardiovascular health',
@@ -1097,9 +1371,9 @@ String friendlyMetricName(String value) {
     'digestive_health': 'Digestive health',
     'bone_health': 'Bone health',
   };
-  final direct = aliases[value];
+  final direct = aliases[canonical];
   if (direct != null) return direct;
-  return value
+  return canonical
       .replaceAll(RegExp(r'_(mg|ug|mcg|g)$'), '')
       .replaceAll('_', ' ')
       .split(RegExp(r'\s+'))
@@ -1111,10 +1385,12 @@ String friendlyMetricName(String value) {
       .join(' ');
 }
 
-String unitForMetric(String key) {
+String unitForMetric(String rawKey) {
+  final key = _canonicalMetricKey(rawKey);
   if (key.endsWith('_ug') || key.endsWith('_mcg')) return 'µg';
   if (key.endsWith('_mg')) return 'mg';
   if (key.endsWith('_g')) return 'g';
+  if (key.endsWith('_kcal')) return 'kcal';
   return '';
 }
 
