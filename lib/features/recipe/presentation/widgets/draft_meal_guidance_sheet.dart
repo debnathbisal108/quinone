@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../../models/draft_meal_guidance.dart';
 
+typedef DraftMealGuidanceSuggestionsLoader = Future<DraftMealGuidance> Function();
+
 enum DraftMealGuidanceAction {
   review,
   continueAnyway,
@@ -14,13 +16,18 @@ class DraftGuidanceAdjustableFood {
     required this.name,
     required this.quantity,
     this.unit = 'g',
+    this.backendFoodId,
   });
 
   final String name;
   final double quantity;
   final String unit;
+  final String? backendFoodId;
 
-  String get key => _foodKey(name);
+  String get key {
+    final id = backendFoodId?.trim() ?? '';
+    return id.isNotEmpty ? _foodKey(id) : _foodKey(name);
+  }
 }
 
 class DraftMealGuidanceSheetResult {
@@ -44,6 +51,7 @@ Future<DraftMealGuidanceSheetResult> showDraftMealGuidanceSheet(
   required bool analysisCheckpoint,
   List<DraftGuidanceAdjustableFood> adjustableFoods = const [],
   bool pendingFoodAddition = false,
+  DraftMealGuidanceSuggestionsLoader? suggestionsLoader,
 }) async {
   return await showModalBottomSheet<DraftMealGuidanceSheetResult>(
         context: context,
@@ -55,6 +63,7 @@ Future<DraftMealGuidanceSheetResult> showDraftMealGuidanceSheet(
           analysisCheckpoint: analysisCheckpoint,
           adjustableFoods: adjustableFoods,
           pendingFoodAddition: pendingFoodAddition,
+          suggestionsLoader: suggestionsLoader,
         ),
       ) ??
       const DraftMealGuidanceSheetResult(
@@ -68,12 +77,14 @@ class _DraftMealGuidanceSheet extends StatefulWidget {
     required this.analysisCheckpoint,
     required this.adjustableFoods,
     required this.pendingFoodAddition,
+    required this.suggestionsLoader,
   });
 
   final DraftMealGuidance guidance;
   final bool analysisCheckpoint;
   final List<DraftGuidanceAdjustableFood> adjustableFoods;
   final bool pendingFoodAddition;
+  final DraftMealGuidanceSuggestionsLoader? suggestionsLoader;
 
   @override
   State<_DraftMealGuidanceSheet> createState() =>
@@ -84,17 +95,51 @@ class _DraftMealGuidanceSheetState
     extends State<_DraftMealGuidanceSheet> {
   late final Map<String, DraftGuidanceAdjustableFood> _foodsByKey;
   late final Map<String, double> _quantities;
+  late DraftMealGuidance _guidance;
+  bool _loadingSuggestions = false;
+  bool _suggestionsLoadFailed = false;
   String? _selectedSuggestionQuery;
 
   @override
   void initState() {
     super.initState();
+    _guidance = widget.guidance;
     _foodsByKey = {
       for (final food in widget.adjustableFoods) food.key: food,
     };
     _quantities = {
       for (final food in widget.adjustableFoods) food.key: food.quantity,
     };
+    if (_guidance.suggestionsPending && widget.suggestionsLoader != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _loadSuggestions();
+      });
+    }
+  }
+
+  Future<void> _loadSuggestions() async {
+    if (!mounted) return;
+    final loader = widget.suggestionsLoader;
+    if (loader == null || _loadingSuggestions) return;
+    setState(() {
+      _loadingSuggestions = true;
+      _suggestionsLoadFailed = false;
+    });
+    try {
+      final enriched = await loader();
+      if (!mounted) return;
+      setState(() {
+        _guidance = enriched;
+        _loadingSuggestions = false;
+        _suggestionsLoadFailed = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loadingSuggestions = false;
+        _suggestionsLoadFailed = true;
+      });
+    }
   }
 
   void _changeQuantity(DraftGuidanceAdjustableFood food, double multiplier) {
@@ -109,8 +154,12 @@ class _DraftMealGuidanceSheetState
     DraftNutrientAlert alert,
   ) {
     for (final contributor in alert.contributors) {
-      final food = _foodsByKey[_foodKey(contributor.name)];
-      if (food != null) return food;
+      final byId = contributor.foodId.trim().isEmpty
+          ? null
+          : _foodsByKey[_foodKey(contributor.foodId)];
+      if (byId != null) return byId;
+      final byName = _foodsByKey[_foodKey(contributor.name)];
+      if (byName != null) return byName;
     }
     return null;
   }
@@ -118,13 +167,32 @@ class _DraftMealGuidanceSheetState
   double _adjustedAmount(DraftNutrientAlert alert) {
     var amount = alert.amount;
     for (final contributor in alert.contributors) {
-      final food = _foodsByKey[_foodKey(contributor.name)];
+      final food = contributor.foodId.trim().isNotEmpty
+          ? _foodsByKey[_foodKey(contributor.foodId)] ??
+              _foodsByKey[_foodKey(contributor.name)]
+          : _foodsByKey[_foodKey(contributor.name)];
       if (food == null || food.quantity <= 0) continue;
       final adjustedQuantity = _quantities[food.key] ?? food.quantity;
       amount += contributor.amount *
           ((adjustedQuantity / food.quantity) - 1.0);
     }
     return amount.clamp(0.0, double.infinity).toDouble();
+  }
+
+  double? _adjustedContributorAmount(
+    DraftNutrientAlert alert,
+    DraftGuidanceAdjustableFood food,
+  ) {
+    for (final contributor in alert.contributors) {
+      final idMatches = contributor.foodId.trim().isNotEmpty &&
+          _foodKey(contributor.foodId) == food.key;
+      final nameMatches = _foodKey(contributor.name) == _foodKey(food.name);
+      if (!idMatches && !nameMatches) continue;
+      if (food.quantity <= 0) return contributor.amount;
+      final quantity = _quantities[food.key] ?? food.quantity;
+      return contributor.amount * quantity / food.quantity;
+    }
+    return null;
   }
 
   double _adjustedPercentage(DraftNutrientAlert alert) {
@@ -152,8 +220,8 @@ class _DraftMealGuidanceSheetState
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final hasActiveAlerts = widget.guidance.alerts.any(
-      (alert) => !_resolvedAtCurrentQuantity(alert),
+    final hasActiveAlerts = _guidance.alerts.any(
+      (alert) => !alert.isAboveReference && !_resolvedAtCurrentQuantity(alert),
     );
     return DraggableScrollableSheet(
       expand: false,
@@ -191,7 +259,7 @@ class _DraftMealGuidanceSheetState
                             ? 'Review nutrient changes before adding this food.'
                             : !hasActiveAlerts
                                 ? 'The flagged excesses are now within their displayed references.'
-                                : widget.guidance.message,
+                                : _guidance.message,
                         style: theme.textTheme.bodyMedium?.copyWith(
                           color: scheme.onSurfaceVariant,
                         ),
@@ -206,10 +274,10 @@ class _DraftMealGuidanceSheetState
             child: ListView.separated(
               controller: controller,
               padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
-              itemCount: widget.guidance.alerts.length,
+              itemCount: _guidance.alerts.length,
               separatorBuilder: (_, __) => const SizedBox(height: 10),
               itemBuilder: (context, index) {
-                final alert = widget.guidance.alerts[index];
+                final alert = _guidance.alerts[index];
                 final adjustable = alert.isExcess
                     ? _adjustableContributor(alert)
                     : null;
@@ -221,6 +289,9 @@ class _DraftMealGuidanceSheetState
                   adjustableFood: adjustable,
                   adjustedQuantity:
                       adjustable == null ? null : _quantities[adjustable.key],
+                  adjustedFoodContribution: adjustable == null
+                      ? null
+                      : _adjustedContributorAmount(alert, adjustable),
                   onDecrease: adjustable == null
                       ? null
                       : () => _changeQuantity(adjustable, 0.90),
@@ -236,6 +307,13 @@ class _DraftMealGuidanceSheetState
                   ),
                   pendingFoodAddition: widget.pendingFoodAddition,
                   selectedSuggestionQuery: _selectedSuggestionQuery,
+                  suggestionsLoading: !_suggestionsLoadFailed &&
+                      (_guidance.suggestionsPending || _loadingSuggestions) &&
+                      alert.isLow &&
+                      alert.suggestions.isEmpty,
+                  suggestionsLoadFailed: _suggestionsLoadFailed &&
+                      alert.isLow &&
+                      alert.suggestions.isEmpty,
                   onSelectPendingSuggestion: (query) => setState(() {
                     _selectedSuggestionQuery = query;
                   }),
@@ -253,7 +331,7 @@ class _DraftMealGuidanceSheetState
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  widget.guidance.disclaimer,
+                  _guidance.disclaimer,
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: scheme.onSurfaceVariant,
                   ),
@@ -321,11 +399,14 @@ class _NutrientAlertCard extends StatelessWidget {
     required this.resolved,
     required this.adjustableFood,
     required this.adjustedQuantity,
+    required this.adjustedFoodContribution,
     required this.onDecrease,
     required this.onIncrease,
     required this.onSearchSuggestion,
     required this.pendingFoodAddition,
     required this.selectedSuggestionQuery,
+    required this.suggestionsLoading,
+    required this.suggestionsLoadFailed,
     required this.onSelectPendingSuggestion,
   });
 
@@ -335,11 +416,14 @@ class _NutrientAlertCard extends StatelessWidget {
   final bool resolved;
   final DraftGuidanceAdjustableFood? adjustableFood;
   final double? adjustedQuantity;
+  final double? adjustedFoodContribution;
   final VoidCallback? onDecrease;
   final VoidCallback? onIncrease;
   final ValueChanged<String> onSearchSuggestion;
   final bool pendingFoodAddition;
   final String? selectedSuggestionQuery;
+  final bool suggestionsLoading;
+  final bool suggestionsLoadFailed;
   final ValueChanged<String> onSelectPendingSuggestion;
 
   @override
@@ -349,18 +433,16 @@ class _NutrientAlertCard extends StatelessWidget {
     final critical = alert.severity == 'critical';
     final color = alert.requiresClinicalInput
         ? scheme.tertiary
-        : resolved
-            ? scheme.primary
-            : alert.isExcess
-                ? (critical ? scheme.error : Colors.orange.shade700)
-                : scheme.primary;
+        : alert.isAboveReference
+            ? scheme.tertiary
+            : resolved
+                ? scheme.primary
+                : alert.isExcess
+                    ? (critical ? scheme.error : Colors.orange.shade700)
+                    : scheme.primary;
     final displayedMessage = resolved
         ? '${alert.label} is now within the displayed reference at this quantity.'
-        : !alert.isExcess &&
-                !alert.requiresClinicalInput &&
-                adjustedPercentage >= 55
-            ? '${alert.label} has improved for this meal at the adjusted quantity.'
-            : alert.message;
+        : alert.message;
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -378,15 +460,17 @@ class _NutrientAlertCard extends StatelessWidget {
                     ? Icons.check_circle_rounded
                     : alert.isExcess
                         ? Icons.warning_amber_rounded
-                        : alert.requiresClinicalInput
-                            ? Icons.medical_information_outlined
-                            : Icons.add_chart_rounded,
+                        : alert.isAboveReference
+                            ? Icons.info_outline_rounded
+                            : alert.requiresClinicalInput
+                                ? Icons.medical_information_outlined
+                                : Icons.add_chart_rounded,
                 color: color,
               ),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  '${alert.label}: ${_format(adjustedAmount)} ${alert.unit}',
+                  '${alert.isExcess || alert.isAboveReference ? 'Projected today · ' : 'This meal · '}${alert.label}: ${_format(adjustedAmount)} ${alert.unit}',
                   style: theme.textTheme.titleSmall?.copyWith(
                     fontWeight: FontWeight.w900,
                   ),
@@ -416,6 +500,26 @@ class _NutrientAlertCard extends StatelessWidget {
                   'Resolved',
                   style: theme.textTheme.labelMedium?.copyWith(
                     color: scheme.primary,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ),
+          ],
+          if (alert.isAboveReference) ...[
+            const SizedBox(height: 7),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                decoration: BoxDecoration(
+                  color: scheme.tertiary.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  'Above daily reference · informational',
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: scheme.tertiary,
                     fontWeight: FontWeight.w900,
                   ),
                 ),
@@ -467,8 +571,62 @@ class _NutrientAlertCard extends StatelessWidget {
                 ),
               ],
             ),
+            if (adjustedFoodContribution != null) ...[
+              const SizedBox(height: 2),
+              Text(
+                '${adjustableFood!.name} contributes ${_format(adjustedFoodContribution!)} ${alert.unit} at this quantity.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
             Text(
-              'Each tap changes this food by 10%. Nutrient values above update immediately.',
+              'Each tap changes this food by 10%. The projected nutrient total above updates immediately.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+          if (alert.isLow && alert.suggestions.isEmpty && suggestionsLoading) ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Finding safe, suitable foods…',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          if (alert.isLow && alert.suggestions.isEmpty && suggestionsLoadFailed) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Food suggestions are temporarily unavailable. This does not block analysis.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+          if (alert.isLow &&
+              alert.suggestions.isEmpty &&
+              !suggestionsLoading &&
+              !suggestionsLoadFailed &&
+              !alert.requiresClinicalInput) ...[
+            const SizedBox(height: 10),
+            Text(
+              'No safe, compatible food suggestion was found for this shortfall.',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: scheme.onSurfaceVariant,
               ),
