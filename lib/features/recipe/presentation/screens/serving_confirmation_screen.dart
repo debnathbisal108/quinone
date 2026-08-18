@@ -186,6 +186,13 @@ class _ServingConfirmationScreenState
     final revision = _revision;
     setState(() => _checkingGuidance = true);
     try {
+      // A saved personalization profile may still be loading when this screen
+      // opens. Wait for it so condition/diet targets are never silently
+      // replaced by the generic guidance path.
+      if (ref.read(profileProvider).isLoading) {
+        await ref.read(profileProvider.notifier).loadProfile();
+        if (!mounted) return false;
+      }
       final DraftMealGuidance guidance = await _service.evaluateGuidance(
         analysisId: analysisId,
         items: items,
