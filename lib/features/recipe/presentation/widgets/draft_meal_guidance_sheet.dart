@@ -132,6 +132,11 @@ class _DraftMealGuidanceSheetState
     return _adjustedAmount(alert) / alert.reference * 100.0;
   }
 
+  bool _resolvedAtCurrentQuantity(DraftNutrientAlert alert) {
+    if (!alert.isExcess || alert.requiresClinicalInput) return false;
+    return _adjustedPercentage(alert) <= 100.0001;
+  }
+
   DraftMealGuidanceSheetResult _result(
     DraftMealGuidanceAction action, {
     String? searchQuery,
@@ -147,6 +152,9 @@ class _DraftMealGuidanceSheetState
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final hasActiveAlerts = widget.guidance.alerts.any(
+      (alert) => !_resolvedAtCurrentQuantity(alert),
+    );
     return DraggableScrollableSheet(
       expand: false,
       initialChildSize: 0.82,
@@ -181,7 +189,9 @@ class _DraftMealGuidanceSheetState
                       Text(
                         widget.pendingFoodAddition
                             ? 'Review nutrient changes before adding this food.'
-                            : widget.guidance.message,
+                            : !hasActiveAlerts
+                                ? 'The flagged excesses are now within their displayed references.'
+                                : widget.guidance.message,
                         style: theme.textTheme.bodyMedium?.copyWith(
                           color: scheme.onSurfaceVariant,
                         ),
@@ -207,6 +217,7 @@ class _DraftMealGuidanceSheetState
                   alert: alert,
                   adjustedAmount: _adjustedAmount(alert),
                   adjustedPercentage: _adjustedPercentage(alert),
+                  resolved: _resolvedAtCurrentQuantity(alert),
                   adjustableFood: adjustable,
                   adjustedQuantity:
                       adjustable == null ? null : _quantities[adjustable.key],
@@ -283,7 +294,9 @@ class _DraftMealGuidanceSheetState
                           widget.pendingFoodAddition
                               ? 'Confirm & add'
                               : widget.analysisCheckpoint
-                                  ? 'Continue & analyze anyway'
+                                  ? hasActiveAlerts
+                                      ? 'Continue & analyze anyway'
+                                      : 'Confirm & analyze'
                                   : 'Confirm changes',
                           textAlign: TextAlign.center,
                         ),
@@ -305,6 +318,7 @@ class _NutrientAlertCard extends StatelessWidget {
     required this.alert,
     required this.adjustedAmount,
     required this.adjustedPercentage,
+    required this.resolved,
     required this.adjustableFood,
     required this.adjustedQuantity,
     required this.onDecrease,
@@ -318,6 +332,7 @@ class _NutrientAlertCard extends StatelessWidget {
   final DraftNutrientAlert alert;
   final double adjustedAmount;
   final double adjustedPercentage;
+  final bool resolved;
   final DraftGuidanceAdjustableFood? adjustableFood;
   final double? adjustedQuantity;
   final VoidCallback? onDecrease;
@@ -334,11 +349,13 @@ class _NutrientAlertCard extends StatelessWidget {
     final critical = alert.severity == 'critical';
     final color = alert.requiresClinicalInput
         ? scheme.tertiary
-        : alert.isExcess
-            ? (critical ? scheme.error : Colors.orange.shade700)
-            : scheme.primary;
-    final displayedMessage = alert.isExcess && adjustedPercentage <= 100
-        ? '${alert.label} is within the displayed reference at this quantity.'
+        : resolved
+            ? scheme.primary
+            : alert.isExcess
+                ? (critical ? scheme.error : Colors.orange.shade700)
+                : scheme.primary;
+    final displayedMessage = resolved
+        ? '${alert.label} is now within the displayed reference at this quantity.'
         : !alert.isExcess &&
                 !alert.requiresClinicalInput &&
                 adjustedPercentage >= 55
@@ -357,11 +374,13 @@ class _NutrientAlertCard extends StatelessWidget {
           Row(
             children: [
               Icon(
-                alert.isExcess
-                    ? Icons.warning_amber_rounded
-                    : alert.requiresClinicalInput
-                        ? Icons.medical_information_outlined
-                        : Icons.add_chart_rounded,
+                resolved
+                    ? Icons.check_circle_rounded
+                    : alert.isExcess
+                        ? Icons.warning_amber_rounded
+                        : alert.requiresClinicalInput
+                            ? Icons.medical_information_outlined
+                            : Icons.add_chart_rounded,
                 color: color,
               ),
               const SizedBox(width: 8),
@@ -383,6 +402,26 @@ class _NutrientAlertCard extends StatelessWidget {
                 ),
             ],
           ),
+          if (resolved) ...[
+            const SizedBox(height: 7),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                decoration: BoxDecoration(
+                  color: scheme.primary.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  'Resolved',
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: scheme.primary,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 7),
           Text(displayedMessage, style: theme.textTheme.bodyMedium),
           if (alert.contributors.isNotEmpty) ...[
