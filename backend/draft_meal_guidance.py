@@ -12,6 +12,7 @@ import math
 from typing import Any, Iterable
 
 from nutrient_target_engine import calculate_nutrient_targets
+from nutrient_target_data import CANONICAL_KEY_COMPATIBILITY
 from personalization_engine import normalize_user_profile
 from recommendation_catalog import FOOD_RECOMMENDATION_CATALOG
 from recommendation_engine import (
@@ -26,7 +27,7 @@ from recommendation_engine import (
 )
 
 
-GUIDANCE_ENGINE_VERSION = "1.5.0"
+GUIDANCE_ENGINE_VERSION = "1.6.0"
 
 _LABELS: dict[str, tuple[str, str]] = {
     "energy_kcal": ("Energy", "kcal"),
@@ -64,6 +65,9 @@ _LABELS: dict[str, tuple[str, str]] = {
     "iodine_ug": ("Iodine", "µg"),
     "chromium_ug": ("Chromium", "µg"),
     "molybdenum_ug": ("Molybdenum", "µg"),
+    "biotin_ug": ("Biotin", "µg"),
+    "chloride_mg": ("Chloride", "mg"),
+    "cholesterol_mg": ("Cholesterol", "mg"),
     "fluoride_mg": ("Fluoride", "mg"),
     "linoleic_acid_g": ("Linoleic acid", "g"),
     "alpha_linolenic_acid_g": ("Alpha-linolenic acid", "g"),
@@ -84,6 +88,53 @@ _HARD_DAILY_CAPS = {
     "saturated_fat_g": 20.0,
     "added_sugars_g": 50.0,
     "trans_fat_g": 2.0,
+}
+
+# General adult reference values used only when the user has not supplied
+# enough profile data for the nutrient target engine to resolve a target.
+# They are guidance references, not personalized prescriptions. A resolved
+# personalized target (and especially requires_clinical_input) always wins.
+_GENERIC_REFERENCE_TARGETS: dict[str, dict[str, Any]] = {
+    "energy_kcal": {"target_type": "reference_range", "range_low": 1800.0, "range_high": 2400.0, "resolved_unit": "kcal/day"},
+    "protein_g": {"target_type": "reference", "resolved_value": 50.0, "resolved_unit": "g/day"},
+    "carbohydrate_g": {"target_type": "reference_range", "range_low": 220.0, "range_high": 330.0, "resolved_unit": "g/day"},
+    "fat_g": {"target_type": "reference_range", "range_low": 62.4, "range_high": 93.6, "resolved_unit": "g/day"},
+    "fiber_g": {"target_type": "minimum", "resolved_value": 28.0, "resolved_unit": "g/day"},
+    "vitamin_a_ug": {"target_type": "minimum", "resolved_value": 900.0, "resolved_unit": "ug/day"},
+    "vitamin_c_mg": {"target_type": "minimum", "resolved_value": 90.0, "resolved_unit": "mg/day"},
+    "vitamin_d_ug": {"target_type": "minimum", "resolved_value": 20.0, "resolved_unit": "ug/day"},
+    "vitamin_e_mg": {"target_type": "minimum", "resolved_value": 15.0, "resolved_unit": "mg/day"},
+    "vitamin_k_ug": {"target_type": "minimum", "resolved_value": 120.0, "resolved_unit": "ug/day"},
+    "thiamin_mg": {"target_type": "minimum", "resolved_value": 1.2, "resolved_unit": "mg/day"},
+    "riboflavin_mg": {"target_type": "minimum", "resolved_value": 1.3, "resolved_unit": "mg/day"},
+    "niacin_mg": {"target_type": "minimum", "resolved_value": 16.0, "resolved_unit": "mg/day"},
+    "pantothenic_acid_mg": {"target_type": "minimum", "resolved_value": 5.0, "resolved_unit": "mg/day"},
+    "vitamin_b6_mg": {"target_type": "minimum", "resolved_value": 1.7, "resolved_unit": "mg/day"},
+    "folate_ug": {"target_type": "minimum", "resolved_value": 400.0, "resolved_unit": "ug/day"},
+    "vitamin_b12_ug": {"target_type": "minimum", "resolved_value": 2.4, "resolved_unit": "ug/day"},
+    "choline_mg": {"target_type": "minimum", "resolved_value": 550.0, "resolved_unit": "mg/day"},
+    "biotin_ug": {"target_type": "minimum", "resolved_value": 30.0, "resolved_unit": "ug/day"},
+    "calcium_mg": {"target_type": "minimum", "resolved_value": 1300.0, "resolved_unit": "mg/day"},
+    "iron_mg": {"target_type": "minimum", "resolved_value": 18.0, "resolved_unit": "mg/day"},
+    "magnesium_mg": {"target_type": "minimum", "resolved_value": 420.0, "resolved_unit": "mg/day"},
+    "phosphorus_mg": {"target_type": "minimum", "resolved_value": 1250.0, "resolved_unit": "mg/day"},
+    "potassium_mg": {"target_type": "minimum", "resolved_value": 4700.0, "resolved_unit": "mg/day"},
+    "zinc_mg": {"target_type": "minimum", "resolved_value": 11.0, "resolved_unit": "mg/day"},
+    "copper_mg": {"target_type": "minimum", "resolved_value": 0.9, "resolved_unit": "mg/day"},
+    "manganese_mg": {"target_type": "minimum", "resolved_value": 2.3, "resolved_unit": "mg/day"},
+    "selenium_ug": {"target_type": "minimum", "resolved_value": 55.0, "resolved_unit": "ug/day"},
+    "iodine_ug": {"target_type": "minimum", "resolved_value": 150.0, "resolved_unit": "ug/day"},
+    "chromium_ug": {"target_type": "minimum", "resolved_value": 35.0, "resolved_unit": "ug/day"},
+    "molybdenum_ug": {"target_type": "minimum", "resolved_value": 45.0, "resolved_unit": "ug/day"},
+    "chloride_mg": {"target_type": "minimum", "resolved_value": 2300.0, "resolved_unit": "mg/day"},
+}
+
+# Aliases that require an actual scale conversion. The compatibility registry
+# supplies all of the 1:1 aliases automatically below.
+_ALIAS_SCALES: dict[tuple[str, str], float] = {
+    ("vitamin_d_ug", "vitamin_d_iu"): 0.025,
+    ("copper_mg", "copper_ug"): 0.001,
+    ("copper_mg", "copper_mcg"): 0.001,
 }
 
 
@@ -150,22 +201,112 @@ def _label_and_unit(
     return label, unit
 
 
+def _canonical_nutrients(raw: Any) -> dict[str, float]:
+    if not isinstance(raw, dict):
+        return {}
+    numeric: dict[str, float] = {}
+    for key, raw_value in raw.items():
+        value = _number(raw_value)
+        if value is not None:
+            numeric[str(key)] = value
+    output = dict(numeric)
+    for canonical, compatibility in CANONICAL_KEY_COMPATIBILITY.items():
+        candidates = [canonical, *[
+            str(key) for key in compatibility.get("accepted_input_keys", [])
+            if str(key) != canonical
+        ]]
+        for alias in candidates:
+            value = numeric.get(alias)
+            if value is None:
+                continue
+            output[canonical] = value * _ALIAS_SCALES.get((canonical, alias), 1.0)
+            break
+    return output
+
+
 def _nutrient_totals(
     foods: Iterable[dict[str, Any]],
 ) -> tuple[dict[str, float], set[str]]:
     totals: dict[str, float] = {}
     reported: set[str] = set()
     for food in foods:
-        nutrients = food.get("nutrients")
-        if not isinstance(nutrients, dict):
-            continue
-        for key, raw in nutrients.items():
-            value = _number(raw)
-            if value is None:
-                continue
-            reported.add(str(key))
-            totals[str(key)] = totals.get(str(key), 0.0) + value
+        nutrients = _canonical_nutrients(food.get("nutrients"))
+        for key, value in nutrients.items():
+            reported.add(key)
+            totals[key] = totals.get(key, 0.0) + value
     return ({key: round(value, 4) for key, value in totals.items()}, reported)
+
+
+def _target_has_comparison_value(target: Any) -> bool:
+    if not isinstance(target, dict):
+        return False
+    if target.get("status") == "requires_clinical_input":
+        return True
+    return any(
+        (_number(target.get(key)) or 0.0) > 0
+        for key in ("resolved_value", "baseline_value", "range_low", "range_high", "upper_limit")
+    )
+
+
+def _effective_targets(raw_targets: Any) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    targets = {
+        str(key): dict(value)
+        for key, value in (raw_targets.items() if isinstance(raw_targets, dict) else [])
+        if isinstance(value, dict)
+    }
+    fallback_keys: set[str] = set()
+
+    # A carbohydrate RDA is a minimum reference, not an upper edge.  The target
+    # registry currently exposes 130 g/day as the RDA even when the user's
+    # energy target is known.  Using that value as a meal "high" threshold
+    # would falsely flag ordinary carbohydrate portions.  Prefer an AMDR-style
+    # range derived from resolved energy; otherwise use the generic reference
+    # range until enough profile data exists.
+    carbohydrate = targets.get("carbohydrate_g")
+    if isinstance(carbohydrate, dict) and carbohydrate.get("status") != "requires_clinical_input":
+        has_range = (
+            (_number(carbohydrate.get("range_low")) or 0.0) > 0
+            and (_number(carbohydrate.get("range_high")) or 0.0) > 0
+        )
+        target_type = str(carbohydrate.get("target_type") or "").lower()
+        if not has_range and target_type in {"rda", "ai", "minimum", "reference"}:
+            energy = targets.get("energy_kcal")
+            resolved_energy = (
+                _number(energy.get("resolved_value"))
+                if isinstance(energy, dict)
+                else None
+            )
+            if resolved_energy is not None and resolved_energy > 0:
+                targets["carbohydrate_g"] = {
+                    **carbohydrate,
+                    "target_type": "AMDR",
+                    "range_low": round(resolved_energy * 0.45 / 4.0, 2),
+                    "range_high": round(resolved_energy * 0.65 / 4.0, 2),
+                    "generic_reference": False,
+                    "derived_from_energy_target": True,
+                }
+            else:
+                fallback = _GENERIC_REFERENCE_TARGETS["carbohydrate_g"]
+                targets["carbohydrate_g"] = {
+                    **carbohydrate,
+                    **fallback,
+                    "nutrient_name": (_LABELS.get("carbohydrate_g") or ("Carbohydrate", ""))[0],
+                    "status": "generic_reference",
+                    "generic_reference": True,
+                }
+                fallback_keys.add("carbohydrate_g")
+
+    for key, fallback in _GENERIC_REFERENCE_TARGETS.items():
+        if _target_has_comparison_value(targets.get(key)):
+            continue
+        targets[key] = {
+            **fallback,
+            "nutrient_name": (_LABELS.get(key) or (key, ""))[0],
+            "status": "generic_reference",
+            "generic_reference": True,
+        }
+        fallback_keys.add(key)
+    return targets, fallback_keys
 
 
 def _target_value(target: dict[str, Any]) -> float | None:
@@ -211,7 +352,7 @@ def _contributors(
 ) -> list[dict[str, Any]]:
     rows: list[tuple[float, str, str, float, str]] = []
     for food in foods:
-        value = _number((food.get("nutrients") or {}).get(nutrient_key)) or 0.0
+        value = _canonical_nutrients(food.get("nutrients")).get(nutrient_key, 0.0)
         if value <= 0:
             continue
         name = str(food.get("display_name") or food.get("name") or "Food")
@@ -360,7 +501,7 @@ def build_draft_meal_guidance(
     )
     fraction = _meal_fraction(meal_name)
     target_result = calculate_nutrient_targets(normalized_profile)
-    targets = target_result.get("targets", {})
+    targets, fallback_target_keys = _effective_targets(target_result.get("targets", {}))
     alerts: list[dict[str, Any]] = []
     clinical_keys = {
         key
@@ -426,6 +567,7 @@ def build_draft_meal_guidance(
         ):
             continue
         label, unit = _label_and_unit(key, target)
+        generic_reference = bool(target.get("generic_reference"))
         exceeds_daily = daily_ratio > 1.0
         displayed_amount = (
             projected_amount if exceeds_daily or above_protein_target else draft_amount
@@ -456,11 +598,19 @@ def build_draft_meal_guidance(
                 1,
             ),
             "message": (
-                f"With this draft, today's total exceeds your personalized daily upper target for {label.lower()}."
+                f"With this draft, today's total exceeds the daily upper reference for {label.lower()}."
+                if exceeds_daily and generic_reference
+                else f"With this draft, today's total exceeds your personalized daily upper target for {label.lower()}."
                 if exceeds_daily
+                else f"With this draft, today's total is above the daily protein reference; "
+                "this is guidance, not a medical safety limit."
+                if above_protein_target and generic_reference
                 else f"With this draft, today's total is above your personalized daily protein target; "
                 "that target is an intake reference, not a medical safety limit."
                 if above_protein_target
+                else f"{label} is above this meal's estimated share of the general daily reference range; "
+                "the meal share is guidance, not a medical upper limit."
+                if generic_reference
                 else f"{label} is above this meal's estimated share of the personalized daily range; "
                 "the meal share is guidance, not a medical upper limit."
             ),
@@ -492,11 +642,11 @@ def build_draft_meal_guidance(
             continue
         amount = max(0.0, projected_totals.get(key, 0.0))
         ratio = amount / cap
-        if ratio < 0.50:
+        if ratio <= 1.0:
             continue
         target = targets.get(key) if isinstance(targets, dict) else None
         label, unit = _label_and_unit(key, target)
-        severity = "critical" if ratio >= 1.0 else "warning"
+        severity = "critical"
         alerts.append({
             "direction": "excess",
             "severity": severity,
@@ -506,11 +656,7 @@ def build_draft_meal_guidance(
             "unit": unit,
             "reference": round(cap, 2),
             "percentage": round(ratio * 100.0, 1),
-            "message": (
-                f"With this draft, today's total exceeds the personalized daily limit for {label.lower()}."
-                if ratio >= 1.0
-                else f"With this draft, today reaches {ratio * 100:.0f}% of the daily {label.lower()} limit."
-            ),
+            "message": f"With this draft, today's total exceeds the daily limit for {label.lower()}.",
             "contributors": _contributors(foods, key),
             "suggestions": _suggestions(
                 nutrient_key=key,
@@ -557,6 +703,7 @@ def build_draft_meal_guidance(
         if ratio >= 0.80:
             continue
         label, unit = _label_and_unit(key, target)
+        generic_reference = bool(target.get("generic_reference"))
         alert = {
             "direction": "low",
             "severity": "notice",
@@ -567,7 +714,10 @@ def build_draft_meal_guidance(
             "reference": round(expected, 2),
             "percentage": round(ratio * 100.0, 1),
             "message": (
-                f"{label} is low for this meal's {fraction * 100:.0f}% share of the personalized daily target; "
+                f"{label} is low for this meal's {fraction * 100:.0f}% share of the general daily reference; "
+                "this is not a diagnosis of a daily deficiency."
+                if generic_reference
+                else f"{label} is low for this meal's {fraction * 100:.0f}% share of the personalized daily target; "
                 "this is not a diagnosis of a daily deficiency."
             ),
             "contributors": _contributors(foods, key),
@@ -606,6 +756,8 @@ def build_draft_meal_guidance(
             "today_history_reported_nutrients": len(history_reported),
             "projected_day_totals_used_for_excess": True,
             "shortfalls_included": include_shortfalls,
+            "generic_reference_targets_used": sorted(fallback_target_keys),
+            "personalized_targets_preferred_when_available": True,
             "uses_selected_usda_or_label_values": True,
             "unreported_nutrients_treated_as_low": False,
         },
