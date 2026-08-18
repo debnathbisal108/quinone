@@ -27,7 +27,7 @@ from recommendation_engine import (
 )
 
 
-GUIDANCE_ENGINE_VERSION = "1.6.0"
+GUIDANCE_ENGINE_VERSION = "1.7.0"
 
 _LABELS: dict[str, tuple[str, str]] = {
     "energy_kcal": ("Energy", "kcal"),
@@ -256,6 +256,26 @@ def _effective_targets(raw_targets: Any) -> tuple[dict[str, dict[str, Any]], set
     }
     fallback_keys: set[str] = set()
 
+    # A resolved energy estimate is a central estimate, not a hard cap.  Give
+    # it the same +/-10% balance range used by the post-analysis recommender so
+    # genuinely excessive energy can be flagged without treating the exact EER
+    # as a limit.
+    energy = targets.get("energy_kcal")
+    if isinstance(energy, dict) and energy.get("status") != "requires_clinical_input":
+        has_energy_range = (
+            (_number(energy.get("range_low")) or 0.0) > 0
+            and (_number(energy.get("range_high")) or 0.0) > 0
+        )
+        resolved_energy = _number(energy.get("resolved_value"))
+        if not has_energy_range and resolved_energy is not None and resolved_energy > 0:
+            targets["energy_kcal"] = {
+                **energy,
+                "target_type": "reference_range",
+                "range_low": round(resolved_energy * 0.90, 2),
+                "range_high": round(resolved_energy * 1.10, 2),
+                "derived_from_energy_estimate": True,
+            }
+
     # A carbohydrate RDA is a minimum reference, not an upper edge.  The target
     # registry currently exposes 130 g/day as the RDA even when the user's
     # energy target is known.  Using that value as a meal "high" threshold
@@ -310,6 +330,23 @@ def _effective_targets(raw_targets: Any) -> tuple[dict[str, dict[str, Any]], set
 
 
 def _target_value(target: dict[str, Any]) -> float | None:
+    # For a true range/AMDR the lower edge is the shortfall reference.  Some
+    # target-engine records also retain an RDA/AI in resolved_value (notably
+    # carbohydrate), and using that first can hide a genuine meal shortfall.
+    target_type = str(target.get("target_type") or "").lower()
+    range_low = _number(target.get("range_low"))
+    range_high = _number(target.get("range_high"))
+    if (
+        range_low is not None
+        and range_low > 0
+        and (range_high is not None and range_high > 0)
+        and (
+            "range" in target_type
+            or "amdr" in target_type
+            or target_type == ""
+        )
+    ):
+        return range_low
     for key in ("resolved_value", "range_low", "baseline_value"):
         value = _number(target.get(key))
         if value is not None and value > 0:
@@ -531,89 +568,68 @@ def build_draft_meal_guidance(
             "suggestions": [],
         })
 
-    # Macronutrients are checked against both the meal allocation and a real
-    # personalized daily range edge. The range edge is used only when the
-    # target engine actually supplies one; a minimum/RDA is never converted
-    # into a fabricated upper limit.
+    # Macro excesses use the projected DAY total, not an arbitrary per-meal
+    # allocation.  The old 30% meal-share check could keep an orange
+    # "exceeded" card alive even after the adjusted amount was below the
+    # displayed daily reference.  A meal-share remains useful for shortfall
+    # guidance below, but it is not an upper limit.
+    #
+    # Range nutrients (energy/carbohydrate/fat) use their real upper range
+    # edge. Protein normally has a minimum/reference rather than a medical UL;
+    # for optional balance guidance only, allow a 20% buffer above that daily
+    # reference, matching the post-analysis recommendation engine.
     for key in _MACRO_ORDER:
         if key not in reported or key in clinical_keys:
             continue
         target = targets.get(key) if isinstance(targets, dict) else None
         if not isinstance(target, dict):
             continue
-        allocation_high = _target_high(target)
-        if allocation_high is None:
+
+        daily_high = _actual_upper_target(target)
+        protein_reference = False
+        if key == "protein_g" and daily_high is None:
+            protein_base = _target_value(target)
+            if protein_base is not None and protein_base > 0:
+                daily_high = protein_base * 1.20
+                protein_reference = True
+
+        # Fiber and any other minimum-only macro have no upper edge and must
+        # not be called excessive merely for exceeding a meal allocation.
+        if daily_high is None or daily_high <= 0:
             continue
-        actual_daily_high = _actual_upper_target(target)
-        expected_high = allocation_high * fraction
-        draft_amount = max(0.0, draft_totals.get(key, 0.0))
+
         projected_amount = max(0.0, projected_totals.get(key, 0.0))
-        daily_ratio = (
-            projected_amount / actual_daily_high
-            if actual_daily_high is not None and actual_daily_high > 0
-            else 0.0
-        )
-        daily_reference_ratio = projected_amount / allocation_high
-        meal_ratio = draft_amount / expected_high if expected_high > 0 else 0.0
-        above_protein_target = (
-            key == "protein_g"
-            and actual_daily_high is None
-            and daily_reference_ratio > 1.0
-        )
-        if (
-            daily_ratio <= 1.0
-            and not above_protein_target
-            and meal_ratio <= 1.0
-        ):
+        ratio = projected_amount / daily_high
+        if ratio <= 1.0:
             continue
+
         label, unit = _label_and_unit(key, target)
         generic_reference = bool(target.get("generic_reference"))
-        exceeds_daily = daily_ratio > 1.0
-        displayed_amount = (
-            projected_amount if exceeds_daily or above_protein_target else draft_amount
-        )
+        if protein_reference:
+            message = (
+                f"With this draft, today's total is above the general daily protein guidance reference; "
+                "this is balance guidance, not a medical upper limit."
+                if generic_reference
+                else f"With this draft, today's total is above your personalized daily protein guidance reference; "
+                "this is balance guidance, not a medical upper limit."
+            )
+        else:
+            message = (
+                f"With this draft, today's total exceeds the daily upper reference for {label.lower()}."
+                if generic_reference
+                else f"With this draft, today's total exceeds your personalized daily upper target for {label.lower()}."
+            )
+
         alerts.append({
             "direction": "excess",
-            "severity": "critical" if exceeds_daily else "warning",
+            "severity": "critical" if not protein_reference else "warning",
             "nutrient": key,
             "label": label,
-            "amount": round(displayed_amount, 2),
+            "amount": round(projected_amount, 2),
             "unit": unit,
-            "reference": round(
-                actual_daily_high
-                if exceeds_daily
-                else allocation_high
-                if above_protein_target
-                else expected_high,
-                2,
-            ),
-            "percentage": round(
-                (
-                    daily_ratio
-                    if exceeds_daily
-                    else daily_reference_ratio
-                    if above_protein_target
-                    else meal_ratio
-                ) * 100.0,
-                1,
-            ),
-            "message": (
-                f"With this draft, today's total exceeds the daily upper reference for {label.lower()}."
-                if exceeds_daily and generic_reference
-                else f"With this draft, today's total exceeds your personalized daily upper target for {label.lower()}."
-                if exceeds_daily
-                else f"With this draft, today's total is above the daily protein reference; "
-                "this is guidance, not a medical safety limit."
-                if above_protein_target and generic_reference
-                else f"With this draft, today's total is above your personalized daily protein target; "
-                "that target is an intake reference, not a medical safety limit."
-                if above_protein_target
-                else f"{label} is above this meal's estimated share of the general daily reference range; "
-                "the meal share is guidance, not a medical upper limit."
-                if generic_reference
-                else f"{label} is above this meal's estimated share of the personalized daily range; "
-                "the meal share is guidance, not a medical upper limit."
-            ),
+            "reference": round(daily_high, 2),
+            "percentage": round(ratio * 100.0, 1),
+            "message": message,
             "contributors": _contributors(foods, key),
             "suggestions": _suggestions(
                 nutrient_key=key,
@@ -668,6 +684,15 @@ def build_draft_meal_guidance(
                 projected_totals=projected_totals,
             ),
         })
+
+    # Defensive invariant: an excess card must never leave the backend with a
+    # value already at/below its own displayed reference.  This also protects
+    # clients from stale or mixed target-shape edge cases.
+    alerts = [
+        alert for alert in alerts
+        if alert.get("direction") != "excess"
+        or (_number(alert.get("percentage")) or 0.0) > 100.0
+    ]
 
     excess_nutrients = {
         str(alert.get("nutrient"))
