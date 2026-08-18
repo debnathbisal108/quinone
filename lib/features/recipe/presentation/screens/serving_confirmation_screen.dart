@@ -141,6 +141,7 @@ class _ServingConfirmationScreenState
         name: _items[i]['name']?.toString() ?? 'Packaged food',
         quantity: quantity,
         unit: _items[i]['unit']?.toString() ?? 'serving',
+        backendFoodId: _items[i]['food_id']?.toString(),
       ));
     }
     return foods;
@@ -150,7 +151,9 @@ class _ServingConfirmationScreenState
     var changed = false;
     for (var i = 0; i < _items.length; i++) {
       final name = _items[i]['name']?.toString() ?? 'Packaged food';
-      final quantity = quantities[_guidanceFoodKey(name)];
+      final foodId = _items[i]['food_id']?.toString().trim() ?? '';
+      final quantity = (foodId.isEmpty ? null : quantities[_guidanceFoodKey(foodId)]) ??
+          quantities[_guidanceFoodKey(name)];
       if (quantity == null || quantity <= 0) continue;
       final current = double.tryParse(_controllers[i].text.trim());
       if (current != null && (current - quantity).abs() < 0.0001) continue;
@@ -213,6 +216,16 @@ class _ServingConfirmationScreenState
         guidance: guidance,
         analysisCheckpoint: analysisCheckpoint,
         adjustableFoods: _guidanceAdjustableFoods(),
+        suggestionsLoader: guidance.suggestionsPending
+            ? () => _service.evaluateGuidanceSuggestions(
+                  analysisId: analysisId,
+                  items: items,
+                  profile: ref.read(profileProvider).backendPayload,
+                  todayResults: _todayResultsForGuidance(),
+                  includeShortfalls: analysisCheckpoint,
+                  localHour: DateTime.now().hour,
+                )
+            : null,
       );
       if (!mounted) return false;
       if (result.action == DraftMealGuidanceAction.searchSuggestion) {
