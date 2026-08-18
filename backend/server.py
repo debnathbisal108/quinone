@@ -43,7 +43,7 @@ from personalization_engine import (
 from nutrient_target_engine import (
     attach_nutrient_targets,
 )
-from draft_meal_guidance import build_draft_meal_guidance
+from draft_meal_guidance import build_draft_meal_guidance, apply_personalized_guidance_safety
 from recommendation_engine import apply_recommendation, recommend_after_analysis
 
 
@@ -355,13 +355,14 @@ async def evaluate_draft_meal_guidance(
         )
     try:
         nutrient_result, effective_profile = await _draft_guidance_nutrient_result(request)
-        return build_draft_meal_guidance(
+        guidance = build_draft_meal_guidance(
             nutrient_result,
             profile=effective_profile,
             local_hour=request.local_hour,
             today_results=request.today_results,
             include_shortfalls=request.include_shortfalls,
         )
+        return await apply_personalized_guidance_safety(guidance, nutrient_result, profile=effective_profile)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
