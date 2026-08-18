@@ -107,6 +107,38 @@ class ServingConfirmationService {
     return DraftMealGuidance.fromJson(_asMap(response.data));
   }
 
+  Future<DraftMealGuidance> evaluateGuidanceSuggestions({
+    required String analysisId,
+    required List<Map<String, dynamic>> items,
+    Map<String, dynamic>? profile,
+    List<Map<String, dynamic>> todayResults = const [],
+    bool includeShortfalls = true,
+    int? localHour,
+  }) async {
+    final response = await _dio.post<dynamic>(
+      _absoluteUrl(ApiConfig.draftMealGuidanceSuggestionsEndpoint),
+      data: jsonEncode({
+        'recipe_name': 'Packaged meal',
+        'ingredients': const <Map<String, dynamic>>[],
+        'servings_made': 1.0,
+        'servings_eaten': 1.0,
+        'analysis_id': analysisId,
+        'label_items': items,
+        if (todayResults.isNotEmpty) 'today_results': todayResults,
+        'include_shortfalls': includeShortfalls,
+        if (profile != null && profile.isNotEmpty) 'profile': profile,
+        'local_hour': localHour ?? DateTime.now().hour,
+      }),
+      options: Options(
+        responseType: ResponseType.json,
+        contentType: Headers.jsonContentType,
+        headers: const {'Accept': 'application/json'},
+        receiveTimeout: const Duration(seconds: 60),
+      ),
+    );
+    return DraftMealGuidance.fromJson(_asMap(response.data));
+  }
+
   Map<String, dynamic> _asMap(dynamic value) {
     if (value is Map<String, dynamic>) return value;
     if (value is Map) return Map<String, dynamic>.from(value);
