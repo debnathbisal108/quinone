@@ -22,6 +22,8 @@ class AnalysisJobProgress {
         'failed',
         'cancelled',
         'waiting_for_back_label',
+        'waiting_for_meal_confirmation',
+        'waiting_for_serving_confirmation',
         'no_food_detected',
       }.contains(status);
 
