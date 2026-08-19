@@ -48,15 +48,16 @@ class ImageGrid extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 6),
-        Text(
-          images.length == 1
-              ? 'Add more angles when ingredients are hidden.'
-              : 'Drag images to change their order.',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
+        if (images.length > 1) ...[
+          Text(
+            'Drag images to change their order.',
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
           ),
-        ),
-        const SizedBox(height: 14),
+          const SizedBox(height: 14),
+        ] else
+          const SizedBox(height: 8),
         ReorderableListView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
