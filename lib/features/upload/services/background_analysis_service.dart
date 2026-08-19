@@ -33,13 +33,13 @@ class BackgroundAnalysisService {
 
   void initialize() {
     FlutterForegroundTask.init(
-      androidNotificationOptions: const AndroidNotificationOptions(
+      androidNotificationOptions: AndroidNotificationOptions(
         channelId: 'quinone_meal_analysis',
         channelName: 'Meal analysis',
         channelDescription: 'Shows meal-analysis progress while Quinone is in the background.',
         onlyAlertOnce: true,
       ),
-      iosNotificationOptions: const IOSNotificationOptions(
+      iosNotificationOptions: IOSNotificationOptions(
         showNotification: true,
         playSound: false,
       ),
