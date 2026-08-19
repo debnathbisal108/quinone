@@ -28,14 +28,8 @@ class _RiskRecommendationsScreenState
     extends ConsumerState<RiskRecommendationsScreen> {
   final _service = RecommendationService();
   PostAnalysisRecommendations? _recommendations;
-  bool _loading = true;
+  bool _loading = false;
   String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    Future<void>.microtask(_loadRecommendations);
-  }
 
   Future<void> _loadRecommendations() async {
     final records = ref.read(analysisHistoryProvider);
@@ -127,9 +121,9 @@ class _RiskRecommendationsScreenState
           ),
           const SizedBox(height: 6),
           Text(
-            'Options are recalculated from your latest logged meal, current '
-            'scores, personalized targets, dietary pattern, allergies, and '
-            'health profile. USDA data is resolved when you select a food.',
+            'Food options are calculated only when you ask, using your latest '
+            'logged meal, personalized targets, dietary pattern, allergies, '
+            'health profile, and USDA-verified nutrition data.',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
@@ -139,6 +133,12 @@ class _RiskRecommendationsScreenState
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 28),
               child: Center(child: CircularProgressIndicator()),
+            )
+          else if (_recommendations == null && _error == null)
+            FilledButton.icon(
+              onPressed: _loadRecommendations,
+              icon: const Icon(Icons.restaurant_menu_rounded),
+              label: const Text('Find food options'),
             )
           else if (_error != null)
             _RecommendationError(
