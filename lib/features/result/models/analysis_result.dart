@@ -460,6 +460,7 @@ class PersonalizedNutrientTarget {
     required this.rangeLow,
     required this.rangeHigh,
     required this.upperLimit,
+    required this.upperLimitScope,
     required this.requiredInputs,
     required this.warnings,
     required this.overrideChain,
@@ -476,6 +477,7 @@ class PersonalizedNutrientTarget {
   final double? rangeLow;
   final double? rangeHigh;
   final double? upperLimit;
+  final String? upperLimitScope;
   final List<String> requiredInputs;
   final List<String> warnings;
   final List<String> overrideChain;
@@ -503,6 +505,7 @@ class PersonalizedNutrientTarget {
       rangeLow: _nullableNumber(json['range_low']),
       rangeHigh: _nullableNumber(json['range_high']),
       upperLimit: _nullableNumber(json['upper_limit']),
+      upperLimitScope: json['upper_limit_scope']?.toString(),
       requiredInputs: _stringList(json['required_inputs']),
       warnings: _stringList(json['warnings']),
       overrideChain: _stringList(json['override_chain']),
@@ -726,6 +729,10 @@ class FoodSummary {
     required this.ingredientNames,
     required this.isComposite,
     required this.carbohydrateComposition,
+    this.fdcId,
+    this.usdaMatch,
+    this.preparation,
+    this.quantityBasis,
   });
 
   final String? id;
@@ -739,6 +746,10 @@ class FoodSummary {
   final Set<String> ingredientNames;
   final bool isComposite;
   final Map<String, double> carbohydrateComposition;
+  final int? fdcId;
+  final String? usdaMatch;
+  final String? preparation;
+  final String? quantityBasis;
 
   String get identity {
     final normalizedId = id?.trim();
@@ -755,6 +766,10 @@ class FoodSummary {
   factory FoodSummary.fromJson(Map<String, dynamic> json) {
     final features =
         _asMap(json['features']) ?? const <String, dynamic>{};
+    final resolver =
+        _asMap(json['resolver']) ?? const <String, dynamic>{};
+    final nutrientBasis =
+        _asMap(json['nutrient_basis']) ?? const <String, dynamic>{};
 
     final weightGrams = _number(
       json['estimated_weight_g'] ??
@@ -829,6 +844,21 @@ class FoodSummary {
           analysisRoute == 'DECOMPOSE' ||
           analysisRoute == 'COMPOSITE',
       carbohydrateComposition: Map.unmodifiable(carbohydrateComposition),
+      fdcId: _nullableNumber(
+        resolver['fdc_id'] ?? nutrientBasis['fdc_id'],
+      )?.round(),
+      usdaMatch: _firstText(
+        <String, dynamic>{...nutrientBasis, ...resolver},
+        const ['matched_name', 'matched_description', 'description'],
+      ),
+      preparation: _firstText(
+        <String, dynamic>{...nutrientBasis, ...json},
+        const ['preparation'],
+      ),
+      quantityBasis: _firstText(
+        <String, dynamic>{...nutrientBasis, ...json},
+        const ['quantity_basis'],
+      ),
     );
   }
 }
