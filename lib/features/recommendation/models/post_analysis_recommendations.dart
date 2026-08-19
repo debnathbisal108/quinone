@@ -62,6 +62,7 @@ class FoodRecommendation {
     required this.combinedMeal,
     required this.nutrientEffects,
     required this.warnings,
+    required this.rawPayload,
   });
 
   final String id;
@@ -84,6 +85,7 @@ class FoodRecommendation {
   final bool combinedMeal;
   final List<RecommendationNutrientEffect> nutrientEffects;
   final List<String> warnings;
+  final Map<String, dynamic> rawPayload;
 
   String get actionLabel {
     switch (action) {
@@ -146,6 +148,7 @@ class FoodRecommendation {
       warnings: warnings is List
           ? warnings.map((item) => item.toString()).toList(growable: false)
           : const [],
+      rawPayload: Map<String, dynamic>.unmodifiable(json),
     );
   }
 }
