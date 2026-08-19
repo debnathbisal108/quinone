@@ -20,7 +20,7 @@ from recommendation_candidate_provider import (
 )
 
 
-RECOMMENDATION_ENGINE_VERSION = "2.6.1"
+RECOMMENDATION_ENGINE_VERSION = "2.7.0"
 RECOMMENDATION_APPLY_CONTRACT_VERSION = 2
 
 _FALLBACK_TARGETS: dict[str, dict[str, Any]] = {
@@ -1640,6 +1640,31 @@ async def recommend_after_analysis(
         fallback_candidates=FOOD_RECOMMENDATION_CATALOG,
     )
 
+    # Dynamic USDA/Gemini discovery remains primary, but a successful dynamic
+    # batch can still be too narrow for the particular evidence rules driving
+    # the weakest domain. Supplement (never replace) it with distinct curated
+    # candidates so a 200 response is much less likely to contain zero useful
+    # options. No extra Gemini call is made for this supplement.
+    dynamic_pool = list(candidate_pool)
+    dynamic_count = len(dynamic_pool)
+    seen_candidate_ids = {
+        str(item.get("fdc_id") or item.get("id") or item.get("name") or "").lower()
+        for item in dynamic_pool
+    }
+    for fallback in FOOD_RECOMMENDATION_CATALOG:
+        identity = str(fallback.get("fdc_id") or fallback.get("id") or fallback.get("name") or "").lower()
+        if identity in seen_candidate_ids:
+            continue
+        dynamic_pool.append(fallback)
+        seen_candidate_ids.add(identity)
+        if len(dynamic_pool) >= 24:
+            break
+    candidate_pool = dynamic_pool
+    if isinstance(candidate_provider, dict):
+        candidate_provider["curated_supplement_used"] = len(candidate_pool) > dynamic_count
+        candidate_provider["supplemented_candidate_count"] = max(0, len(candidate_pool) - dynamic_count)
+        candidate_provider["evaluated_candidate_count"] = len(candidate_pool)
+
     evaluated: list[dict[str, Any]] = []
     soft_domain_candidates: list[dict[str, Any]] = []
     candidate_index = 0
@@ -1784,14 +1809,14 @@ async def recommend_after_analysis(
                 old, new, target_delta = _domain_delta(
                     before_domains, after_domains, target_key
                 )
-                if target_delta <= 0.05:
+                if target_delta <= 0.005:
                     continue
                 collateral = _collateral_decline(before_domains, after_domains, target_key)
                 if collateral > 3.0:
                     continue
                 # If the module is being held down by an excess, an addition
                 # must show a strong direct gain; otherwise reduction is safer.
-                if reduction_first and target_delta < 2.0:
+                if reduction_first and target_delta < 0.50:
                     continue
                 after_overall, _ = _overall_score(simulated)
                 after_totals = _sum_nutrients(simulated_foods)
