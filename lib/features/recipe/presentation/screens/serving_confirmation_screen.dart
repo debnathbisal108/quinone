@@ -182,6 +182,7 @@ class _ServingConfirmationScreenState
   Future<bool> _evaluateGuidance({
     required bool analysisCheckpoint,
   }) async {
+    if (!analysisCheckpoint) return true;
     if (!_guidanceEnabled) return true;
     final analysisId = widget.payload['analysis_id']?.toString().trim() ?? '';
     final items = _confirmedItems();
