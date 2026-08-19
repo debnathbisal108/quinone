@@ -90,11 +90,6 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       });
     }
     _loadSaved();
-    if (widget.photoReview && _ingredients.isNotEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _evaluateGuidance(analysisCheckpoint: false);
-      });
-    }
   }
 
   @override
@@ -290,7 +285,6 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       _ingredients = copy;
       _draftRevision += 1;
     });
-    await _evaluateGuidance(analysisCheckpoint: false);
   }
 
   ManualRecipe? _buildRecipe() => _buildRecipeWithIngredients(_ingredients);
@@ -572,7 +566,6 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       _ingredients = [...recipe.ingredients];
       _draftRevision += 1;
     });
-    await _evaluateGuidance(analysisCheckpoint: false);
   }
 
   @override
