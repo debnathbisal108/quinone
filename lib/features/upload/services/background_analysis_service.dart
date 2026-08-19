@@ -79,7 +79,6 @@ class BackgroundAnalysisService {
 
     await FlutterForegroundTask.startService(
       serviceId: 7319,
-      serviceTypes: const [ForegroundServiceTypes.dataSync],
       notificationTitle: 'Analyzing meal',
       notificationText: 'Starting analysis…',
       notificationInitialRoute: '/splash',
@@ -319,5 +318,5 @@ class _BackgroundAnalysisTaskHandler extends TaskHandler {
   }
 
   @override
-  Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {}
+  Future<void> onDestroy(DateTime timestamp) async {}
 }
