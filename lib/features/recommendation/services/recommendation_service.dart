@@ -20,6 +20,8 @@ class RecommendationService {
 
   final Dio _dio;
 
+  static final Map<String, Future<PostAnalysisRecommendations>> _requestCache = {};
+
   Future<PostAnalysisRecommendations> afterAnalysis({
     required Map<String, dynamic> currentResult,
     required List<Map<String, dynamic>> todayResults,
@@ -37,7 +39,23 @@ class RecommendationService {
       if (preferredDomainKeys.isNotEmpty)
         'preferred_domain_keys': preferredDomainKeys,
     };
+    final cacheKey = jsonEncode(payload);
+    final cached = _requestCache[cacheKey];
+    if (cached != null) return cached;
 
+    final request = _fetchAfterAnalysis(payload);
+    _requestCache[cacheKey] = request;
+    try {
+      return await request;
+    } catch (_) {
+      _requestCache.remove(cacheKey);
+      rethrow;
+    }
+  }
+
+  Future<PostAnalysisRecommendations> _fetchAfterAnalysis(
+    Map<String, dynamic> payload,
+  ) async {
     try {
       final response = await _dio.post<dynamic>(
         _absoluteUrl(ApiConfig.postAnalysisRecommendationEndpoint),
@@ -46,7 +64,7 @@ class RecommendationService {
           responseType: ResponseType.json,
           contentType: Headers.jsonContentType,
           headers: const {'Accept': 'application/json'},
-          receiveTimeout: const Duration(minutes: 2),
+          receiveTimeout: const Duration(seconds: 45),
         ),
       );
       final data = response.data;
@@ -79,6 +97,7 @@ class RecommendationService {
     required Map<String, dynamic> currentResult,
     required List<Map<String, dynamic>> todayResults,
     required String recommendationId,
+    Map<String, dynamic>? recommendation,
     Map<String, dynamic>? profile,
     int? localHour,
   }) async {
@@ -86,6 +105,8 @@ class RecommendationService {
       'current_result': currentResult,
       'today_results': todayResults,
       'recommendation_id': recommendationId,
+      if (recommendation != null && recommendation.isNotEmpty)
+        'recommendation': recommendation,
       if (profile != null && profile.isNotEmpty) 'profile': profile,
       'local_hour': localHour ?? DateTime.now().hour,
     };
