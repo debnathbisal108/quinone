@@ -27,7 +27,7 @@ from recommendation_engine import (
 )
 
 
-GUIDANCE_ENGINE_VERSION = "2.2.0"
+GUIDANCE_ENGINE_VERSION = "2.3.0"
 
 _LABELS: dict[str, tuple[str, str]] = {
     "energy_kcal": ("Energy", "kcal"),
@@ -814,8 +814,15 @@ def build_draft_meal_guidance(
         str(item.get("name") or "").strip().lower(): item
         for item in duplicate_candidates
     }
-    for alert in alerts:
-        filtered = []
+    # A food may solve several shortfalls, but repeating it under multiple
+    # nutrient cards is confusing and can encourage the user to add the same
+    # food more than once. First remove foods already in the meal, then solve a
+    # small one-food-per-alert matching problem so one nutrient card does not
+    # greedily consume every useful alternative before another card gets one.
+    suggestion_options: dict[int, list[tuple[str, dict[str, Any]]]] = {}
+    for alert_index, alert in enumerate(alerts):
+        options: list[tuple[str, dict[str, Any]]] = []
+        seen_within_alert: set[str] = set()
         for suggestion in alert.get("suggestions", []) or []:
             if not isinstance(suggestion, dict):
                 continue
@@ -825,8 +832,68 @@ def build_draft_meal_guidance(
             )
             if candidate is not None and _candidate_already_present(candidate, foods):
                 continue
-            filtered.append(suggestion)
-        alert["suggestions"] = filtered
+            if candidate is not None:
+                identity = str(
+                    candidate.get("id")
+                    or candidate.get("fdc_id")
+                    or candidate.get("name")
+                    or candidate.get("search_query")
+                    or ""
+                ).strip().lower()
+            else:
+                identity = str(
+                    suggestion.get("name") or suggestion.get("search_query") or ""
+                ).strip().lower()
+            if not identity or identity in seen_within_alert:
+                continue
+            seen_within_alert.add(identity)
+            options.append((identity, suggestion))
+        suggestion_options[alert_index] = options
+
+    food_owner: dict[str, int] = {}
+    primary_identity: dict[int, str] = {}
+
+    def _claim_unique_food(alert_index: int, visited: set[str]) -> bool:
+        for identity, _ in suggestion_options.get(alert_index, []):
+            if identity in visited:
+                continue
+            visited.add(identity)
+            previous_owner = food_owner.get(identity)
+            if previous_owner is None or _claim_unique_food(previous_owner, visited):
+                food_owner[identity] = alert_index
+                primary_identity[alert_index] = identity
+                if previous_owner is not None:
+                    primary_identity.pop(previous_owner, None)
+                return True
+        return False
+
+    # Cards with fewer alternatives are matched first. Percentage is the
+    # tie-breaker so the most deficient cards get the strongest protection.
+    match_order = sorted(
+        (idx for idx, options in suggestion_options.items() if options),
+        key=lambda idx: (
+            len(suggestion_options[idx]),
+            float(alerts[idx].get("percentage") or 100.0),
+        ),
+    )
+    for alert_index in match_order:
+        _claim_unique_food(alert_index, set())
+
+    used_foods = set(primary_identity.values())
+    for alert_index, alert in enumerate(alerts):
+        options = suggestion_options.get(alert_index, [])
+        selected: list[dict[str, Any]] = []
+        primary = primary_identity.get(alert_index)
+        if primary is not None:
+            selected.extend(suggestion for identity, suggestion in options if identity == primary)
+        for identity, suggestion in options:
+            if identity == primary or identity in used_foods:
+                continue
+            selected.append(suggestion)
+            used_foods.add(identity)
+            if len(selected) >= 3:
+                break
+        alert["suggestions"] = selected
 
     severity_order = {"critical": 0, "warning": 1, "notice": 2}
     alerts.sort(key=lambda item: severity_order.get(str(item.get("severity")), 9))
