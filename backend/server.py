@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -232,6 +233,36 @@ class DraftMealGuidanceRequest(ManualRecipeRequest):
     local_hour: int = Field(default=12, ge=0, le=23)
 
 
+
+# Same unchanged meal/profile state must not spend Gemini credits repeatedly.
+# Cache complete post-analysis recommendation responses in-process; the key
+# includes the meal, today's history, profile, hour bucket and request options.
+_RECOMMENDATION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_RECOMMENDATION_CACHE_TTL_S = 30 * 60
+_RECOMMENDATION_CACHE_MAX = 128
+
+def _recommendation_cache_key(request: "PostAnalysisRecommendationRequest") -> str:
+    payload = request.model_dump(mode="json") if hasattr(request, "model_dump") else request.dict()
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+def _recommendation_cache_get(key: str) -> dict[str, Any] | None:
+    now = time.time()
+    row = _RECOMMENDATION_CACHE.get(key)
+    if row is None:
+        return None
+    created, value = row
+    if now - created > _RECOMMENDATION_CACHE_TTL_S:
+        _RECOMMENDATION_CACHE.pop(key, None)
+        return None
+    return copy.deepcopy(value)
+
+def _recommendation_cache_put(key: str, value: dict[str, Any]) -> None:
+    if len(_RECOMMENDATION_CACHE) >= _RECOMMENDATION_CACHE_MAX:
+        oldest = min(_RECOMMENDATION_CACHE.items(), key=lambda item: item[1][0])[0]
+        _RECOMMENDATION_CACHE.pop(oldest, None)
+    _RECOMMENDATION_CACHE[key] = (time.time(), copy.deepcopy(value))
+
 @app.post("/recommendations/after-analysis")
 @app.post("/api/v1/recommendations/after-analysis", include_in_schema=False)
 async def post_analysis_recommendations(
@@ -239,7 +270,12 @@ async def post_analysis_recommendations(
 ) -> dict[str, Any]:
     """Recommend a safe change targeted to this meal's weakest domain."""
     try:
-        return await recommend_after_analysis(
+        cache_key = _recommendation_cache_key(request)
+        cached = _recommendation_cache_get(cache_key)
+        if cached is not None:
+            cached["cache"] = {"hit": True, "ttl_seconds": _RECOMMENDATION_CACHE_TTL_S}
+            return cached
+        result = await recommend_after_analysis(
             current_result=request.current_result,
             today_results=request.today_results,
             profile=request.profile,
@@ -247,6 +283,9 @@ async def post_analysis_recommendations(
             maximum_results=request.maximum_results,
             preferred_domain_keys=request.preferred_domain_keys,
         )
+        result["cache"] = {"hit": False, "ttl_seconds": _RECOMMENDATION_CACHE_TTL_S}
+        _recommendation_cache_put(cache_key, result)
+        return result
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:
