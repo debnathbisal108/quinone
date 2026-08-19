@@ -98,6 +98,7 @@ class _DraftMealGuidanceSheetState
   late DraftMealGuidance _guidance;
   bool _loadingSuggestions = false;
   bool _suggestionsLoadFailed = false;
+  bool _suggestionsRequested = false;
   String? _selectedSuggestionQuery;
 
   @override
@@ -110,11 +111,6 @@ class _DraftMealGuidanceSheetState
     _quantities = {
       for (final food in widget.adjustableFoods) food.key: food.quantity,
     };
-    if (_guidance.suggestionsPending && widget.suggestionsLoader != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _loadSuggestions();
-      });
-    }
   }
 
   Future<void> _loadSuggestions() async {
@@ -124,6 +120,7 @@ class _DraftMealGuidanceSheetState
     setState(() {
       _loadingSuggestions = true;
       _suggestionsLoadFailed = false;
+      _suggestionsRequested = true;
     });
     try {
       final enriched = await loader().timeout(const Duration(seconds: 35));
@@ -307,13 +304,19 @@ class _DraftMealGuidanceSheetState
                   ),
                   pendingFoodAddition: widget.pendingFoodAddition,
                   selectedSuggestionQuery: _selectedSuggestionQuery,
-                  suggestionsLoading: !_suggestionsLoadFailed &&
-                      (_guidance.suggestionsPending || _loadingSuggestions) &&
+                  suggestionsLoading: _loadingSuggestions &&
                       alert.isLow &&
                       alert.suggestions.isEmpty,
                   suggestionsLoadFailed: _suggestionsLoadFailed &&
                       alert.isLow &&
                       alert.suggestions.isEmpty,
+                  suggestionsRequested: _suggestionsRequested,
+                  onFindSuggestions: alert.isLow &&
+                          alert.suggestions.isEmpty &&
+                          widget.suggestionsLoader != null &&
+                          (!_suggestionsRequested || _suggestionsLoadFailed)
+                      ? _loadSuggestions
+                      : null,
                   onSelectPendingSuggestion: (query) => setState(() {
                     _selectedSuggestionQuery = query;
                   }),
@@ -409,6 +412,8 @@ class _NutrientAlertCard extends StatelessWidget {
     required this.selectedSuggestionQuery,
     required this.suggestionsLoading,
     required this.suggestionsLoadFailed,
+    required this.suggestionsRequested,
+    required this.onFindSuggestions,
     required this.onSelectPendingSuggestion,
   });
 
@@ -426,6 +431,8 @@ class _NutrientAlertCard extends StatelessWidget {
   final String? selectedSuggestionQuery;
   final bool suggestionsLoading;
   final bool suggestionsLoadFailed;
+  final bool suggestionsRequested;
+  final VoidCallback? onFindSuggestions;
   final ValueChanged<String> onSelectPendingSuggestion;
 
   @override
@@ -620,9 +627,31 @@ class _NutrientAlertCard extends StatelessWidget {
                 color: scheme.onSurfaceVariant,
               ),
             ),
+            if (onFindSuggestions != null) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: onFindSuggestions,
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('Try food suggestions again'),
+              ),
+            ],
           ],
           if (alert.isLow &&
               alert.suggestions.isEmpty &&
+              !suggestionsLoading &&
+              !suggestionsLoadFailed &&
+              !alert.requiresClinicalInput &&
+              onFindSuggestions != null) ...[
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: onFindSuggestions,
+              icon: const Icon(Icons.restaurant_menu_rounded),
+              label: const Text('Find foods for low nutrients'),
+            ),
+          ],
+          if (alert.isLow &&
+              alert.suggestions.isEmpty &&
+              suggestionsRequested &&
               !suggestionsLoading &&
               !suggestionsLoadFailed &&
               !alert.requiresClinicalInput) ...[
