@@ -126,7 +126,7 @@ class _DraftMealGuidanceSheetState
       _suggestionsLoadFailed = false;
     });
     try {
-      final enriched = await loader();
+      final enriched = await loader().timeout(const Duration(seconds: 35));
       if (!mounted) return;
       setState(() {
         _guidance = enriched;
@@ -330,13 +330,15 @@ class _DraftMealGuidanceSheetState
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text(
-                  _guidance.disclaimer,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
+                if (_guidance.disclaimer.trim().isNotEmpty) ...[
+                  Text(
+                    _guidance.disclaimer,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 10),
+                  const SizedBox(height: 10),
+                ],
                 Row(
                   children: [
                     Expanded(
