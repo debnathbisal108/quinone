@@ -35,12 +35,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
     final today = _todayRecords(records);
     final calories = today.fold<double>(0, (sum, item) => sum + item.calories);
-    final protein = today.fold<double>(0, (sum, item) => sum + item.protein);
-    final todayInsight = NutritionInsights.fromRecords(
+    final todayNutrition = NutritionInsights.fromRecords(
       records,
       const Duration(days: 1),
-    ).dailyInsights;
+    );
+    final todayInsight = todayNutrition.dailyInsights;
     final daily = todayInsight.isEmpty ? null : todayInsight.last;
+    final todayNutrients = daily == null
+        ? const <_TodayNutrientItem>[]
+        : _todayNutrientItems(todayNutrition, daily);
+    final balancedNutrients = todayNutrients
+        .where((item) => item.state == BalanceState.balanced)
+        .length;
+    final highNutrients = todayNutrients
+        .where((item) => item.state == BalanceState.high)
+        .length;
+    final lowNutrients = todayNutrients
+        .where((item) => item.state == BalanceState.low)
+        .length;
     final health = daily == null || daily.overallHealthScore <= 0
         ? null
         : daily.overallHealthScore;
@@ -113,18 +125,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       ),
                       const SizedBox(width: 14),
                       Expanded(
-                        child: _StatCard(
-                          title: 'Protein',
-                          value: today.isEmpty ? '--' : protein.toStringAsFixed(1),
-                          suffix: today.isEmpty ? null : 'g',
-                          icon: Icons.fitness_center_rounded,
-                          color: Colors.green,
-                          onTap: today.isEmpty
+                        child: _NutrientSummaryCard(
+                          balanced: balancedNutrients,
+                          high: highNutrients,
+                          low: lowNutrients,
+                          enabled: daily != null,
+                          onTap: daily == null
                               ? null
-                              : () => _showTodaySummaryBreakdown(
+                              : () => _showTodayNutrients(
                                     context,
-                                    type: _TodaySummaryType.protein,
-                                    records: today,
+                                    insights: todayNutrition,
+                                    day: daily,
                                   ),
                         ),
                       ),
@@ -424,6 +435,273 @@ class _StatCard extends StatelessWidget {
     );
   }
 }
+
+
+class _NutrientSummaryCard extends StatelessWidget {
+  const _NutrientSummaryCard({
+    required this.balanced,
+    required this.high,
+    required this.low,
+    required this.enabled,
+    this.onTap,
+  });
+
+  final int balanced;
+  final int high;
+  final int low;
+  final bool enabled;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Material(
+      color: theme.colorScheme.surfaceContainerLow,
+      borderRadius: BorderRadius.circular(22),
+      child: InkWell(
+        onTap: enabled ? onTap : null,
+        borderRadius: BorderRadius.circular(22),
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: theme.colorScheme.outlineVariant),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  CircleAvatar(
+                    backgroundColor: Colors.teal.withOpacity(0.12),
+                    child: const Icon(Icons.balance_rounded, color: Colors.teal),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    'Nutrients',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              if (!enabled)
+                const Text('--')
+              else ...[
+                Text('$balanced well balanced', style: theme.textTheme.labelLarge),
+                const SizedBox(height: 3),
+                Text('$high above target', style: theme.textTheme.labelLarge),
+                const SizedBox(height: 3),
+                Text('$low needs more', style: theme.textTheme.labelLarge),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TodayNutrientItem {
+  const _TodayNutrientItem({
+    required this.category,
+    required this.key,
+    required this.label,
+    required this.value,
+    required this.unit,
+    required this.state,
+    required this.target,
+    required this.contributors,
+  });
+
+  final InsightCategory category;
+  final String key;
+  final String label;
+  final double value;
+  final String unit;
+  final BalanceState state;
+  final NutrientTargetBand? target;
+  final List<FoodMetricContribution> contributors;
+}
+
+List<_TodayNutrientItem> _todayNutrientItems(
+  NutritionInsights insights,
+  DailyNutritionInsight day,
+) {
+  final result = <_TodayNutrientItem>[];
+  for (final category in const [
+    InsightCategory.macros,
+    InsightCategory.micronutrients,
+  ]) {
+    final keys = category == InsightCategory.macros
+        ? insights.macroKeys
+        : insights.micronutrientKeys;
+    for (final key in keys) {
+      final value = day.metricValue(category, key);
+      final target = insights.targetForDay(day, key);
+      if (value == null) continue;
+      final state = target?.classify(value) ?? BalanceState.unknown;
+      result.add(
+        _TodayNutrientItem(
+          category: category,
+          key: key,
+          label: friendlyMetricName(key),
+          value: value,
+          unit: target == null || target.unit.isEmpty ? unitForMetric(key) : target.unit,
+          state: state,
+          target: target,
+          contributors: day.contributorsFor(category, key),
+        ),
+      );
+    }
+  }
+  result.sort((a, b) => a.label.compareTo(b.label));
+  return result;
+}
+
+void _showTodayNutrients(
+  BuildContext context, {
+  required NutritionInsights insights,
+  required DailyNutritionInsight day,
+}) {
+  final items = _todayNutrientItems(insights, day);
+  final groups = <BalanceState, List<_TodayNutrientItem>>{
+    BalanceState.low: items.where((i) => i.state == BalanceState.low).toList(),
+    BalanceState.balanced: items.where((i) => i.state == BalanceState.balanced).toList(),
+    BalanceState.high: items.where((i) => i.state == BalanceState.high).toList(),
+    BalanceState.unknown: items.where((i) => i.state == BalanceState.unknown).toList(),
+  };
+
+  showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    useSafeArea: true,
+    isScrollControlled: true,
+    builder: (sheetContext) {
+      final theme = Theme.of(sheetContext);
+      return DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.82,
+        minChildSize: 0.50,
+        maxChildSize: 0.95,
+        builder: (context, controller) => ListView(
+          controller: controller,
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 30),
+          children: [
+            Text(
+              "Today's nutrients",
+              style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              '${groups[BalanceState.balanced]!.length} well balanced · '
+              '${groups[BalanceState.high]!.length} above target · '
+              '${groups[BalanceState.low]!.length} needs more',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 20),
+            _TodayNutrientGroup(
+              title: 'Needs more',
+              items: groups[BalanceState.low]!,
+            ),
+            const SizedBox(height: 20),
+            _TodayNutrientGroup(
+              title: 'Well balanced',
+              items: groups[BalanceState.balanced]!,
+            ),
+            const SizedBox(height: 20),
+            _TodayNutrientGroup(
+              title: 'Above target',
+              items: groups[BalanceState.high]!,
+            ),
+            if (groups[BalanceState.unknown]!.isNotEmpty) ...[
+              const SizedBox(height: 20),
+              _TodayNutrientGroup(
+                title: 'Reference unavailable',
+                items: groups[BalanceState.unknown]!,
+              ),
+            ],
+          ],
+        ),
+      );
+    },
+  );
+}
+
+class _TodayNutrientGroup extends StatelessWidget {
+  const _TodayNutrientGroup({required this.title, required this.items});
+
+  final String title;
+  final List<_TodayNutrientItem> items;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+        const SizedBox(height: 10),
+        if (items.isEmpty)
+          Text('None', style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant))
+        else
+          ...items.map((item) {
+            final reference = item.target?.reference ?? item.target?.high ?? item.target?.low;
+            final highest = item.contributors.isEmpty ? null : item.contributors.first;
+            final lowest = item.contributors.isEmpty ? null : item.contributors.last;
+            return Container(
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerLow,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: theme.colorScheme.outlineVariant),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(child: Text(item.label, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800))),
+                      Text('${_homeCompact(item.value)} ${item.unit}', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+                    ],
+                  ),
+                  if (reference != null && reference > 0) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      'Reference ${_homeCompact(reference)} ${item.unit} · ${(item.value / reference * 100).round()}%',
+                      style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                    ),
+                  ],
+                  if (highest != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      highest == lowest
+                          ? 'Only contributor: ${highest.foodName} · ${highest.percentage.toStringAsFixed(0)}%'
+                          : 'Highest: ${highest.foodName} · ${highest.percentage.toStringAsFixed(0)}%',
+                      style: theme.textTheme.bodySmall,
+                    ),
+                    if (lowest != null && lowest != highest)
+                      Text(
+                        'Lowest: ${lowest.foodName} · ${lowest.percentage.toStringAsFixed(0)}%',
+                        style: theme.textTheme.bodySmall,
+                      ),
+                  ],
+                ],
+              ),
+            );
+          }),
+      ],
+    );
+  }
+}
+
+String _homeCompact(double value) => value == value.roundToDouble()
+    ? value.toStringAsFixed(0)
+    : value.toStringAsFixed(value.abs() < 10 ? 2 : 1);
 
 class _RecentMealCard extends StatelessWidget {
   const _RecentMealCard({required this.record, required this.onTap});
