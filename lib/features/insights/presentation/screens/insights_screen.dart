@@ -2,8 +2,13 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../../history/models/analysis_history_record.dart';
 import '../../../history/providers/analysis_history_provider.dart';
+import '../../../profile/providers/profile_provider.dart';
+import '../../../recommendation/models/post_analysis_recommendations.dart';
+import '../../../recommendation/services/recommendation_service.dart';
 import '../../models/nutrition_insights.dart';
 
 class InsightsScreen extends ConsumerStatefulWidget {
@@ -18,6 +23,50 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
   InsightCategory _category = InsightCategory.health;
   String _metricKey = 'overall';
   DailyNutritionInsight? _selectedDay;
+  final RecommendationService _recommendationService = RecommendationService();
+  PostAnalysisRecommendations? _recommendations;
+  bool _recommendationsLoading = false;
+  String? _recommendationsError;
+  String? _recommendationsForAnalysisId;
+
+  Future<void> _ensureRecommendations(List<AnalysisHistoryRecord> records) async {
+    if (records.isEmpty || _recommendationsLoading) return;
+    final sorted = [...records]..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final latest = sorted.first;
+    if (_recommendationsForAnalysisId == latest.analysisId) return;
+    _recommendationsForAnalysisId = latest.analysisId;
+    if (mounted) setState(() {
+      _recommendationsLoading = true;
+      _recommendationsError = null;
+    });
+    try {
+      if (ref.read(profileProvider).isLoading) {
+        await ref.read(profileProvider.notifier).loadProfile();
+      }
+      final sameDay = sorted
+          .where((record) => _sameInsightDay(record.createdAt, latest.createdAt))
+          .where((record) => record.analysisId != latest.analysisId)
+          .map((record) => Map<String, dynamic>.from(record.rawResult))
+          .toList(growable: false);
+      final value = await _recommendationService.afterAnalysis(
+        currentResult: Map<String, dynamic>.from(latest.rawResult),
+        todayResults: sameDay,
+        profile: ref.read(profileProvider).backendPayload,
+        localHour: latest.createdAt.toLocal().hour,
+      );
+      if (!mounted) return;
+      setState(() {
+        _recommendations = value;
+        _recommendationsLoading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _recommendationsLoading = false;
+        _recommendationsError = error.toString();
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -27,6 +76,11 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
       Duration(days: _days),
     );
     final theme = Theme.of(context);
+    if (records.isNotEmpty && !_recommendationsLoading) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _ensureRecommendations(records);
+      });
+    }
 
     final availableMetrics = _metricsFor(insights, _category);
     if (!availableMetrics.any((item) => item.$1 == _metricKey)) {
@@ -177,6 +231,21 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
               insights: insights,
               category: _category,
             ),
+            const SizedBox(height: 28),
+            _InsightRecommendationSection(
+              loading: _recommendationsLoading,
+              error: _recommendationsError,
+              recommendations: _recommendations,
+              category: _category,
+              metricKey: _metricKey,
+              onAdd: (item) {
+                context.push('/recipe', extra: {
+                  'recommendation_query': item.searchQuery,
+                  'recommendation_name': item.foodName,
+                  'recommendation_quantity': item.quantity,
+                });
+              },
+            ),
             if (insights.topFoodNames.isNotEmpty) ...[
               const SizedBox(height: 28),
               const _SectionTitle('Most frequent foods'),
@@ -204,6 +273,103 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
                     .toList(growable: false),
               ),
             ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+
+bool _sameInsightDay(DateTime a, DateTime b) {
+  final x = a.toLocal();
+  final y = b.toLocal();
+  return x.year == y.year && x.month == y.month && x.day == y.day;
+}
+
+class _InsightRecommendationSection extends StatelessWidget {
+  const _InsightRecommendationSection({
+    required this.loading,
+    required this.error,
+    required this.recommendations,
+    required this.category,
+    required this.metricKey,
+    required this.onAdd,
+  });
+
+  final bool loading;
+  final String? error;
+  final PostAnalysisRecommendations? recommendations;
+  final InsightCategory category;
+  final String metricKey;
+  final ValueChanged<FoodRecommendation> onAdd;
+
+  bool _matches(FoodRecommendation item) {
+    if (metricKey.isEmpty || metricKey == 'overall') return true;
+    if (category == InsightCategory.health) {
+      return item.targetDomain?.key == metricKey;
+    }
+    return item.nutrientEffects.any((effect) => effect.nutrient == metricKey);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final all = recommendations?.items ?? const <FoodRecommendation>[];
+    final relevant = all.where(_matches).toList(growable: false);
+    final source = relevant.isNotEmpty ? relevant : all;
+    final add = source.where((item) => item.action == 'add').take(4).toList();
+    final reduce = source.where((item) => item.action == 'adjust_portion').take(4).toList();
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('What to change', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
+          const SizedBox(height: 5),
+          Text(
+            'Recommendations are reused for the unchanged analysis. Switching health, macros, or micronutrients does not call Gemini again.',
+            style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+          if (loading) ...[
+            const SizedBox(height: 14),
+            const LinearProgressIndicator(),
+          ] else if (error != null) ...[
+            const SizedBox(height: 12),
+            Text(error!, style: TextStyle(color: theme.colorScheme.error)),
+          ] else ...[
+            const SizedBox(height: 16),
+            Text('To add', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 8),
+            if (add.isEmpty)
+              Text('No verified addition is currently available for this selection.', style: theme.textTheme.bodyMedium)
+            else
+              ...add.map((item) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const CircleAvatar(child: Icon(Icons.add_rounded)),
+                    title: Text(item.foodName, style: const TextStyle(fontWeight: FontWeight.w800)),
+                    subtitle: Text('${item.quantity.toStringAsFixed(item.quantity == item.quantity.roundToDouble() ? 0 : 1)} ${item.unit} · ${item.reason}'),
+                    trailing: const Icon(Icons.chevron_right_rounded),
+                    onTap: () => onAdd(item),
+                  )),
+            const SizedBox(height: 12),
+            Text('To reduce', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 8),
+            if (reduce.isEmpty)
+              Text('No food needs a verified reduction for this selection.', style: theme.textTheme.bodyMedium)
+            else
+              ...reduce.map((item) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const CircleAvatar(child: Icon(Icons.remove_rounded)),
+                    title: Text(item.foodName, style: const TextStyle(fontWeight: FontWeight.w800)),
+                    subtitle: Text(item.reason),
+                  )),
           ],
         ],
       ),
