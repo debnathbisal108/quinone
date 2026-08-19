@@ -1,10 +1,15 @@
-"""Dynamic recommendation-candidate discovery for Quinone.
+"""Deterministic USDA-backed recommendation candidate discovery for Quinone.
 
-Gemini is used only as a *query planner*: it proposes diverse single-food ideas
-that fit the meal context. Every proposed food must then resolve to a real USDA
-FoodData Central record, and all nutrient/scoring/safety decisions are made by
-Quinone's deterministic pipeline. The small curated catalogue is retained only
-as a resilient fallback when Gemini or USDA discovery is unavailable.
+Recommendation discovery deliberately does NOT call any LLM.
+Quinone maintains a broad internal base of ordinary single-food identities and
+search metadata. For each request, this module selects a relevant, diverse
+subset, resolves those foods against USDA FoodData Central, hydrates authoritative
+nutrient values, and returns only verified candidates. The recommendation engine
+then applies all diet/allergy/medical/personalization gates and full meal-score
+simulation before anything is shown.
+
+The small legacy curated catalogue remains only as an outage fallback when USDA
+verification cannot provide a usable pool.
 """
 
 from __future__ import annotations
@@ -12,94 +17,24 @@ from __future__ import annotations
 import asyncio
 import copy
 import inspect
-import json
 import logging
 import os
 import re
 from typing import Any, Iterable
 
 from nutrient_profile import attach_nutrients
+from recommendation_food_base import RECOMMENDATION_FOOD_BASE
 from usda_recipe_service import search_usda_foods
 
 logger = logging.getLogger("quinone.recommendation_candidates")
 
-DYNAMIC_CANDIDATE_PROVIDER_VERSION = "1.3.0"
-
-_ENABLE_DYNAMIC = os.environ.get(
-    "ENABLE_DYNAMIC_RECOMMENDATION_DISCOVERY", "true"
-).strip().lower() in {"1", "true", "yes", "on"}
-_GEMINI_MODEL = (
-    os.environ.get("GEMINI_RECOMMENDATION_MODEL", "").strip()
-    or os.environ.get("GEMINI_MEAL_MODEL", "").strip()
-    or "gemini-3.5-flash"
-)
-_MAX_IDEAS = max(6, min(int(os.environ.get("RECOMMENDATION_IDEA_COUNT", "16")), 24))
-
-_IDEA_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "foods": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "usda_search_query": {"type": "string"},
-                    "serving_g": {"type": "number"},
-                    "meal_roles": {
-                        "type": "array",
-                        "items": {
-                            "type": "string",
-                            "enum": [
-                                "breakfast", "lunch", "dinner", "snack",
-                                "dessert", "side", "topping",
-                            ],
-                        },
-                    },
-                },
-                "required": [
-                    "name", "usda_search_query", "serving_g", "meal_roles",
-                ],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["foods"],
-    "additionalProperties": False,
-}
-
+DYNAMIC_CANDIDATE_PROVIDER_VERSION = "2.0.0"
 
 _PREPARATION_TOKENS = {
     "raw", "cooked", "boiled", "steamed", "roasted", "baked", "fried",
     "fresh", "frozen", "dried", "dry", "plain", "unsalted", "salted",
     "without", "with", "prepared", "ready", "eat", "whole", "chopped",
 }
-
-# Conservative identity-based allergen enrichment. This is not the sole safety
-# gate; the recommendation engine still applies profile restrictions and full
-# nutrient/domain simulation. It prevents an LLM omission from being the only
-# thing standing between a clearly allergenic whole food and an allergy profile.
-
-_COMMON_ENGLISH_ALIASES: dict[str, str] = {
-    "rajma": "Kidney beans",
-    "rajmah": "Kidney beans",
-    "chana": "Chickpeas",
-    "kabuli chana": "Chickpeas",
-    "moong": "Mung beans",
-    "moong dal": "Mung beans",
-    "mung dal": "Mung beans",
-    "bhindi": "Okra",
-    "brinjal": "Eggplant",
-    "aubergine": "Eggplant",
-    "capsicum": "Bell pepper",
-    "groundnut": "Peanuts",
-}
-
-
-def _common_english_display_name(value: Any) -> str:
-    cleaned = re.sub(r"\s+", " ", str(value or "").strip())
-    key = re.sub(r"[^a-z0-9 ]+", "", cleaned.lower()).strip()
-    return _COMMON_ENGLISH_ALIASES.get(key, cleaned)
 
 _ALLERGEN_TERMS: dict[str, tuple[str, ...]] = {
     "milk": ("milk", "yogurt", "yoghurt", "cheese", "paneer", "whey", "casein"),
@@ -121,6 +56,52 @@ _ALLERGEN_TERMS: dict[str, tuple[str, ...]] = {
     "sesame": ("sesame", "tahini"),
 }
 
+# Health-domain hints are ONLY a cheap pre-search prioritization device. They do
+# not decide whether a food helps a module; the normal evidence/scoring
+# simulation makes that decision after USDA hydration.
+_DOMAIN_NUTRIENT_HINTS: dict[str, tuple[str, ...]] = {
+    "glycemic": ("fiber_g", "magnesium_mg", "protein_g"),
+    "blood_sugar": ("fiber_g", "magnesium_mg", "protein_g"),
+    "metabolic": ("fiber_g", "magnesium_mg", "potassium_mg", "protein_g"),
+    "cardiovascular": ("fiber_g", "potassium_mg", "magnesium_mg", "omega3_g"),
+    "heart": ("fiber_g", "potassium_mg", "magnesium_mg", "omega3_g"),
+    "blood_pressure": ("potassium_mg", "magnesium_mg", "fiber_g"),
+    "bone": ("calcium_mg", "vitamin_d_ug", "protein_g", "magnesium_mg"),
+    "musculoskeletal": ("protein_g", "calcium_mg", "vitamin_d_ug", "magnesium_mg"),
+    "healthy_aging": ("protein_g", "calcium_mg", "vitamin_d_ug", "magnesium_mg"),
+    "joint": ("omega3_g", "vitamin_c_mg", "protein_g"),
+    "arthritis": ("omega3_g", "vitamin_c_mg"),
+    "immune": ("vitamin_c_mg", "zinc_mg", "selenium_ug", "vitamin_d_ug"),
+    "hepatic": ("fiber_g", "omega3_g", "magnesium_mg"),
+    "liver": ("fiber_g", "omega3_g", "magnesium_mg"),
+    "renal": ("fiber_g", "vitamin_c_mg"),
+    "kidney": ("fiber_g", "vitamin_c_mg"),
+    "brain": ("omega3_g", "folate_ug", "vitamin_b12_ug", "magnesium_mg"),
+    "cognitive": ("omega3_g", "folate_ug", "vitamin_b12_ug"),
+    "gut": ("fiber_g",),
+    "digestive": ("fiber_g",),
+}
+
+_NUTRIENT_ALIASES: dict[str, str] = {
+    "carbohydrates_g": "carbohydrate_g",
+    "carbs_g": "carbohydrate_g",
+    "total_fat_g": "fat_g",
+    "sat_fat_g": "saturated_fat_g",
+    "saturated_fat": "saturated_fat_g",
+    "added_sugar_g": "added_sugars_g",
+    "vitamin_b12_mcg": "vitamin_b12_ug",
+    "b12_ug": "vitamin_b12_ug",
+    "folate_ug_dfe": "folate_ug",
+    "vitamin_a_ug_rae": "vitamin_a_ug",
+    "vitamin_d_mcg": "vitamin_d_ug",
+    "selenium_mcg": "selenium_ug",
+}
+
+
+
+def _usda_discovery_available() -> bool:
+    key = os.environ.get("USDA_API_KEY", "").strip().lower()
+    return bool(key) and key not in {"test", "mock", "dummy", "replace_with_your_usda_api_key"}
 
 def _number(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
@@ -130,6 +111,11 @@ def _number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed == parsed and parsed not in {float("inf"), float("-inf")} else None
+
+
+def _canonical_nutrient(value: Any) -> str:
+    key = re.sub(r"\s+", "_", str(value or "").strip().lower())
+    return _NUTRIENT_ALIASES.get(key, key)
 
 
 def _normalized_tokens(value: Any) -> set[str]:
@@ -150,23 +136,36 @@ def _already_present(description: str, current_foods: Iterable[dict[str, Any]]) 
             for key in ("canonical_name", "display_name", "name")
         )
         existing = _normalized_tokens(text)
-        # Requiring a meaningful overlap is intentionally conservative for
-        # single-ingredient recommendations: recommending another form of an
-        # already logged food is usually less useful than offering variety.
-        if candidate & existing:
+        if not existing:
+            continue
+        # Exact/subset identity catches "Blueberries" vs "Blueberries, raw";
+        # for multi-token names require a strong overlap to avoid treating e.g.
+        # green beans and kidney beans as the same food merely because both say beans.
+        overlap = candidate & existing
+        smaller = min(len(candidate), len(existing))
+        if smaller == 1 and overlap:
+            if candidate == existing:
+                return True
+            # A single distinctive token is safe only if either normalized name
+            # is literally contained in the other string.
+            ctext = " ".join(sorted(candidate))
+            etext = " ".join(sorted(existing))
+            if ctext in etext or etext in ctext:
+                return True
+        elif smaller > 1 and len(overlap) / smaller >= 0.75:
             return True
     return False
 
 
 def _diet_tags(food_group: str) -> list[str]:
     group = str(food_group or "").strip().lower()
-    if group == "plant":
+    if group in {"plant", "fruit", "vegetable", "legume", "soy", "grain", "nuts_seeds"}:
         return ["vegan", "vegetarian"]
     if group == "dairy":
         return ["vegetarian"]
     if group == "egg":
         return ["ovo_vegetarian"]
-    if group == "fish":
+    if group in {"fish", "shellfish"}:
         return ["pescatarian"]
     return []
 
@@ -183,7 +182,7 @@ def _inferred_allergens(description: str) -> set[str]:
 def _infer_food_group(description: str) -> str:
     text = str(description or "").lower()
     if any(term in text for term in _ALLERGEN_TERMS["shellfish"]):
-        return "fish"
+        return "shellfish"
     if any(term in text for term in _ALLERGEN_TERMS["fish"]):
         return "fish"
     if re.search(r"\begg(s)?\b", text):
@@ -192,285 +191,94 @@ def _infer_food_group(description: str) -> str:
         return "meat"
     if any(term in text for term in _ALLERGEN_TERMS["milk"]):
         return "dairy"
+    if any(term in text for term in _ALLERGEN_TERMS["soy"]):
+        return "soy"
     return "plant"
 
 
-def _minimal_profile_context(profile: dict[str, Any]) -> dict[str, Any]:
-    """Only send fields that help candidate ideation; medical scoring stays local."""
-    return {
-        key: copy.deepcopy(profile.get(key))
-        for key in (
-            "diet_type", "diet_pattern", "allergies", "intolerances",
-            "food_intolerances", "excluded_foods", "disliked_foods",
-        )
-        if profile.get(key) not in (None, "", [], {})
-    }
-
-
-def _meal_context(current_result: dict[str, Any], current_foods: list[dict[str, Any]]) -> dict[str, Any]:
-    root = current_result
-    for key in ("final_result", "meal_analysis", "data", "result"):
-        nested = root.get(key) if isinstance(root, dict) else None
-        if isinstance(nested, dict) and isinstance(nested.get("meal"), dict):
-            root = nested
-            break
-    meal = root.get("meal", {}) if isinstance(root, dict) else {}
-    return {
-        "meal_type": meal.get("meal_type") or meal.get("meal_name") or "Current meal",
-        "foods_already_present": [
-            str(food.get("display_name") or food.get("name") or food.get("canonical_name") or "")
-            for food in current_foods
-            if str(food.get("display_name") or food.get("name") or food.get("canonical_name") or "").strip()
-        ],
-    }
-
-
-def _planner_prompt(
-    *,
-    current_result: dict[str, Any],
-    current_foods: list[dict[str, Any]],
-    profile: dict[str, Any],
+def _target_hint_set(
     target_domains: list[dict[str, Any]],
     target_nutrients: list[str],
-    local_hour: int,
-    maximum_ideas: int,
-) -> str:
-    context = {
-        "meal": _meal_context(current_result, current_foods),
-        "user_food_constraints": _minimal_profile_context(profile),
-        "target_health_domains": target_domains,
-        "target_nutrients": target_nutrients,
-        "local_hour": max(0, min(int(local_hour), 23)),
-    }
-    return f"""
-You are a food-candidate planner for a nutrition application. Generate up to
-{maximum_ideas} DIVERSE single-food candidates that could plausibly complement
-the current meal and help one or more target nutrients/health domains.
-
-IMPORTANT:
-- You are NOT the nutrition authority and must not provide nutrient numbers.
-- Return ordinary single foods/ingredients, not supplements, medicines,
-  restaurant dishes, proprietary products, recipes, or multi-ingredient meals.
-- Prefer foods that can be resolved in USDA FoodData Central using a short,
-  generic English query. Foods from any cuisine are eligible, but do NOT infer
-  or personalize by country, region, nationality, ethnicity, IP/location,
-  timezone, locale, or cuisine. No geographic context is supplied or allowed.
-- The `name` field MUST be a concise, widely understood American-English common
-  food name. If a regional/local-language name has a standard English identity,
-  use the English identity (for example: kidney beans, chickpeas, mung beans,
-  okra, eggplant, bell pepper, peanuts). Do not use regional vernacular merely
-  because the food is common in a particular country.
-- Do not repeat anything already in foods_already_present, including another
-  preparation of substantially the same food.
-- Respect the supplied diet/allergy/intolerance/excluded-food constraints.
-- Make the list diverse across food groups and food types rather than repeating
-  the same few "healthy foods". Diversity must not be based on an assumed user
-  location or cultural identity.
-- serving_g is only a realistic screening portion; Quinone will verify and
-  simulate it later.
-- Keep usda_search_query concise and generic, e.g. "guava raw", "lentils cooked
-  boiled without salt", "sardines canned in oil drained".
-
-Context JSON:
-{json.dumps(context, ensure_ascii=False, separators=(",", ":"))}
-""".strip()
-
-
-def _strip_json_fence(text: str) -> str:
-    raw = (text or "").strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
-        raw = re.sub(r"\s*```$", "", raw)
-    return raw.strip()
-
-
-def _salvage_food_objects(raw: str) -> list[dict[str, Any]]:
-    """Recover complete food objects from a truncated planner response.
-
-    Structured-output responses can still be cut off by transport/model output
-    limits. A malformed *last* object must not discard all complete candidates
-    that appeared before it. ``JSONDecoder.raw_decode`` lets us consume complete
-    objects one-by-one and stop safely at the first incomplete tail.
-    """
-    key_match = re.search(r'"foods"\s*:\s*\[', raw)
-    if key_match is None:
-        return []
-    decoder = json.JSONDecoder()
-    index = key_match.end()
-    recovered: list[dict[str, Any]] = []
-    while index < len(raw):
-        while index < len(raw) and raw[index] in " \t\r\n,":
-            index += 1
-        if index >= len(raw) or raw[index] == "]":
-            break
-        if raw[index] != "{":
-            # Unexpected planner text inside the array: advance to the next
-            # plausible object boundary rather than failing the whole plan.
-            next_object = raw.find("{", index + 1)
-            if next_object < 0:
-                break
-            index = next_object
-        try:
-            value, next_index = decoder.raw_decode(raw, index)
-        except json.JSONDecodeError:
-            break
-        if isinstance(value, dict):
-            recovered.append(value)
-        index = next_index
-    return recovered
-
-
-def _parse_json_text(text: str) -> dict[str, Any]:
-    """Parse Gemini JSON, preserving complete candidates if the tail is cut."""
-    raw = _strip_json_fence(text)
-    if not raw:
-        raise ValueError("Gemini recommendation planner returned an empty response.")
-
-    # Normal structured-output path.
-    strict_error: json.JSONDecodeError | None = None
-    try:
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            raise ValueError("Gemini recommendation planner returned a non-object response.")
-        return parsed
-    except json.JSONDecodeError as error:
-        strict_error = error
-
-    # Some SDK/model combinations may wrap an otherwise-valid JSON object in a
-    # short prefix/suffix. Prefer the largest complete object before salvage.
-    first_object = raw.find("{")
-    last_object = raw.rfind("}")
-    if 0 <= first_object < last_object:
-        try:
-            parsed = json.loads(raw[first_object:last_object + 1])
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-
-    recovered = _salvage_food_objects(raw)
-    if recovered:
-        logger.warning(
-            "Recovered %d complete Gemini recommendation candidates from a "
-            "truncated/malformed JSON response.",
-            len(recovered),
-        )
-        return {"foods": recovered, "_recovered_from_truncated_json": True}
-
-    # Preserve the original decoder detail for diagnostics while allowing the
-    # caller to retry/fallback without crashing the recommendation endpoint.
-    if strict_error is not None:
-        raise strict_error
-    raise ValueError("Gemini recommendation planner returned invalid JSON.")
-
-
-def _payload_from_gemini_response(response: Any) -> dict[str, Any]:
-    """Prefer the SDK's parsed structured result over reparsing response.text."""
-    parsed = getattr(response, "parsed", None)
-    if isinstance(parsed, dict):
-        return parsed
-    if parsed is not None and hasattr(parsed, "model_dump"):
-        try:
-            dumped = parsed.model_dump()
-            if isinstance(dumped, dict):
-                return dumped
-        except Exception:
-            pass
-    return _parse_json_text(str(getattr(response, "text", "") or ""))
-
-
-def _normalize_planned_ideas(payload: dict[str, Any], maximum_ideas: int) -> list[dict[str, Any]]:
-    raw_foods = payload.get("foods")
-    if not isinstance(raw_foods, list):
-        return []
-    output: list[dict[str, Any]] = []
-    seen_queries: set[str] = set()
-    for item in raw_foods:
+) -> set[str]:
+    hints = {_canonical_nutrient(value) for value in target_nutrients if str(value or "").strip()}
+    for item in target_domains:
         if not isinstance(item, dict):
             continue
-        query = re.sub(r"\s+", " ", str(item.get("usda_search_query") or "").strip())
-        name = re.sub(r"\s+", " ", str(item.get("name") or "").strip())
-        serving = _number(item.get("serving_g"))
-        if len(query) < 2 or len(name) < 2 or serving is None or serving <= 0:
+        text = " ".join(
+            str(item.get(key) or "")
+            for key in ("key", "label", "name", "domain")
+        ).lower()
+        normalized = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+        for token, nutrients in _DOMAIN_NUTRIENT_HINTS.items():
+            if token in normalized:
+                hints.update(nutrients)
+    return hints
+
+
+def _seed_score(seed: dict[str, Any], hints: set[str]) -> float:
+    focus = {_canonical_nutrient(key) for key in seed.get("focus_nutrients", [])}
+    direct = len(focus & hints)
+    # Exact target overlap dominates. A tiny constant means every food remains
+    # eligible for diversity/fallback even if a novel domain has no hint map.
+    return direct * 10.0 + min(len(focus), 5) * 0.05
+
+
+def _selected_seed_ideas(
+    *,
+    current_foods: list[dict[str, Any]],
+    target_domains: list[dict[str, Any]],
+    target_nutrients: list[str],
+    maximum_candidates: int,
+) -> list[dict[str, Any]]:
+    hints = _target_hint_set(target_domains, target_nutrients)
+    ranked = []
+    for index, seed in enumerate(RECOMMENDATION_FOOD_BASE):
+        text = f"{seed.get('name', '')} {seed.get('search_query', '')}"
+        if _already_present(text, current_foods):
             continue
-        qkey = query.lower()
-        if qkey in seen_queries:
+        ranked.append((_seed_score(seed, hints), -index, seed))
+    ranked.sort(reverse=True, key=lambda row: (row[0], row[1]))
+
+    # Search a moderate pool, not all 100+ foods per button tap. Round-robin by
+    # food group keeps the shortlist varied and prevents repetitive berry/nut
+    # suggestions even when many foods share the same target nutrient.
+    search_budget = max(maximum_candidates + 8, min(maximum_candidates * 2, 32))
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    group_order: list[str] = []
+    for _, _, seed in ranked:
+        group = str(seed.get("food_group") or "other")
+        if group not in buckets:
+            buckets[group] = []
+            group_order.append(group)
+        buckets[group].append(seed)
+
+    selected: list[dict[str, Any]] = []
+    cursor = 0
+    while len(selected) < search_budget and any(buckets.values()):
+        group = group_order[cursor % len(group_order)]
+        cursor += 1
+        rows = buckets.get(group) or []
+        if not rows:
+            if cursor > len(group_order) * (search_budget + 2):
+                break
             continue
-        seen_queries.add(qkey)
-        clean = dict(item)
-        clean["usda_search_query"] = query
-        clean["name"] = name
-        clean["serving_g"] = round(max(5.0, min(serving, 500.0)), 1)
-        roles = clean.get("meal_roles")
-        clean["meal_roles"] = roles if isinstance(roles, list) else []
-        output.append(clean)
-        if len(output) >= maximum_ideas:
-            break
-    return output
-
-
-def _generate_ideas_sync(prompt: str, maximum_ideas: int) -> list[dict[str, Any]]:
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key:
-        return []
-    from google import genai
-
-    client = genai.Client(api_key=api_key)
-    last_error: Exception | None = None
-    # One retry is reserved specifically for malformed/empty structured output.
-    # Recommendation discovery is asynchronous, but it still must not spin on
-    # an LLM failure or add unbounded latency.
-    for attempt in range(2):
-        attempt_limit = maximum_ideas if attempt == 0 else min(maximum_ideas, 10)
-        retry_note = "" if attempt == 0 else (
-            "\nRETRY: Keep the JSON extremely compact. Return no prose and no more "
-            f"than {attempt_limit} food objects."
-        )
-        try:
-            response = client.models.generate_content(
-                model=_GEMINI_MODEL,
-                contents=prompt + retry_note,
-                config={
-                    "response_mime_type": "application/json",
-                    "response_json_schema": _IDEA_SCHEMA,
-                    # The compact schema usually consumes far less than this;
-                    # extra headroom prevents the final JSON string being cut.
-                    "max_output_tokens": 8192,
-                    "temperature": 0.35,
-                },
-            )
-            payload = _payload_from_gemini_response(response)
-            ideas = _normalize_planned_ideas(payload, attempt_limit)
-            if ideas:
-                return ideas
-            last_error = ValueError("Gemini planner returned no valid food objects.")
-        except Exception as error:
-            last_error = error
-            if attempt == 0:
-                logger.warning(
-                    "Gemini recommendation planner produced unusable structured "
-                    "output; retrying once with a shorter response: %s",
-                    error,
-                )
-                continue
-    if last_error is not None:
-        raise last_error
-    return []
+        seed = rows.pop(0)
+        selected.append({
+            "seed_id": seed["id"],
+            "name": seed["name"],
+            "usda_search_query": seed["search_query"],
+            "serving_g": seed["serving_g"],
+            "meal_roles": list(seed.get("meal_roles", [])),
+            "food_group": seed.get("food_group"),
+            "diet_tags": list(seed.get("diet_tags", [])),
+            "allergens": list(seed.get("allergens", [])),
+            "focus_nutrients": list(seed.get("focus_nutrients", [])),
+        })
+    return selected
 
 
 async def _search_usda_recommendation_candidate(query: str) -> list[dict[str, Any]]:
-    """Search USDA without assuming a particular service-function revision.
-
-    v24 added ``include_branded`` and ``validation_pool_size`` to
-    ``search_usda_foods``. Incremental deployments can legitimately contain a
-    newer dynamic candidate provider beside the older v23 search service.
-    Recommendation discovery must degrade gracefully in that case rather than
-    falling back solely because of a Python signature mismatch.
-
-    On the modern service we keep the optimized non-branded, small validation
-    pool. On the legacy service we request a few results and filter branded
-    records below.
-    """
+    """Search USDA across both current and older service signatures."""
     kwargs: dict[str, Any] = {"limit": 1}
     try:
         signature = inspect.signature(search_usda_foods)
@@ -484,42 +292,30 @@ async def _search_usda_recommendation_candidate(query: str) -> list[dict[str, An
         if accepts_kwargs or "validation_pool_size" in parameters:
             kwargs["validation_pool_size"] = 3
         if "include_branded" not in kwargs:
-            # Legacy searches return generic foods first, followed by branded
-            # foods. Ask for a few so a usable generic record is still likely
-            # to survive the provider-side branded filter.
             kwargs["limit"] = 3
     except (TypeError, ValueError):
-        # Some test doubles / wrapped callables do not expose a reliable
-        # signature. The common v23 contract is always safe.
         kwargs = {"limit": 3}
 
     try:
         return await search_usda_foods(query, **kwargs)
     except TypeError as error:
-        message = str(error)
-        if "unexpected keyword argument" not in message:
+        if "unexpected keyword argument" not in str(error):
             raise
-        # Last-resort compatibility for a runtime whose callable signature was
-        # obscured by a wrapper. Never let an optional optimization kwarg break
-        # recommendation discovery.
         logger.warning(
-            "USDA search contract mismatch; retrying recommendation candidate "
-            "verification with legacy arguments only: %s",
+            "USDA search contract mismatch; retrying recommendation verification "
+            "with legacy arguments only: %s",
             error,
         )
         return await search_usda_foods(query, limit=3)
 
 
-async def _resolve_idea_searches(ideas: list[dict[str, Any]]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+async def _resolve_idea_searches(
+    ideas: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     if not ideas:
         return []
     searches = await asyncio.gather(
-        *[
-            _search_usda_recommendation_candidate(
-                str(idea["usda_search_query"]),
-            )
-            for idea in ideas
-        ],
+        *[_search_usda_recommendation_candidate(str(idea["usda_search_query"])) for idea in ideas],
         return_exceptions=True,
     )
     resolved: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -537,8 +333,6 @@ async def _resolve_idea_searches(ideas: list[dict[str, Any]]) -> list[tuple[dict
             None,
         )
         if candidate is None:
-            # Branded candidates are not used for generic recommendation
-            # discovery; the user's normal manual search can still find them.
             continue
         fdc_id = int(candidate["fdc_id"])
         if fdc_id in seen_fdc:
@@ -557,7 +351,7 @@ async def _attach_usda_per100(
     for index, (_, match) in enumerate(resolved, start=1):
         fdc_id = int(match["fdc_id"])
         foods.append({
-            "id": f"dynamic_candidate_{index:03d}",
+            "id": f"recommendation_candidate_{index:03d}",
             "name": match.get("display_name") or match.get("description"),
             "display_name": match.get("display_name") or match.get("description"),
             "canonical_name": match.get("description"),
@@ -577,15 +371,12 @@ async def _attach_usda_per100(
                 "data_type": match.get("data_type"),
                 "match_query": match.get("description"),
                 "confidence": 1.0,
-                "source": "dynamic_recommendation_usda",
+                "source": "recommendation_food_base_usda",
             },
         })
     attached = await attach_nutrients({
         "status": "completed",
-        "meal": {
-            "meal_type": "Recommendation candidate verification",
-            "foods": foods,
-        },
+        "meal": {"meal_type": "Recommendation candidate verification", "foods": foods},
     })
     output: dict[int, dict[str, Any]] = {}
     for food in attached.get("meal", {}).get("foods", []):
@@ -599,15 +390,19 @@ async def _attach_usda_per100(
     return output
 
 
-def _fallback_result(fallback_candidates: Iterable[dict[str, Any]], reason: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _fallback_result(
+    fallback_candidates: Iterable[dict[str, Any]],
+    reason: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     return (
         [copy.deepcopy(item) for item in fallback_candidates],
         {
             "provider_version": DYNAMIC_CANDIDATE_PROVIDER_VERSION,
-            "mode": "curated_fallback",
+            "mode": "legacy_curated_fallback",
             "reason": reason,
-            "gemini_model": None,
-            "ideas_generated": 0,
+            "llm_used": False,
+            "internal_food_base_size": len(RECOMMENDATION_FOOD_BASE),
+            "internal_candidates_searched": 0,
             "usda_verified_candidates": 0,
         },
     )
@@ -618,13 +413,7 @@ async def rehydrate_usda_candidate(
     *,
     serving_g: float = 100.0,
 ) -> dict[str, Any] | None:
-    """Rebuild a dynamic candidate from its exact FDC id for apply/revalidation.
-
-    No client-supplied nutrient values, diet tags, or allergen tags are trusted.
-    The USDA record is fetched through the existing shared detail/cache path and
-    the simple-food group/allergen metadata is inferred conservatively from the
-    authoritative description.
-    """
+    """Rebuild a recommendation candidate from its exact FDC id."""
     from usda_recipe_service import get_usda_food_detail
 
     try:
@@ -663,7 +452,7 @@ async def rehydrate_usda_candidate(
             "data_type": data_type,
             "match_query": description,
             "confidence": 1.0,
-            "source": "dynamic_recommendation_usda",
+            "source": "recommendation_food_base_usda",
         },
     }
     attached = await attach_nutrients({
@@ -680,7 +469,7 @@ async def rehydrate_usda_candidate(
         if isinstance(value, (int, float)) and not isinstance(value, bool)
     }
     return {
-        "id": f"dynamic_fdc_{numeric_id}",
+        "id": f"internal_fdc_{numeric_id}",
         "fdc_id": numeric_id,
         "name": description,
         "search_query": description,
@@ -689,7 +478,7 @@ async def rehydrate_usda_candidate(
         "diet_tags": _diet_tags(group),
         "allergens": sorted(_inferred_allergens(description)),
         "nutrients": nutrients,
-        "candidate_source": "gemini_usda_dynamic",
+        "candidate_source": "internal_usda_verified",
         "food_group": group,
         "data_type": data_type,
         "food_category": str(detail.get("foodCategory") or "").strip() or None,
@@ -708,46 +497,24 @@ async def discover_recommendation_candidates(
     maximum_candidates: int = 16,
     fallback_candidates: Iterable[dict[str, Any]] = (),
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Discover a context-specific USDA-backed candidate pool.
+    """Return a diverse context-relevant pool verified against USDA.
 
-    The returned candidate format intentionally matches recommendation_catalog
-    so the existing deterministic eligibility, upper-limit, compatibility and
-    full evidence/scoring simulation logic can be reused unchanged.
+    ``current_result``, ``profile`` and ``local_hour`` are accepted to preserve
+    the stable provider contract. Candidate *safety* is intentionally not
+    decided here; the recommendation engine/guidance safety layer handles it.
     """
-    if not _ENABLE_DYNAMIC:
-        return _fallback_result(fallback_candidates, "dynamic_discovery_disabled")
-    if not os.environ.get("GEMINI_API_KEY", "").strip():
-        return _fallback_result(fallback_candidates, "gemini_api_key_unavailable")
-
+    del current_result, profile, local_hour
+    if not _usda_discovery_available():
+        return _fallback_result(fallback_candidates, "usda_api_key_unavailable")
     maximum_candidates = max(4, min(int(maximum_candidates), 24))
-    maximum_ideas = max(maximum_candidates, min(_MAX_IDEAS, 24))
-    prompt = _planner_prompt(
-        current_result=current_result,
+    ideas = _selected_seed_ideas(
         current_foods=current_foods,
-        profile=profile,
         target_domains=list(target_domains or []),
         target_nutrients=list(target_nutrients or []),
-        local_hour=local_hour,
-        maximum_ideas=maximum_ideas,
+        maximum_candidates=maximum_candidates,
     )
-    try:
-        ideas = await asyncio.to_thread(_generate_ideas_sync, prompt, maximum_ideas)
-    except Exception as error:  # model/network failure must never break analysis
-        logger.warning("Gemini recommendation candidate planning failed: %s", error)
-        return _fallback_result(fallback_candidates, "gemini_planning_failed")
     if not ideas:
-        return _fallback_result(fallback_candidates, "gemini_returned_no_candidates")
-
-    # Remove obvious repeats before spending USDA requests.
-    ideas = [
-        idea for idea in ideas
-        if not _already_present(
-            f"{idea.get('name', '')} {idea.get('usda_search_query', '')}",
-            current_foods,
-        )
-    ]
-    if not ideas:
-        return _fallback_result(fallback_candidates, "all_planned_candidates_already_present")
+        return _fallback_result(fallback_candidates, "all_internal_candidates_already_present")
 
     try:
         resolved = await _resolve_idea_searches(ideas)
@@ -767,32 +534,29 @@ async def discover_recommendation_candidates(
             for key, value in (food.get("nutrients") or {}).items()
             if isinstance(value, (int, float)) and not isinstance(value, bool)
         }
-        # A recommendation candidate with no usable energy/macronutrient data
-        # cannot be simulated reliably enough to show to a user.
         if not any(
             (nutrients.get(key) or 0.0) > 0
             for key in ("energy_kcal", "protein_g", "carbohydrate_g", "fat_g")
         ):
             continue
         description = str(match.get("description") or idea.get("name") or "Food").strip()
-        if _already_present(description, current_foods):
+        if _already_present(f"{idea.get('name', '')} {description}", current_foods):
             continue
+
+        inferred_group = _infer_food_group(description)
+        seed_group = str(idea.get("food_group") or inferred_group)
+        group = inferred_group if inferred_group not in {"plant"} else seed_group
         allergens = {
             str(value).strip().lower()
             for value in idea.get("allergens", [])
             if str(value).strip()
         }
         allergens.update(_inferred_allergens(description))
-        # Dietary source classification is derived from the USDA-matched
-        # identity rather than trusting the LLM's proposed food_group. The LLM
-        # is a planner, never a safety authority.
-        group = _infer_food_group(description)
         candidate = {
-            "id": f"dynamic_fdc_{fdc_id}",
+            "id": f"internal_fdc_{fdc_id}",
+            "seed_id": idea.get("seed_id"),
             "fdc_id": fdc_id,
-            "name": _common_english_display_name(
-                idea.get("name") or match.get("display_name") or description
-            ),
+            "name": str(idea.get("name") or match.get("display_name") or description).strip(),
             "search_query": description,
             "serving_g": round(max(5.0, min(_number(idea.get("serving_g")) or 100.0, 500.0)), 1),
             "meal_roles": [
@@ -800,14 +564,14 @@ async def discover_recommendation_candidates(
                 for role in idea.get("meal_roles", [])
                 if str(role).strip()
             ],
-            "diet_tags": _diet_tags(group),
+            "diet_tags": list(idea.get("diet_tags") or _diet_tags(group)),
             "allergens": sorted(allergens),
             "nutrients": nutrients,
-            "candidate_source": "gemini_usda_dynamic",
+            "candidate_source": "internal_usda_verified",
             "food_group": group,
             "data_type": match.get("data_type"),
             "food_category": match.get("food_category"),
-            "planner_reason": str(idea.get("why_candidate") or "").strip(),
+            "focus_nutrients": list(idea.get("focus_nutrients", [])),
             "nutrient_source": "USDA FoodData Central",
         }
         candidates.append(candidate)
@@ -815,14 +579,15 @@ async def discover_recommendation_candidates(
             break
 
     if not candidates:
-        return _fallback_result(fallback_candidates, "no_usda_verified_dynamic_candidates")
+        return _fallback_result(fallback_candidates, "no_usda_verified_internal_candidates")
 
     return candidates, {
         "provider_version": DYNAMIC_CANDIDATE_PROVIDER_VERSION,
-        "mode": "gemini_planned_usda_verified",
+        "mode": "internal_food_base_usda_verified",
         "reason": None,
-        "gemini_model": _GEMINI_MODEL,
-        "ideas_generated": len(ideas),
+        "llm_used": False,
+        "internal_food_base_size": len(RECOMMENDATION_FOOD_BASE),
+        "internal_candidates_searched": len(ideas),
         "usda_verified_candidates": len(candidates),
-        "candidate_universe": "USDA FoodData Central search; curated catalogue used only as fallback",
+        "candidate_universe": "Quinone internal food base; nutrients verified by USDA FoodData Central",
     }
