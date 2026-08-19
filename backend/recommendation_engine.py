@@ -20,7 +20,7 @@ from recommendation_candidate_provider import (
 )
 
 
-RECOMMENDATION_ENGINE_VERSION = "2.7.0"
+RECOMMENDATION_ENGINE_VERSION = "2.8.0"
 RECOMMENDATION_APPLY_CONTRACT_VERSION = 2
 
 _FALLBACK_TARGETS: dict[str, dict[str, Any]] = {
@@ -101,10 +101,17 @@ def _result_identity(payload: dict[str, Any], fallback: str) -> str:
     return str(payload.get("analysis_id") or root.get("analysis_id") or fallback)
 
 
-def _food_identity(food: dict[str, Any]) -> str:
-    return str(
-        food.get("canonical_name") or food.get("display_name") or food.get("name") or "food"
-    ).strip().lower()
+def _food_identity(value: Any) -> str:
+    """Normalize a food identity for repeat detection across candidate actions."""
+    if isinstance(value, dict):
+        raw = value.get("canonical_name") or value.get("display_name") or value.get("name") or "food"
+    else:
+        raw = value or "food"
+    tokens = [
+        token for token in re.findall(r"[a-z0-9]+", str(raw).lower())
+        if token not in {"raw", "cooked", "boiled", "roasted", "baked", "plain", "fresh"}
+    ]
+    return " ".join(tokens).strip() or "food"
 
 
 def _collect_day_foods(
@@ -1640,11 +1647,11 @@ async def recommend_after_analysis(
         fallback_candidates=FOOD_RECOMMENDATION_CATALOG,
     )
 
-    # Dynamic USDA/Gemini discovery remains primary, but a successful dynamic
+    # The broad internal-food-base + USDA pool remains primary, but one verified
     # batch can still be too narrow for the particular evidence rules driving
-    # the weakest domain. Supplement (never replace) it with distinct curated
+    # the weakest domain. Supplement (never replace) it with distinct legacy
     # candidates so a 200 response is much less likely to contain zero useful
-    # options. No extra Gemini call is made for this supplement.
+    # options. This supplement performs no external candidate-generation call.
     dynamic_pool = list(candidate_pool)
     dynamic_count = len(dynamic_pool)
     seen_candidate_ids = {
@@ -2030,10 +2037,10 @@ async def recommend_after_analysis(
         reverse=True,
     )
     selected: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen_foods: set[str] = set()
     domain_counts: dict[str, int] = {}
     ordered: list[dict[str, Any]] = []
-    preferred_identities: set[tuple[str, str]] = set()
+    preferred_foods: set[str] = set()
     # The card is titled "weakest score", so the first feasible health-domain
     # recommendation must come from the lowest score, not from whichever
     # mid-range domain has the highest confidence/coverage.  We then preserve
@@ -2054,56 +2061,51 @@ async def recommend_after_analysis(
     if domain_best:
         first = domain_best[0]
         ordered.append(first)
-        preferred_identities.add((
-            str(first.get("action") or ""),
-            str((first.get("food") or {}).get("name") or "").lower(),
-        ))
+        preferred_foods.add(
+            _food_identity(str((first.get("food") or {}).get("name") or ""))
+        )
 
     first_nutrient = next(
         (item for item in evaluated if item.get("_nutrient_priority")),
         None,
     )
     if first_nutrient is not None:
-        identity = (
-            str(first_nutrient.get("action") or ""),
-            str((first_nutrient.get("food") or {}).get("name") or "").lower(),
+        food_identity = _food_identity(
+            str((first_nutrient.get("food") or {}).get("name") or "")
         )
-        if identity not in preferred_identities:
+        if food_identity not in preferred_foods:
             ordered.append(first_nutrient)
-            preferred_identities.add(identity)
+            preferred_foods.add(food_identity)
 
     for best in domain_best[1:]:
-        identity = (
-            str(best.get("action") or ""),
-            str((best.get("food") or {}).get("name") or "").lower(),
+        food_identity = _food_identity(
+            str((best.get("food") or {}).get("name") or "")
         )
-        if identity in preferred_identities:
+        if food_identity in preferred_foods:
             continue
         ordered.append(best)
-        preferred_identities.add(identity)
+        preferred_foods.add(food_identity)
 
     for item in evaluated:
         if not item.get("_nutrient_priority"):
             continue
-        identity = (
-            str(item.get("action") or ""),
-            str((item.get("food") or {}).get("name") or "").lower(),
+        food_identity = _food_identity(
+            str((item.get("food") or {}).get("name") or "")
         )
-        if identity in preferred_identities:
+        if food_identity in preferred_foods:
             continue
         ordered.append(item)
-        preferred_identities.add(identity)
+        preferred_foods.add(food_identity)
 
     ordered.extend(item for item in evaluated if item not in ordered)
     for item in ordered:
         target_key = str((item.get("target_domain") or {}).get("key") or "")
-        identity = (
-            str(item.get("action") or ""),
-            str((item.get("food") or {}).get("name") or "").lower(),
+        food_identity = _food_identity(
+            str((item.get("food") or {}).get("name") or "")
         )
-        if identity in seen or domain_counts.get(target_key, 0) >= 3:
+        if food_identity in seen_foods or domain_counts.get(target_key, 0) >= 3:
             continue
-        seen.add(identity)
+        seen_foods.add(food_identity)
         domain_counts[target_key] = domain_counts.get(target_key, 0) + 1
         cleaned = {
             key: value
@@ -2184,7 +2186,7 @@ async def apply_recommendation(
 ) -> dict[str, Any]:
     """Apply a recommendation after revalidating it against current data.
 
-    Dynamic recommendations are not regenerated from Gemini at apply time.
+    Recommendations are not regenerated from an LLM at apply time.
     The client echoes the selected recommendation payload, but its nutrient,
     diet and safety claims are NOT trusted: an exact FDC id is rehydrated from
     USDA and run through the eligibility + full simulation pipeline again.
