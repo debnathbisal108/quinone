@@ -12,6 +12,7 @@ import '../models/upload_response.dart';
 typedef AnalysisProgressCallback = void Function(
   AnalysisJobProgress progress,
 );
+typedef AnalysisJobStartedCallback = void Function(String jobId);
 
 class UploadService {
   const UploadService({required Dio dio}) : _dio = dio;
@@ -22,6 +23,7 @@ class UploadService {
     required UploadRequest request,
     ProgressCallback? onSendProgress,
     AnalysisProgressCallback? onAnalysisProgress,
+    AnalysisJobStartedCallback? onJobStarted,
     CancelToken? cancelToken,
   }) async {
     final analysisId = request.analysisId?.trim();
@@ -45,6 +47,7 @@ class UploadService {
                 onSendProgress: onSendProgress,
                 cancelToken: cancelToken,
               );
+    onJobStarted?.call(jobId);
     return _pollJob(
       jobId: jobId,
       onAnalysisProgress: onAnalysisProgress,
