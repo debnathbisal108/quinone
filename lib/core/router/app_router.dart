@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
-import '../preferences/app_preferences_repository.dart';
 import '../../features/navigation/presentation/screens/bottom_navigation_screen.dart';
 import '../../features/notifications/presentation/screens/risk_recommendations_screen.dart';
 import '../../features/onboarding/presentation/screens/onboarding_screen.dart';
+import '../../features/onboarding/presentation/screens/splash_screen.dart';
 import '../../features/profile/presentation/screens/profile_setup_screen.dart';
 import '../../features/recipe/presentation/screens/recipe_builder_screen.dart';
 import '../../features/recipe/presentation/screens/serving_confirmation_screen.dart';
@@ -17,9 +17,12 @@ class AppRouter {
   AppRouter._();
 
   static final GoRouter router = GoRouter(
-    initialLocation:
-        AppPreferencesRepository.onboardingCompleted ? '/app' : '/onboarding',
+    initialLocation: '/splash',
     routes: [
+      GoRoute(
+        path: '/splash',
+        builder: (context, state) => const SplashScreen(),
+      ),
       GoRoute(
         path: '/onboarding',
         builder: (context, state) => const OnboardingScreen(),
@@ -30,7 +33,9 @@ class AppRouter {
       ),
       GoRoute(
         path: '/upload',
-        builder: (context, state) => const UploadScreen(),
+        builder: (context, state) => UploadScreen(
+          initialBackgroundResponse: _normalizeResult(state.extra),
+        ),
       ),
       GoRoute(
         path: '/serving-confirmation',
