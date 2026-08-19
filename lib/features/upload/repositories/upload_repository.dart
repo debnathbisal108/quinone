@@ -22,6 +22,7 @@ class UploadRepository {
     required UploadRequest request,
     void Function(int sent, int total)? onSendProgress,
     void Function(AnalysisJobProgress progress)? onAnalysisProgress,
+    void Function(String jobId)? onJobStarted,
   }) async {
     _cancelCurrentRequest();
 
@@ -34,6 +35,7 @@ class UploadRepository {
         cancelToken: cancelToken,
         onSendProgress: onSendProgress,
         onAnalysisProgress: onAnalysisProgress,
+        onJobStarted: onJobStarted,
       );
     } on DioException catch (error) {
       throw _mapDioException(error);
