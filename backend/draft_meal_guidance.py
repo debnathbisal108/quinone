@@ -27,7 +27,7 @@ from recommendation_engine import (
 )
 
 
-GUIDANCE_ENGINE_VERSION = "2.1.0"
+GUIDANCE_ENGINE_VERSION = "2.2.0"
 
 _LABELS: dict[str, tuple[str, str]] = {
     "energy_kcal": ("Energy", "kcal"),
@@ -674,16 +674,7 @@ def build_draft_meal_guidance(
             "percentage": round(ratio * 100.0, 1),
             "message": message,
             "contributors": _contributors(foods, key),
-            "suggestions": _suggestions(
-                nutrient_key=key,
-                direction="excess",
-                profile=normalized_profile,
-                draft_result=nutrient_result,
-                foods=foods,
-                local_hour=local_hour,
-                projected_totals=projected_totals,
-                candidate_pool=recommendation_candidates,
-            ),
+            "suggestions": [],
         })
 
     caps = dict(_HARD_DAILY_CAPS)
@@ -715,16 +706,7 @@ def build_draft_meal_guidance(
             "percentage": round(ratio * 100.0, 1),
             "message": f"With this draft, today's total exceeds the daily limit for {label.lower()}.",
             "contributors": _contributors(foods, key),
-            "suggestions": _suggestions(
-                nutrient_key=key,
-                direction="excess",
-                profile=normalized_profile,
-                draft_result=nutrient_result,
-                foods=foods,
-                local_hour=local_hour,
-                projected_totals=projected_totals,
-                candidate_pool=recommendation_candidates,
-            ),
+            "suggestions": [],
         })
 
     # RDA/AI/minimum targets are adequacy references, not toxicity ceilings.
@@ -747,58 +729,9 @@ def build_draft_meal_guidance(
         if alert.get("direction") == "excess"
     }
 
-    # Users still deserve visibility when an adequacy reference crosses 100%,
-    # even though an RDA/AI/minimum is not a toxicity ceiling. Keep this as a
-    # distinct informational state so the UI never conflates "above the daily
-    # reference" with "unsafe/excess". A genuine food-applicable UL breach is
-    # already emitted above as direction=excess and wins over this card.
-    above_reference_alerts: list[dict[str, Any]] = []
-    for key, target in targets.items() if isinstance(targets, dict) else []:
-        if (
-            key not in reported
-            or key in clinical_keys
-            or key in excess_nutrients
-            or not isinstance(target, dict)
-        ):
-            continue
-        target_type = str(target.get("target_type") or "").lower()
-        if "maximum" in target_type or "upper" in target_type or "range" in target_type:
-            continue
-        reference = _target_value(target)
-        if reference is None or reference <= 0:
-            continue
-        amount = max(0.0, projected_totals.get(key, 0.0))
-        ratio = amount / reference
-        if ratio <= 1.0:
-            continue
-        label, unit = _label_and_unit(key, target)
-        upper = _food_applicable_upper_limit(target)
-        upper_note = (
-            f" The applicable food-intake upper limit is {upper:g} {unit}."
-            if upper is not None and upper > reference
-            else " This reference is an adequacy goal, not an upper safety limit."
-        )
-        above_reference_alerts.append({
-            "direction": "above_reference",
-            "severity": "notice",
-            "nutrient": key,
-            "label": label,
-            "amount": round(amount, 2),
-            "unit": unit,
-            "reference": round(reference, 2),
-            "percentage": round(ratio * 100.0, 1),
-            "message": (
-                f"Today's projected {label.lower()} is above 100% of its daily reference."
-                f"{upper_note}"
-            ),
-            "contributors": _contributors(foods, key),
-            "suggestions": [],
-        })
-    above_reference_alerts.sort(
-        key=lambda item: (_number(item.get("percentage")) or 0.0),
-        reverse=True,
-    )
-    alerts.extend(above_reference_alerts)
+    # Meal Guidance is intentionally actionable-only. Values above an
+    # adequacy/RDA reference but below a real upper limit are displayed on the
+    # result/insights screens, not as Meal Guidance cards.
 
     shortfall_keys = list(_MACRO_ORDER) if include_shortfalls else []
     if include_shortfalls and isinstance(targets, dict):
@@ -859,8 +792,11 @@ def build_draft_meal_guidance(
             ),
         }
         shortfalls.append((0 if key in _MACROS else 1, ratio, alert))
-    shortfalls.sort(key=lambda row: (row[0], row[1]))
-    alerts.extend(alert for _, _, alert in shortfalls)
+    # Show only the most meaningful shortages. A long list of mildly-low
+    # nutrients is noisy and makes the guidance harder to act on. Sort by
+    # percent-of-target first and keep the six lowest nutrients only.
+    shortfalls.sort(key=lambda row: (row[1], row[0]))
+    alerts.extend(alert for _, _, alert in shortfalls[:6])
 
     # Final no-duplicate invariant. A suggestion already present in the draft
     # must never be returned, even if its USDA display name differs from the
@@ -926,10 +862,5 @@ def build_draft_meal_guidance(
             if not alerts
             else "Review these optional alerts or continue without changing the meal."
         ),
-        "disclaimer": (
-            "Meal shortfalls use an estimated share of daily targets and appear only after Analyze is tapped. "
-            "Food suggestions appear only for shortfalls and load separately so they never block analysis. "
-            "Values above 100% of an adequacy reference are shown as informational alerts; only real "
-            "upper-limit/range excesses use quantity reduction in 10% steps."
-        ),
+        "disclaimer": "",
     }
