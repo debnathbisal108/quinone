@@ -35,10 +35,12 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
     final latest = sorted.first;
     if (_recommendationsForAnalysisId == latest.analysisId) return;
     _recommendationsForAnalysisId = latest.analysisId;
-    if (mounted) setState(() {
-      _recommendationsLoading = true;
-      _recommendationsError = null;
-    });
+    if (mounted) {
+      setState(() {
+        _recommendationsLoading = true;
+        _recommendationsError = null;
+      });
+    }
     try {
       if (ref.read(profileProvider).isLoading) {
         await ref.read(profileProvider.notifier).loadProfile();
