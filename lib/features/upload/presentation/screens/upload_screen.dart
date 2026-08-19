@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -7,13 +9,16 @@ import '../../../recipe/models/manual_recipe.dart';
 import '../../providers/upload_provider.dart';
 import '../widgets/analyze_button.dart';
 import '../../services/image_picker_service.dart';
+import '../../services/background_analysis_service.dart';
 import '../widgets/back_label_request_card.dart';
 import '../widgets/image_grid.dart';
 import '../widgets/upload_progress_card.dart';
 import '../widgets/upload_source_sheet.dart';
 
 class UploadScreen extends ConsumerStatefulWidget {
-  const UploadScreen({super.key});
+  const UploadScreen({super.key, this.initialBackgroundResponse});
+
+  final Map<String, dynamic>? initialBackgroundResponse;
 
   @override
   ConsumerState<UploadScreen> createState() =>
@@ -32,7 +37,13 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
         return;
       }
 
-      ref.read(uploadProvider.notifier).reset();
+      final initial = widget.initialBackgroundResponse;
+      if (initial != null && initial.isNotEmpty) {
+        ref.read(uploadProvider.notifier).restoreResponse(initial);
+        _handleUploadResponse();
+      } else {
+        ref.read(uploadProvider.notifier).reset();
+      }
     });
   }
 
@@ -138,6 +149,8 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
         .trim()
         .toLowerCase();
 
+    unawaited(BackgroundAnalysisService.instance.stopAndClear());
+
     if (status == 'waiting_for_back_label') {
       _handledResponse = true;
       return;
@@ -166,9 +179,6 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
         final recipe = ManualRecipe.fromJson(
           Map<String, dynamic>.from(rawDraft),
         );
-        if (recipe.ingredients.isEmpty) {
-          throw const FormatException('Meal draft contains no ingredients.');
-        }
         _handledResponse = true;
         context.push(
           '/recipe',
@@ -627,8 +637,7 @@ class _UploadHeader extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         Text(
-          'Upload clear photos of the complete meal. '
-          'You can add multiple angles or separate dishes.',
+          'Upload one clear photo of the complete meal or food.',
           style: theme.textTheme.bodyLarge?.copyWith(
             color: theme.colorScheme.onSurfaceVariant,
           ),
@@ -771,10 +780,6 @@ class _PhotographyTips extends StatelessWidget {
       (
         Icons.center_focus_strong_rounded,
         'Keep the entire meal visible',
-      ),
-      (
-        Icons.layers_outlined,
-        'Add extra angles for hidden ingredients',
       ),
       (
         Icons.inventory_2_outlined,
