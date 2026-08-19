@@ -58,6 +58,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
   int _guidanceAcceptedRevision = -1;
   String? _searchError;
   AnalysisJobProgress? _progress;
+  bool _autoAddedRecommendation = false;
   final List<TextEditingController> _labelQuantityControllers = [];
 
   @override
@@ -137,6 +138,28 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       final results = await _service.searchFoods(query);
       if (!mounted || _searchController.text.trim() != query) return;
       setState(() => _suggestions = results);
+      final initialQuery = widget.recommendationQuery?.trim() ?? '';
+      final recommendedGrams = widget.recommendationQuantity;
+      if (!_autoAddedRecommendation &&
+          initialQuery.isNotEmpty &&
+          query == initialQuery &&
+          recommendedGrams != null &&
+          recommendedGrams > 0 &&
+          results.isNotEmpty) {
+        final wanted = (widget.recommendationName ?? '').trim().toLowerCase();
+        final selected = wanted.isEmpty
+            ? results.first
+            : results.firstWhere(
+                (food) => food.displayName.toLowerCase().contains(wanted) ||
+                    wanted.contains(food.displayName.toLowerCase()),
+                orElse: () => results.first,
+              );
+        _autoAddedRecommendation = true;
+        final existingIndex = _ingredients.indexWhere(
+          (item) => item.food.fdcId == selected.fdcId,
+        );
+        _commitPendingFood(selected, recommendedGrams, existingIndex);
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() => _searchError = _cleanError(error));
@@ -197,92 +220,10 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
     final totalGrams = existingIndex >= 0
         ? _ingredients[existingIndex].grams + addedGrams
         : addedGrams;
-    final staged = [..._ingredients];
-    if (existingIndex >= 0) {
-      staged[existingIndex] = staged[existingIndex].copyWith(
-        grams: totalGrams,
-      );
-    } else {
-      staged.add(ManualRecipeIngredient(food: food, grams: totalGrams));
-    }
 
-    if (!_guidanceEnabled) {
-      _commitPendingFood(food, totalGrams, existingIndex);
-      return;
-    }
-    final recipe = _buildRecipeWithIngredients(staged);
-    final labels = _confirmedLabelItemsForGuidance();
-    if (recipe == null || labels == null || _checkingGuidance) return;
-
-    setState(() => _checkingGuidance = true);
-    try {
-      if (ref.read(profileProvider).isLoading) {
-        await ref.read(profileProvider.notifier).loadProfile();
-        if (!mounted) return;
-      }
-      final guidance = await _service.evaluateDraft(
-        recipe: recipe,
-        profile: ref.read(profileProvider).backendPayload,
-        analysisId: widget.analysisId,
-        labelItems: labels,
-        todayResults: _todayResultsForGuidance(),
-        includeShortfalls: false,
-        localHour: DateTime.now().hour,
-      );
-      if (!mounted) return;
-      if (!guidance.hasAlerts) {
-        _commitPendingFood(food, totalGrams, existingIndex);
-        return;
-      }
-
-      final result = await showDraftMealGuidanceSheet(
-        context,
-        guidance: guidance,
-        analysisCheckpoint: false,
-        pendingFoodAddition: true,
-        adjustableFoods: [
-          DraftGuidanceAdjustableFood(
-            name: food.displayName,
-            quantity: totalGrams,
-          ),
-        ],
-      );
-      if (!mounted || result.action == DraftMealGuidanceAction.review) return;
-      final confirmedGrams =
-          result.adjustedQuantities[_guidanceFoodKey(food.displayName)] ??
-              totalGrams;
-      _commitPendingFood(food, confirmedGrams, existingIndex);
-      final query = result.searchQuery?.trim() ?? '';
-      if (query.isNotEmpty) _searchSuggestedFood(query);
-    } catch (_) {
-      if (!mounted) return;
-      final addAnyway = await showDialog<bool>(
-            context: context,
-            builder: (dialogContext) => AlertDialog(
-              title: const Text('Meal guidance unavailable'),
-              content: const Text(
-                'The optional nutrient check could not be loaded. '
-                'You can cancel or add the entered quantity anyway.',
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(dialogContext, false),
-                  child: const Text('Cancel'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.pop(dialogContext, true),
-                  child: const Text('Add anyway'),
-                ),
-              ],
-            ),
-          ) ??
-          false;
-      if (addAnyway && mounted) {
-        _commitPendingFood(food, totalGrams, existingIndex);
-      }
-    } finally {
-      if (mounted) setState(() => _checkingGuidance = false);
-    }
+    // Meal Guidance is shown exactly once: when Analyze is tapped. Adding or
+    // editing ingredients must never interrupt the recipe-building flow.
+    _commitPendingFood(food, totalGrams, existingIndex);
   }
 
   void _commitPendingFood(
@@ -300,6 +241,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       }
       _searchController.clear();
       _suggestions = const [];
+      _searching = false;
       _draftRevision += 1;
       // The immediate check covers excess only. Analyze must still run the
       // complete shortfall review for this new recipe revision.
@@ -413,6 +355,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
             (ingredient) => DraftGuidanceAdjustableFood(
               name: ingredient.food.displayName,
               quantity: ingredient.grams,
+              backendFoodId: _guidanceBackendFoodId(ingredient.food.fdcId),
             ),
           )
           .toList(growable: false);
@@ -436,9 +379,9 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
   bool _applyGuidanceQuantities(Map<String, double> quantities) {
     var changed = false;
     final updated = _ingredients.map((ingredient) {
-      final quantity = quantities[
-        _guidanceFoodKey(ingredient.food.displayName)
-      ];
+      final quantity =
+          quantities[_guidanceBackendFoodId(ingredient.food.fdcId)] ??
+          quantities[_guidanceFoodKey(ingredient.food.displayName)];
       if (quantity == null || quantity <= 0) return ingredient;
       if ((quantity - ingredient.grams).abs() < 0.05) return ingredient;
       changed = true;
@@ -456,6 +399,9 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
   Future<bool> _evaluateGuidance({
     required bool analysisCheckpoint,
   }) async {
+    // Never show guidance while the user is still building/editing the meal.
+    // The single guidance checkpoint is the explicit Analyze action.
+    if (!analysisCheckpoint) return true;
     if (!_guidanceEnabled) return true;
     final recipe = _buildRecipe();
     if (recipe == null || _checkingGuidance) return !analysisCheckpoint;
@@ -495,6 +441,17 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
         guidance: guidance,
         analysisCheckpoint: analysisCheckpoint,
         adjustableFoods: _guidanceAdjustableFoods(),
+        suggestionsLoader: guidance.suggestionsPending
+            ? () => _service.evaluateDraftSuggestions(
+                  recipe: recipe,
+                  profile: ref.read(profileProvider).backendPayload,
+                  analysisId: widget.analysisId,
+                  labelItems: labels,
+                  todayResults: _todayResultsForGuidance(),
+                  includeShortfalls: analysisCheckpoint,
+                  localHour: DateTime.now().hour,
+                )
+            : null,
       );
       if (!mounted) return false;
       if (result.action == DraftMealGuidanceAction.searchSuggestion) {
@@ -1072,6 +1029,8 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
 }
 
 String _guidanceFoodKey(String value) => value.trim().toLowerCase();
+
+String _guidanceBackendFoodId(int fdcId) => 'guidance_fdc_$fdcId';
 
 bool _sameLocalDay(DateTime a, DateTime b) {
   final left = a.toLocal();
