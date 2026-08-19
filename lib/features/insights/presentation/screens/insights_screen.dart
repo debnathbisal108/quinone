@@ -29,12 +29,14 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
   String? _recommendationsError;
   String? _recommendationsForAnalysisId;
 
-  Future<void> _ensureRecommendations(List<AnalysisHistoryRecord> records) async {
+  Future<void> _loadRecommendations(List<AnalysisHistoryRecord> records) async {
     if (records.isEmpty || _recommendationsLoading) return;
     final sorted = [...records]..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     final latest = sorted.first;
-    if (_recommendationsForAnalysisId == latest.analysisId) return;
-    _recommendationsForAnalysisId = latest.analysisId;
+    if (_recommendationsForAnalysisId == latest.analysisId &&
+        _recommendations != null) {
+      return;
+    }
     if (mounted) {
       setState(() {
         _recommendationsLoading = true;
@@ -59,6 +61,7 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
       if (!mounted) return;
       setState(() {
         _recommendations = value;
+        _recommendationsForAnalysisId = latest.analysisId;
         _recommendationsLoading = false;
       });
     } catch (error) {
@@ -78,12 +81,6 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
       Duration(days: _days),
     );
     final theme = Theme.of(context);
-    if (records.isNotEmpty && !_recommendationsLoading) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _ensureRecommendations(records);
-      });
-    }
-
     final availableMetrics = _metricsFor(insights, _category);
     if (!availableMetrics.any((item) => item.$1 == _metricKey)) {
       _metricKey = availableMetrics.isEmpty ? '' : availableMetrics.first.$1;
@@ -240,6 +237,9 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
               recommendations: _recommendations,
               category: _category,
               metricKey: _metricKey,
+              onRequest: records.isEmpty
+                  ? null
+                  : () => _loadRecommendations(records),
               onAdd: (item) {
                 context.push('/recipe', extra: {
                   'recommendation_query': item.searchQuery,
@@ -296,6 +296,7 @@ class _InsightRecommendationSection extends StatelessWidget {
     required this.recommendations,
     required this.category,
     required this.metricKey,
+    required this.onRequest,
     required this.onAdd,
   });
 
@@ -304,6 +305,7 @@ class _InsightRecommendationSection extends StatelessWidget {
   final PostAnalysisRecommendations? recommendations;
   final InsightCategory category;
   final String metricKey;
+  final VoidCallback? onRequest;
   final ValueChanged<FoodRecommendation> onAdd;
 
   bool _matches(FoodRecommendation item) {
@@ -336,15 +338,28 @@ class _InsightRecommendationSection extends StatelessWidget {
           Text('What to change', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
           const SizedBox(height: 5),
           Text(
-            'Recommendations are reused for the unchanged analysis. Switching health, macros, or micronutrients does not call Gemini again.',
+            'Food changes are calculated only when you ask. Switching metrics reuses the same result.',
             style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
           ),
           if (loading) ...[
             const SizedBox(height: 14),
             const LinearProgressIndicator(),
+          ] else if (recommendations == null && error == null) ...[
+            const SizedBox(height: 14),
+            FilledButton.icon(
+              onPressed: onRequest,
+              icon: const Icon(Icons.restaurant_menu_rounded),
+              label: const Text('Find food recommendations'),
+            ),
           ] else if (error != null) ...[
             const SizedBox(height: 12),
             Text(error!, style: TextStyle(color: theme.colorScheme.error)),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: onRequest,
+              icon: const Icon(Icons.refresh_rounded),
+              label: const Text('Try again'),
+            ),
           ] else ...[
             const SizedBox(height: 16),
             Text('To add', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900)),
