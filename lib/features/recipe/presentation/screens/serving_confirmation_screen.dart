@@ -52,11 +52,6 @@ class _ServingConfirmationScreenState
         TextEditingController(text: _format(value)),
       );
     }
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _items.isNotEmpty) {
-        _evaluateGuidance(analysisCheckpoint: false);
-      }
-    });
   }
 
   @override
