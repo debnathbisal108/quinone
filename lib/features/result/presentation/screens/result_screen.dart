@@ -40,17 +40,11 @@ class ResultScreen extends ConsumerStatefulWidget {
 class _ResultScreenState extends ConsumerState<ResultScreen> {
   final _recommendationService = RecommendationService();
   PostAnalysisRecommendations? _recommendations;
-  bool _recommendationsLoading = true;
+  bool _recommendationsLoading = false;
   String? _recommendationError;
   String? _applyingRecommendationId;
 
   AnalysisResult get result => widget.result;
-
-  @override
-  void initState() {
-    super.initState();
-    Future<void>.microtask(_loadRecommendations);
-  }
 
   Future<void> _loadRecommendations() async {
     if (!mounted) return;
@@ -133,6 +127,7 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
         currentResult: widget.rawResult,
         todayResults: _todayResultsExcludingCurrent(now),
         recommendationId: item.id,
+        recommendation: item.rawPayload,
         profile: ref.read(profileProvider).backendPayload,
         localHour: now.hour,
       );
@@ -421,9 +416,26 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
       }
     }
 
+    if (nutrientKey == 'carbohydrate_g') {
+      return NutrientTargetViewData.generic(
+        value: 220,
+        upperBound: 330,
+        unit: fallbackUnit,
+        targetType: 'range',
+      );
+    }
+    if (nutrientKey == 'fat_g') {
+      return NutrientTargetViewData.generic(
+        value: 62.4,
+        upperBound: 93.6,
+        unit: fallbackUnit,
+        targetType: 'range',
+      );
+    }
     return NutrientTargetViewData.generic(
       value: fallbackValue,
       unit: fallbackUnit,
+      targetType: 'minimum',
     );
   }
 
@@ -801,8 +813,8 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                         const SizedBox(height: 12),
                         Text(
                           result.personalizationApplied
-                              ? 'Tap a nutrient to see food contributors. Percentages use your personalized daily target when available.'
-                              : 'Tap a nutrient to see food contributors. Percentages use general daily reference values.',
+                              ? 'Tap a nutrient to see food contributors. Percentages use your personalized daily target when available. Above 100% of a minimum adequacy target is not automatically excessive; red appears only beyond a real upper limit or range.'
+                              : 'Tap a nutrient to see food contributors. Percentages use general daily reference values. Above 100% of a minimum adequacy reference is not automatically excessive.',
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: theme.colorScheme.onSurfaceVariant,
                             height: 1.4,
@@ -888,10 +900,6 @@ class _RecommendationSection extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
 
-    if (!loading && recommendations == null && error == null) {
-      return const SizedBox.shrink();
-    }
-
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
@@ -926,9 +934,9 @@ class _RecommendationSection extends StatelessWidget {
                     ),
                     Text(
                       loading
-                          ? 'Simulating useful changes after this analysis…'
+                          ? 'Calculating food options…'
                           : recommendations == null
-                              ? 'Recommendations could not be loaded.'
+                              ? 'Food recommendations are calculated only when you ask.'
                               : '${recommendations!.mealsIncluded} '
                                   '${recommendations!.mealsIncluded == 1 ? 'meal' : 'meals'} '
                                   'included · ${recommendations!.context}',
@@ -939,7 +947,7 @@ class _RecommendationSection extends StatelessWidget {
                   ],
                 ),
               ),
-              if (!loading)
+              if (!loading && (recommendations != null || error != null))
                 IconButton(
                   tooltip: 'Recalculate',
                   onPressed: onRetry,
@@ -950,6 +958,13 @@ class _RecommendationSection extends StatelessWidget {
           if (loading) ...[
             const SizedBox(height: 18),
             const LinearProgressIndicator(),
+          ] else if (recommendations == null && error == null) ...[
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(Icons.restaurant_menu_rounded),
+              label: const Text('Find food recommendations'),
+            ),
           ] else if (error != null) ...[
             const SizedBox(height: 14),
             Text(
