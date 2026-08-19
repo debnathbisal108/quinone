@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../repositories/upload_repository.dart';
@@ -5,6 +7,7 @@ import '../models/upload_image.dart';
 import '../models/upload_request.dart';
 import '../models/upload_response.dart';
 import '../models/analysis_job_progress.dart';
+import '../services/background_analysis_service.dart';
 import '../../history/providers/analysis_history_provider.dart';
 
 final uploadRepositoryProvider = Provider<UploadRepository>((ref) {
@@ -183,6 +186,9 @@ class UploadNotifier extends StateNotifier<UploadState> {
         request: request,
         onSendProgress: _handleProgress,
         onAnalysisProgress: _handleAnalysisProgress,
+        onJobStarted: (jobId) {
+          unawaited(BackgroundAnalysisService.instance.start(jobId));
+        },
       );
 
       final responseData =
@@ -381,6 +387,7 @@ class UploadNotifier extends StateNotifier<UploadState> {
     }
 
     _repository.cancelUpload();
+    unawaited(BackgroundAnalysisService.instance.stopAndClear());
     state = state.copyWith(
       isUploading: false,
       uploadProgress: 0,
@@ -405,6 +412,19 @@ class UploadNotifier extends StateNotifier<UploadState> {
     );
   }
 
+  void restoreResponse(Map<String, dynamic> data) {
+    final response = UploadResponse.fromJson(data);
+    state = state.copyWith(
+      isUploading: false,
+      uploadProgress: 1,
+      progressMessage: 'Analysis ready',
+      response: response,
+      analysisId: _extractAnalysisId(data),
+      foodId: _extractFoodId(data),
+      clearError: true,
+    );
+  }
+
   // -------------------------------------------------------
   // Reset
   // -------------------------------------------------------
@@ -412,6 +432,7 @@ class UploadNotifier extends StateNotifier<UploadState> {
   void reset() {
     if (state.isUploading) {
       _repository.cancelUpload();
+      unawaited(BackgroundAnalysisService.instance.stopAndClear());
     }
 
     state = const UploadState();
