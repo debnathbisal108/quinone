@@ -57,7 +57,7 @@ from recommendation_candidate_provider import discover_recommendation_candidates
 # The apply endpoint sends the selected dynamic recommendation back to the
 # engine for exact USDA rehydration and revalidation.  Refuse to start with a
 # stale recommendation_engine.py instead of failing later with a runtime 500 or
-# silently regenerating a different Gemini candidate.
+# silently regenerating a different recommendation candidate.
 if RECOMMENDATION_APPLY_CONTRACT_VERSION < 2:
     raise RuntimeError(
         "recommendation_engine.py is incompatible with server.py: "
@@ -138,7 +138,7 @@ def _public_job_error(error: Exception) -> str:
 
     return message or "The analysis could not be completed."
 
-# A global Lock serialized every Gemini request across all users. Keep a small
+# Keep a small analysis concurrency cap across users.
 # bounded limit for quota safety while allowing independent requests to run.
 MAX_CONCURRENT_ANALYSES = max(
     1,
@@ -234,7 +234,7 @@ class DraftMealGuidanceRequest(ManualRecipeRequest):
 
 
 
-# Same unchanged meal/profile state must not spend Gemini credits repeatedly.
+# Same unchanged meal/profile state should not repeat USDA discovery/simulation.
 # Cache complete post-analysis recommendation responses in-process; the key
 # includes the meal, today's history, profile, hour bucket and request options.
 _RECOMMENDATION_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -432,8 +432,8 @@ async def _base_draft_guidance(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], list[str]]:
     """Build the deterministic alert payload without recommendation discovery.
 
-    This is deliberately the fast path used by /meal-guidance/evaluate. Gemini,
-    USDA candidate searches, and full candidate simulations are deferred to the
+    This is deliberately the fast path used by /meal-guidance/evaluate. USDA
+    candidate searches and full candidate simulations are deferred to the
     separate suggestions endpoint so they can never hold the user at Analyze.
     """
     nutrient_result, effective_profile = await _draft_guidance_nutrient_result(request)
@@ -492,7 +492,7 @@ async def load_draft_meal_guidance_suggestions(
 ) -> dict[str, Any]:
     """Enrich low-nutrient alerts with optional foods after the sheet is visible.
 
-    This endpoint is allowed to spend time on Gemini planning, USDA verification,
+    This endpoint is allowed to spend time on internal-candidate USDA verification
     and personalized full-meal simulation because the core alert/analysis path
     never waits for it.
     """
