@@ -675,6 +675,12 @@ class _TodayNutrientGroup extends StatelessWidget {
                       'Reference ${_homeCompact(reference)} ${item.unit} · ${(item.value / reference * 100).round()}%',
                       style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
                     ),
+                    const SizedBox(height: 10),
+                    _TodayNutrientProgress(
+                      value: item.value,
+                      target: item.target!,
+                      state: item.state,
+                    ),
                   ],
                   if (highest != null) ...[
                     const SizedBox(height: 8),
@@ -695,6 +701,92 @@ class _TodayNutrientGroup extends StatelessWidget {
             );
           }),
       ],
+    );
+  }
+}
+
+class _TodayNutrientProgress extends StatelessWidget {
+  const _TodayNutrientProgress({
+    required this.value,
+    required this.target,
+    required this.state,
+  });
+
+  final double value;
+  final NutrientTargetBand target;
+  final BalanceState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final track = theme.colorScheme.surfaceContainerHighest;
+    final green = theme.colorScheme.primary;
+    final orange = Colors.orange;
+    final red = theme.colorScheme.error;
+
+    final goal = target.isUpperLimit
+        ? (target.high ?? target.reference)
+        : target.high ?? target.low ?? target.reference;
+    if (goal == null || goal <= 0) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(999),
+        child: SizedBox(height: 9, child: ColoredBox(color: track)),
+      );
+    }
+
+    final percent = (value / goal * 100).clamp(0.0, 100000.0).toDouble();
+    if (state != BalanceState.high || percent <= 100) {
+      final fill = switch (state) {
+        BalanceState.low => orange,
+        BalanceState.balanced => green,
+        BalanceState.high => red,
+        BalanceState.unknown => theme.colorScheme.onSurfaceVariant,
+      };
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(999),
+        child: SizedBox(
+          height: 9,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              ColoredBox(color: track),
+              FractionallySizedBox(
+                alignment: Alignment.centerLeft,
+                widthFactor: (percent / 100).clamp(0.0, 1.0).toDouble(),
+                child: ColoredBox(color: fill),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Match the Result screen overflow treatment: one bar, with the target
+    // share remaining green while the over-target share expands in red.
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(999),
+      child: SizedBox(
+        height: 9,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final targetShare = (100 / percent).clamp(0.0, 1.0).toDouble();
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                ColoredBox(color: red),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: SizedBox(
+                    width: constraints.maxWidth * targetShare,
+                    height: double.infinity,
+                    child: ColoredBox(color: green),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
     );
   }
 }
