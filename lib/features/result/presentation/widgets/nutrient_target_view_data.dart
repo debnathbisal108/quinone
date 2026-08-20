@@ -92,6 +92,15 @@ class NutrientTargetViewData {
     return false;
   }
 
+  /// Minimum/RDA/AI targets can exceed 100% without being a safety excess.
+  /// Surface that as an informational overflow state, while ranges/maximums
+  /// continue to use their actual upper boundary.
+  bool isAboveReference(double amount) =>
+      !isRange && !isMaximum && lowerBound > 0 && amount > lowerBound;
+
+  double referenceOverflowRatioFor(double amount) =>
+      lowerBound <= 0 ? 0 : amount / lowerBound;
+
   /// Ratio used only for the ring/bar drawing. A minimum target that is met
   /// stays fully green. Red overflow appears only against a real upper bound.
   double visualRatioFor(double amount) {
