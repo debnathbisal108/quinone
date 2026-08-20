@@ -470,34 +470,50 @@ class _NutrientSummaryCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                children: [
-                  CircleAvatar(
-                    backgroundColor: Colors.teal.withOpacity(0.12),
-                    child: const Icon(Icons.balance_rounded, color: Colors.teal),
-                  ),
-                  const SizedBox(width: 10),
-                  Text(
-                    'Nutrients',
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                ],
+              CircleAvatar(
+                backgroundColor: Colors.teal.withOpacity(0.12),
+                child: const Icon(Icons.balance_rounded, color: Colors.teal),
               ),
               const SizedBox(height: 12),
               if (!enabled)
-                const Text('--')
+                Text('--', style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900))
               else ...[
-                Text('$balanced well balanced', style: theme.textTheme.labelLarge),
+                _NutrientCountLine(count: balanced, label: 'well balanced'),
                 const SizedBox(height: 3),
-                Text('$high above target', style: theme.textTheme.labelLarge),
+                _NutrientCountLine(count: high, label: 'above target'),
                 const SizedBox(height: 3),
-                Text('$low needs more', style: theme.textTheme.labelLarge),
+                _NutrientCountLine(count: low, label: 'needs more'),
               ],
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+
+class _NutrientCountLine extends StatelessWidget {
+  const _NutrientCountLine({required this.count, required this.label});
+
+  final int count;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return RichText(
+      text: TextSpan(
+        style: theme.textTheme.labelLarge,
+        children: [
+          TextSpan(
+            text: '$count',
+            style: theme.textTheme.titleLarge?.copyWith(
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          TextSpan(text: ' $label'),
+        ],
       ),
     );
   }
@@ -541,7 +557,12 @@ List<_TodayNutrientItem> _todayNutrientItems(
       final value = day.metricValue(category, key);
       final target = insights.targetForDay(day, key);
       if (value == null) continue;
-      final state = target?.classify(value) ?? BalanceState.unknown;
+      final classified = target?.classify(value) ?? BalanceState.unknown;
+      final state = target != null &&
+              target.minimumStyle &&
+              target.isAboveReference(value)
+          ? BalanceState.high
+          : classified;
       result.add(
         _TodayNutrientItem(
           category: category,
@@ -724,9 +745,16 @@ class _TodayNutrientProgress extends StatelessWidget {
     final orange = Colors.orange;
     final red = theme.colorScheme.error;
 
-    final goal = target.isUpperLimit
-        ? (target.high ?? target.reference)
-        : target.high ?? target.low ?? target.reference;
+    final safetyExcess = target.isSafetyExcess(value);
+    final referenceGoal = target.minimumStyle
+        ? target.reference ?? target.low
+        : target.isUpperLimit
+            ? target.high ?? target.reference
+            : target.high ?? target.low ?? target.reference;
+    final safetyGoal = target.isUpperLimit
+        ? target.high ?? target.reference
+        : target.high;
+    final goal = safetyExcess ? safetyGoal ?? referenceGoal : referenceGoal;
     if (goal == null || goal <= 0) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(999),
@@ -735,11 +763,12 @@ class _TodayNutrientProgress extends StatelessWidget {
     }
 
     final percent = (value / goal * 100).clamp(0.0, 100000.0).toDouble();
+    final highColor = safetyExcess ? red : orange;
     if (state != BalanceState.high || percent <= 100) {
       final fill = switch (state) {
         BalanceState.low => orange,
         BalanceState.balanced => green,
-        BalanceState.high => red,
+        BalanceState.high => highColor,
         BalanceState.unknown => theme.colorScheme.onSurfaceVariant,
       };
       return ClipRRect(
@@ -761,8 +790,9 @@ class _TodayNutrientProgress extends StatelessWidget {
       );
     }
 
-    // Match the Result screen overflow treatment: one bar, with the target
-    // share remaining green while the over-target share expands in red.
+    // Above a minimum/reference target, use amber for informational overflow.
+    // Red is reserved for a real range/maximum/food-applicable upper-limit
+    // breach.  Both states keep the same single-bar overflow treatment.
     return ClipRRect(
       borderRadius: BorderRadius.circular(999),
       child: SizedBox(
@@ -773,7 +803,7 @@ class _TodayNutrientProgress extends StatelessWidget {
             return Stack(
               fit: StackFit.expand,
               children: [
-                ColoredBox(color: red),
+                ColoredBox(color: highColor),
                 Align(
                   alignment: Alignment.centerLeft,
                   child: SizedBox(
