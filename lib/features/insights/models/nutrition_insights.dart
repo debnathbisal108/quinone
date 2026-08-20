@@ -21,6 +21,7 @@ class NutrientTargetBand {
     required this.reference,
     required this.unit,
     required this.isUpperLimit,
+    required this.minimumStyle,
     required this.personalized,
   });
 
@@ -29,7 +30,22 @@ class NutrientTargetBand {
   final double? reference;
   final String unit;
   final bool isUpperLimit;
+  final bool minimumStyle;
   final bool personalized;
+
+  bool isAboveReference(double value) {
+    final ref = reference;
+    return ref != null && ref > 0 && value > ref;
+  }
+
+  bool isSafetyExcess(double value) {
+    if (isUpperLimit) {
+      final ceiling = high ?? reference;
+      return ceiling != null && ceiling > 0 && value > ceiling;
+    }
+    final ceiling = high;
+    return ceiling != null && ceiling > 0 && value > ceiling;
+  }
 
   BalanceState classify(double value) {
     if (isUpperLimit) {
@@ -43,11 +59,14 @@ class NutrientTargetBand {
     final lower = low;
     final upper = high;
 
-    // Minimum/reference nutrients (fiber, most vitamins/minerals, RDA/AI
-    // targets) should not become "high" merely for exceeding the reference.
-    // They are high only when an actual upper limit is supplied as `high`.
-    if (lower != null && lower > 0 && upper == null) {
-      return value < lower ? BalanceState.low : BalanceState.balanced;
+    // Minimum/RDA/AI targets remain adequate once the lower threshold is
+    // reached. Above-100% reference intake is surfaced separately by the UI
+    // and is not automatically treated as a harmful/high balance state.
+    if (minimumStyle) {
+      if (lower == null || lower <= 0) return BalanceState.unknown;
+      if (value < lower) return BalanceState.low;
+      if (isSafetyExcess(value)) return BalanceState.high;
+      return BalanceState.balanced;
     }
 
     if (lower == null || upper == null || lower <= 0 || upper <= 0) {
@@ -926,6 +945,7 @@ NutrientTargetBand? _bandFromPersonalizedTarget(
           ((target.rangeLow! + target.rangeHigh!) / 2),
       unit: unit,
       isUpperLimit: false,
+      minimumStyle: false,
       personalized: true,
     );
   }
@@ -946,6 +966,7 @@ NutrientTargetBand? _bandFromPersonalizedTarget(
         reference: ceiling,
         unit: unit,
         isUpperLimit: true,
+        minimumStyle: false,
         personalized: true,
       );
     }
@@ -962,6 +983,7 @@ NutrientTargetBand? _bandFromPersonalizedTarget(
       reference: resolved,
       unit: unit,
       isUpperLimit: false,
+      minimumStyle: true,
       personalized: true,
     );
   }
@@ -979,6 +1001,7 @@ NutrientTargetBand _bandAroundReference(
     reference: reference,
     unit: unit,
     isUpperLimit: false,
+    minimumStyle: false,
     personalized: personalized,
   );
 }
@@ -994,6 +1017,7 @@ NutrientTargetBand _minimumAroundReference(
     reference: reference,
     unit: unit,
     isUpperLimit: false,
+    minimumStyle: true,
     personalized: personalized,
   );
 }
@@ -1057,6 +1081,7 @@ NutrientTargetBand? _genericTargetFor(String rawKey) {
       reference: upper,
       unit: unitForMetric(key),
       isUpperLimit: true,
+      minimumStyle: false,
       personalized: false,
     );
   }
