@@ -73,6 +73,8 @@ _LABELS: dict[str, tuple[str, str]] = {
     "alpha_linolenic_acid_g": ("Alpha-linolenic acid", "g"),
 }
 
+_GOOD_DAILY_ADEQUACY_RATIO = 0.80
+
 _MACRO_ORDER = ("energy_kcal", "protein_g", "carbohydrate_g", "fat_g", "fiber_g")
 _MACROS = set(_MACRO_ORDER)
 _NO_SHORTFALL_KEYS = {
@@ -756,6 +758,14 @@ def build_draft_meal_guidance(
         daily = _target_value(target)
         if daily is None:
             continue
+        # Do not recommend more of a nutrient when today's projected intake
+        # is already in a practically adequate range. Meal-share guidance is
+        # only useful when both the day and this meal are genuinely low.
+        projected_amount = max(0.0, projected_totals.get(key, 0.0))
+        daily_coverage = projected_amount / daily if daily > 0 else 1.0
+        if daily_coverage >= _GOOD_DAILY_ADEQUACY_RATIO:
+            continue
+
         expected = daily * fraction
         amount = max(0.0, draft_totals.get(key, 0.0))
         ratio = amount / expected if expected > 0 else 1.0
