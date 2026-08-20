@@ -20,8 +20,9 @@ from recommendation_candidate_provider import (
 )
 
 
-RECOMMENDATION_ENGINE_VERSION = "2.8.0"
+RECOMMENDATION_ENGINE_VERSION = "2.9.0"
 RECOMMENDATION_APPLY_CONTRACT_VERSION = 2
+_GOOD_ADEQUACY_RATIO = 0.80
 
 _FALLBACK_TARGETS: dict[str, dict[str, Any]] = {
     "energy_kcal": {"type": "range", "low": 1800.0, "high": 2400.0},
@@ -160,6 +161,18 @@ _ALIAS_SCALES: dict[tuple[str, str], float] = {
     ("copper_mg", "copper_ug"): 0.001,
     ("copper_mg", "copper_mcg"): 0.001,
 }
+
+
+def _canonical_nutrient_key(key: str) -> str:
+    value = str(key or "").strip()
+    for canonical, compatibility in CANONICAL_KEY_COMPATIBILITY.items():
+        accepted = {
+            canonical,
+            *[str(item) for item in compatibility.get("accepted_input_keys", [])],
+        }
+        if value in accepted:
+            return canonical
+    return value
 
 
 def _canonical_nutrients(raw: Any) -> dict[str, float]:
@@ -1061,6 +1074,9 @@ def _shortfall_nutrient_keys(
     """Return the most under-covered adequacy nutrients for candidate planning."""
     ranked: list[tuple[float, str]] = []
     for key, target in targets.items():
+        # Missing nutrient data is unknown, not a confirmed shortfall.
+        if key not in totals:
+            continue
         current = max(0.0, totals.get(key, 0.0))
         kind = str(target.get("type") or "minimum")
         if kind == "maximum":
@@ -1069,9 +1085,15 @@ def _shortfall_nutrient_keys(
             goal = _number(target.get("low"))
         else:
             goal = _number(target.get("value"))
-        if goal is None or goal <= 0 or current >= goal:
+        if goal is None or goal <= 0:
             continue
-        ranked.append((current / goal, key))
+        coverage = current / goal
+        # Recommendation is for meaningful gaps, not topping up nutrients that
+        # are already in a practically adequate range. The UI can still show
+        # the exact percent, but food suggestions start below 80%.
+        if coverage >= _GOOD_ADEQUACY_RATIO:
+            continue
+        ranked.append((coverage, key))
     ranked.sort(key=lambda row: (row[0], row[1]))
     return [key for _, key in ranked[: max(1, maximum)]]
 
@@ -1579,6 +1601,7 @@ async def recommend_after_analysis(
     local_hour: int,
     maximum_results: int = 5,
     preferred_domain_keys: list[str] | None = None,
+    preferred_nutrient_keys: list[str] | None = None,
 ) -> dict[str, Any]:
     """Rank safe changes by improvement to the weakest current-meal domain."""
     normalized_profile = normalize_user_profile(profile)
@@ -1601,6 +1624,11 @@ async def recommend_after_analysis(
     requested = {
         str(key).strip().lower()
         for key in preferred_domain_keys or []
+        if str(key).strip()
+    }
+    requested_nutrients = {
+        _canonical_nutrient_key(str(key).strip())
+        for key in preferred_nutrient_keys or []
         if str(key).strip()
     }
     # Evaluate enough domains to avoid a catalogue miss on the absolute
@@ -1676,13 +1704,165 @@ async def recommend_after_analysis(
     soft_domain_candidates: list[dict[str, Any]] = []
     candidate_index = 0
 
+    # Deterministic nutrient-gap fallback. Health-domain evidence can be
+    # intentionally conservative, so a safe food that meaningfully closes a
+    # real nutrient gap must not disappear merely because the modeled module
+    # score changes by <0.25 points. This is especially important in Insights,
+    # where users explicitly ask for "to add" / "to reduce" actions.
+    shortfall_rows: list[tuple[float, str, float, dict[str, Any]]] = []
+    for nutrient_key, target in targets.items():
+        if not isinstance(target, dict):
+            continue
+        # Missing nutrient data is unknown, not a confirmed deficiency.
+        if nutrient_key not in before_totals:
+            continue
+        kind = str(target.get("type") or "minimum")
+        if kind == "maximum":
+            continue
+        goal = _number(target.get("low")) if kind == "range" else _number(target.get("value"))
+        if goal is None or goal <= 0:
+            continue
+        current = max(0.0, before_totals.get(nutrient_key, 0.0))
+        coverage = current / goal
+        if coverage >= _GOOD_ADEQUACY_RATIO:
+            continue
+        shortfall_rows.append((coverage, nutrient_key, goal, target))
+    shortfall_rows.sort(
+        key=lambda row: (
+            0 if row[1] in requested_nutrients else 1,
+            row[0],
+            row[1],
+        )
+    )
+
+    for coverage, nutrient_key, goal, target in shortfall_rows[:4]:
+        ranked_candidates = sorted(
+            candidate_pool,
+            key=lambda candidate: (
+                _nutrient_amount(candidate, nutrient_key)
+                * max(5.0, float(candidate.get("serving_g") or 100.0))
+                / 100.0
+            ),
+            reverse=True,
+        )
+        for candidate in ranked_candidates[:6]:
+            if _candidate_already_present(candidate, current_foods):
+                continue
+            allowed, audit, _ = _candidate_eligibility(candidate, normalized_profile)
+            if not allowed:
+                continue
+            compatible, _ = _meal_compatibility(candidate, current_result, current_foods, hour)
+            if not compatible:
+                continue
+
+            grams = max(5.0, float(candidate.get("serving_g") or 100.0))
+            per100_energy = _nutrient_amount(candidate, "energy_kcal")
+            if per100_energy > 0 and calorie_cap > 0:
+                grams = min(grams, max(5.0, calorie_cap * 100.0 / per100_energy))
+            contribution = _nutrient_amount(candidate, nutrient_key) * grams / 100.0
+            if contribution <= 0:
+                continue
+
+            upper_safe, _ = _personalized_upper_limit_safe(
+                candidate,
+                normalized_profile,
+                before_totals,
+                serving_g=grams,
+            )
+            if not upper_safe:
+                continue
+
+            candidate_index += 1
+            addition = _scaled_candidate_food(candidate, grams, candidate_index)
+            simulated_foods = [*copy.deepcopy(current_foods), addition]
+            after_totals = _sum_nutrients(simulated_foods)
+            old_amount = max(0.0, before_totals.get(nutrient_key, 0.0))
+            new_amount = max(0.0, after_totals.get(nutrient_key, 0.0))
+            before_percent = min(100.0, old_amount / goal * 100.0)
+            after_percent = min(100.0, new_amount / goal * 100.0)
+            adequacy_delta = after_percent - before_percent
+            if adequacy_delta < 2.0:
+                continue
+
+            simulated = await _analyze_food_set(
+                simulated_foods,
+                normalized_profile,
+                meal_type=meal_type,
+            )
+            after_domains = _domain_score_items(simulated)
+            if _protected_domain_decline_items(
+                before_domains,
+                after_domains,
+                normalized_profile,
+            ) > 0.75:
+                continue
+            after_overall, _ = _overall_score(simulated)
+            label = _NUTRIENT_LABELS.get(
+                nutrient_key,
+                nutrient_key.replace("_", " "),
+            )
+            unit = _NUTRIENT_UNITS.get(nutrient_key, "")
+            evaluated.append({
+                "action": "add",
+                "scope": "current_meal",
+                "combined_meal": True,
+                "food": {
+                    "catalog_id": candidate.get("id"),
+                    **({"fdc_id": candidate["fdc_id"]} if isinstance(candidate.get("fdc_id"), int) else {}),
+                    "candidate_source": candidate.get("candidate_source", "curated_fallback"),
+                    "name": str(candidate.get("name") or "Food"),
+                    "search_query": str(candidate.get("search_query") or candidate.get("name") or ""),
+                    "quantity": round(grams, 1),
+                    "unit": "g",
+                },
+                "baseline_score": before_overall,
+                "predicted_score": after_overall,
+                "score_delta": round(after_overall - before_overall, 2),
+                "predicted_score_low": round(max(0.0, after_overall - 1.5), 1),
+                "predicted_score_high": round(min(100.0, after_overall + 1.5), 1),
+                "target_domain": {
+                    "key": f"nutrient:{nutrient_key}",
+                    "label": f"{label.title()} adequacy",
+                    "before": round(before_percent, 2),
+                    "after": round(after_percent, 2),
+                    "delta": round(adequacy_delta, 2),
+                    "confidence": 0.9,
+                },
+                "nutrient_effects": [{
+                    "nutrient": nutrient_key,
+                    "label": label,
+                    "before": round(old_amount, 2),
+                    "after": round(new_amount, 2),
+                    "target": round(goal, 2),
+                    "improvement": round(new_amount - old_amount, 2),
+                }],
+                "reason": (
+                    f"{label.title()} is at {coverage * 100:.0f}% of its current reference. "
+                    f"Adding this verified portion moves it toward {goal:.1f} {unit}."
+                ),
+                "warnings": [],
+                "confidence": 0.9,
+                "eligibility": audit,
+                "_target_delta": adequacy_delta,
+                "_collateral": 0.0,
+                "_utility": 85.0 + adequacy_delta,
+                "_nutrient_priority": True,
+            })
+            break
+
     # Nutrient-balance excesses get explicit current-meal portion actions even
     # when the corresponding health module is not one of the two weakest. This
     # prevents obvious carbohydrate/protein/fat/limit excesses from being
     # hidden behind unrelated domain recommendations.
-    for excess_ratio, nutrient_key, limit, scoring_target in _exceeded_nutrient_targets(
-        before_totals, targets
-    )[:4]:
+    exceeded_rows = _exceeded_nutrient_targets(before_totals, targets)
+    exceeded_rows.sort(
+        key=lambda row: (
+            0 if row[1] in requested_nutrients else 1,
+            -row[0],
+            row[1],
+        )
+    )
+    for excess_ratio, nutrient_key, limit, scoring_target in exceeded_rows[:4]:
         offender = max(
             current_foods,
             key=lambda food: _nutrient_amount(food, nutrient_key),
@@ -1785,6 +1965,7 @@ async def recommend_after_analysis(
             "_collateral": 0.0,
             "_utility": 100.0 + (excess_ratio - 1.0) * 40.0 + metric_delta,
             "_nutrient_priority": True,
+            "_excess_priority": True,
         })
 
     for target_key, target_item in targets_to_improve:
@@ -2065,8 +2246,26 @@ async def recommend_after_analysis(
             _food_identity(str((first.get("food") or {}).get("name") or ""))
         )
 
+    # A true excess/reduction action outranks adequacy top-up suggestions.
+    # When a health-domain recommendation exists it stays first (the card is
+    # still score-first); otherwise the reduction becomes the first action.
+    first_excess = next(
+        (item for item in evaluated if item.get("_excess_priority")),
+        None,
+    )
+    if first_excess is not None:
+        food_identity = _food_identity(
+            str((first_excess.get("food") or {}).get("name") or "")
+        )
+        if food_identity not in preferred_foods:
+            ordered.append(first_excess)
+            preferred_foods.add(food_identity)
+
     first_nutrient = next(
-        (item for item in evaluated if item.get("_nutrient_priority")),
+        (
+            item for item in evaluated
+            if item.get("_nutrient_priority") and not item.get("_excess_priority")
+        ),
         None,
     )
     if first_nutrient is not None:
