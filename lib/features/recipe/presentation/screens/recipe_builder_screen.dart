@@ -40,6 +40,8 @@ class RecipeBuilderScreen extends ConsumerStatefulWidget {
 
 class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
   final _searchController = TextEditingController();
+  final _scrollController = ScrollController();
+  final _searchFieldKey = GlobalKey();
   final _nameController = TextEditingController(text: 'My recipe');
   final _servingsMadeController = TextEditingController(text: '1');
   final _servingsEatenController = TextEditingController(text: '1');
@@ -86,7 +88,9 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
         _nameController.text = 'Meal with $recommendationName';
       }
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _search(recommendationQuery);
+        if (!mounted) return;
+        _scrollToSearch();
+        _search(recommendationQuery);
       });
     }
     _loadSaved();
@@ -99,6 +103,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
     }
     _debounce?.cancel();
     _searchController.dispose();
+    _scrollController.dispose();
     _nameController.dispose();
     _servingsMadeController.dispose();
     _servingsEatenController.dispose();
@@ -333,6 +338,20 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
     return confirmed;
   }
 
+  void _scrollToSearch() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final targetContext = _searchFieldKey.currentContext;
+      if (targetContext == null) return;
+      Scrollable.ensureVisible(
+        targetContext,
+        duration: const Duration(milliseconds: 360),
+        curve: Curves.easeOutCubic,
+        alignment: 0.12,
+      );
+    });
+  }
+
   void _searchSuggestedFood(String query) {
     setState(() {
       _searchController.text = query;
@@ -340,6 +359,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
         offset: query.length,
       );
     });
+    _scrollToSearch();
     _search(query);
   }
 
@@ -576,6 +596,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       appBar: AppBar(title: Text(widget.photoReview ? 'Review detected meal' : 'Add recipe')),
       body: SafeArea(
         child: ListView(
+          controller: _scrollController,
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 36),
           children: [
             Text(
@@ -625,6 +646,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
             ),
             const SizedBox(height: 16),
             TextField(
+              key: _searchFieldKey,
               controller: _searchController,
               enabled: !_analyzing,
               onChanged: _onSearchChanged,
