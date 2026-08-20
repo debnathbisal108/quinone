@@ -210,6 +210,7 @@ class PostAnalysisRecommendationRequest(BaseModel):
     local_hour: int = Field(default=12, ge=0, le=23)
     maximum_results: int = Field(default=5, ge=1, le=8)
     preferred_domain_keys: list[str] = Field(default_factory=list)
+    preferred_nutrient_keys: list[str] = Field(default_factory=list)
 
 
 class ApplyPostAnalysisRecommendationRequest(BaseModel):
@@ -282,6 +283,7 @@ async def post_analysis_recommendations(
             local_hour=request.local_hour,
             maximum_results=request.maximum_results,
             preferred_domain_keys=request.preferred_domain_keys,
+            preferred_nutrient_keys=request.preferred_nutrient_keys,
         )
         result["cache"] = {"hit": False, "ttl_seconds": _RECOMMENDATION_CACHE_TTL_S}
         _recommendation_cache_put(cache_key, result)
