@@ -20,7 +20,7 @@ from recommendation_candidate_provider import (
 )
 
 
-RECOMMENDATION_ENGINE_VERSION = "2.9.0"
+RECOMMENDATION_ENGINE_VERSION = "3.0.0"
 RECOMMENDATION_APPLY_CONTRACT_VERSION = 2
 _GOOD_ADEQUACY_RATIO = 0.80
 
@@ -1671,7 +1671,7 @@ async def recommend_after_analysis(
         target_domains=planner_domains,
         target_nutrients=_shortfall_nutrient_keys(before_totals, targets),
         local_hour=hour,
-        maximum_candidates=16,
+        maximum_candidates=10,
         fallback_candidates=FOOD_RECOMMENDATION_CATALOG,
     )
 
@@ -1692,7 +1692,7 @@ async def recommend_after_analysis(
             continue
         dynamic_pool.append(fallback)
         seen_candidate_ids.add(identity)
-        if len(dynamic_pool) >= 24:
+        if len(dynamic_pool) >= 16:
             break
     candidate_pool = dynamic_pool
     if isinstance(candidate_provider, dict):
