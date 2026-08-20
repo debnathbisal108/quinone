@@ -53,6 +53,34 @@ class BackgroundAnalysisService {
     );
   }
 
+  Future<void> prepare() async {
+    if (!Platform.isAndroid) return;
+
+    final permission = await FlutterForegroundTask.checkNotificationPermission();
+    if (permission != NotificationPermission.granted) {
+      await FlutterForegroundTask.requestNotificationPermission();
+    }
+
+    await FlutterForegroundTask.removeData(key: _jobIdKey);
+    await FlutterForegroundTask.removeData(key: _jobUrlKey);
+    await FlutterForegroundTask.removeData(key: _pendingResultKey);
+    await FlutterForegroundTask.removeData(key: _pendingStatusKey);
+    await FlutterForegroundTask.removeData(key: _pendingErrorKey);
+    await FlutterForegroundTask.saveData(key: _openRequestedKey, value: false);
+
+    if (await FlutterForegroundTask.isRunningService) {
+      await FlutterForegroundTask.stopService();
+    }
+
+    await FlutterForegroundTask.startService(
+      serviceId: 7319,
+      notificationTitle: 'Preparing meal analysis',
+      notificationText: 'Uploading meal…',
+      notificationInitialRoute: '/splash',
+      callback: backgroundAnalysisStartCallback,
+    );
+  }
+
   Future<void> start(String jobId) async {
     final id = jobId.trim();
     if (id.isEmpty) return;
@@ -62,25 +90,32 @@ class BackgroundAnalysisService {
       await FlutterForegroundTask.requestNotificationPermission();
     }
 
+    final jobUrl = '${DioClient.baseUrl}${ApiConfig.analysisJobEndpoint(id)}';
     await FlutterForegroundTask.saveData(key: _jobIdKey, value: id);
-    await FlutterForegroundTask.saveData(
-      key: _jobUrlKey,
-      value: '${DioClient.baseUrl}${ApiConfig.analysisJobEndpoint(id)}',
-    );
+    await FlutterForegroundTask.saveData(key: _jobUrlKey, value: jobUrl);
     await FlutterForegroundTask.removeData(key: _pendingResultKey);
     await FlutterForegroundTask.removeData(key: _pendingStatusKey);
     await FlutterForegroundTask.removeData(key: _pendingErrorKey);
     await FlutterForegroundTask.saveData(key: _openRequestedKey, value: false);
 
     if (await FlutterForegroundTask.isRunningService) {
-      await FlutterForegroundTask.restartService();
+      FlutterForegroundTask.sendDataToTask(<String, dynamic>{
+        'type': 'attach_analysis_job',
+        'job_url': jobUrl,
+      });
+      await FlutterForegroundTask.updateService(
+        notificationTitle: 'Analyzing meal · 0%',
+        notificationText: 'Analysis started…',
+      );
       return;
     }
 
+    // Fallback for callers that did not use prepare(). Normally the service is
+    // started while the app is visible, before the upload request begins.
     await FlutterForegroundTask.startService(
       serviceId: 7319,
-      notificationTitle: 'Analyzing meal',
-      notificationText: 'Starting analysis…',
+      notificationTitle: 'Analyzing meal · 0%',
+      notificationText: 'Analysis started…',
       notificationInitialRoute: '/splash',
       callback: backgroundAnalysisStartCallback,
     );
@@ -184,13 +219,11 @@ class _BackgroundAnalysisTaskHandler extends TaskHandler {
 
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
-    final value = await FlutterForegroundTask.getData(key: _jobUrlKey);
-    _jobUrl = value?.toString();
+    await _refreshJobUrl();
     if (_jobUrl == null || _jobUrl!.isEmpty) {
-      _terminal = true;
       await FlutterForegroundTask.updateService(
-        notificationTitle: 'Meal analysis unavailable',
-        notificationText: 'Open Quinone to retry.',
+        notificationTitle: 'Preparing meal analysis',
+        notificationText: 'Uploading meal…',
       );
       return;
     }
@@ -200,6 +233,31 @@ class _BackgroundAnalysisTaskHandler extends TaskHandler {
   @override
   void onRepeatEvent(DateTime timestamp) {
     if (_terminal || _polling) return;
+    unawaited(_pollWhenReady());
+  }
+
+  Future<void> _refreshJobUrl() async {
+    final value = await FlutterForegroundTask.getData(key: _jobUrlKey);
+    final url = value?.toString().trim() ?? '';
+    if (url.isNotEmpty) _jobUrl = url;
+  }
+
+  Future<void> _pollWhenReady() async {
+    if (_jobUrl == null || _jobUrl!.isEmpty) {
+      await _refreshJobUrl();
+      if (_jobUrl == null || _jobUrl!.isEmpty) return;
+    }
+    await _pollOnce();
+  }
+
+  @override
+  void onReceiveData(Object data) {
+    if (data is! Map) return;
+    if (data['type'] != 'attach_analysis_job') return;
+    final value = data['job_url']?.toString().trim() ?? '';
+    if (value.isEmpty) return;
+    _jobUrl = value;
+    _terminal = false;
     unawaited(_pollOnce());
   }
 
@@ -270,9 +328,15 @@ class _BackgroundAnalysisTaskHandler extends TaskHandler {
         return;
       }
 
+      final stage = map['stage']?.toString().trim();
+      final detail = message?.isNotEmpty == true
+          ? message!
+          : stage?.isNotEmpty == true
+              ? stage!.replaceAll('_', ' ')
+              : 'Working…';
       await FlutterForegroundTask.updateService(
         notificationTitle: 'Analyzing meal · $percent%',
-        notificationText: message?.isNotEmpty == true ? message! : 'Working…',
+        notificationText: detail,
       );
     } catch (_) {
       // Network interruptions are retried on the next foreground-task tick.
