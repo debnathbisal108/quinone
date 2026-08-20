@@ -87,10 +87,13 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       if (recommendationName.isNotEmpty) {
         _nameController.text = 'Meal with $recommendationName';
       }
-      WidgetsBinding.instance.addPostFrameCallback((_) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
         if (!mounted) return;
-        _scrollToSearch();
-        _search(recommendationQuery);
+        await _scrollToSearch();
+        if (!mounted) return;
+        await _search(recommendationQuery);
+        if (!mounted) return;
+        await _scrollToSearch();
       });
     }
     _loadSaved();
@@ -338,29 +341,44 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
     return confirmed;
   }
 
-  void _scrollToSearch() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      final targetContext = _searchFieldKey.currentContext;
-      if (targetContext == null) return;
-      Scrollable.ensureVisible(
-        targetContext,
-        duration: const Duration(milliseconds: 360),
+  Future<void> _scrollToSearch() async {
+    // Guidance is presented in a modal sheet. Waiting for its dismissal
+    // animation before moving the page avoids ensureVisible being ignored by
+    // the still-closing overlay on some Android devices.
+    await Future<void>.delayed(const Duration(milliseconds: 180));
+    if (!mounted) return;
+
+    if (_scrollController.hasClients) {
+      await _scrollController.animateTo(
+        0,
+        duration: const Duration(milliseconds: 420),
         curve: Curves.easeOutCubic,
-        alignment: 0.12,
       );
-    });
+    }
+    if (!mounted) return;
+
+    final targetContext = _searchFieldKey.currentContext;
+    if (targetContext == null) return;
+    await Scrollable.ensureVisible(
+      targetContext,
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+      alignment: 0.08,
+    );
   }
 
-  void _searchSuggestedFood(String query) {
+  Future<void> _searchSuggestedFood(String query) async {
     setState(() {
       _searchController.text = query;
       _searchController.selection = TextSelection.collapsed(
         offset: query.length,
       );
     });
-    _scrollToSearch();
-    _search(query);
+    await _scrollToSearch();
+    if (!mounted) return;
+    await _search(query);
+    if (!mounted) return;
+    await _scrollToSearch();
   }
 
   List<DraftGuidanceAdjustableFood> _guidanceAdjustableFoods() =>
@@ -471,7 +489,9 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
       if (result.action == DraftMealGuidanceAction.searchSuggestion) {
         _applyGuidanceQuantities(result.adjustedQuantities);
         final query = result.searchQuery?.trim() ?? '';
-        if (query.isNotEmpty) _searchSuggestedFood(query);
+        if (query.isNotEmpty) {
+          await _searchSuggestedFood(query);
+        }
         return false;
       }
       if (!result.accepted) return false;
