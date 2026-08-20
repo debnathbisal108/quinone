@@ -175,6 +175,15 @@ class UploadNotifier extends StateNotifier<UploadState> {
     );
 
     try {
+      // Start the Android foreground service while the app is definitely in
+      // the foreground. The server job ID is attached a moment later after
+      // the upload/start request returns. This avoids Android 12+ restrictions
+      // on starting a foreground service after the user has already switched
+      // to another app. A notification failure must never block analysis.
+      try {
+        await BackgroundAnalysisService.instance.prepare();
+      } catch (_) {}
+
       final request = UploadRequest(
         imagePaths: state.images
             .map((image) => image.path)
@@ -207,6 +216,7 @@ class UploadNotifier extends StateNotifier<UploadState> {
         foodId: _extractFoodId(responseData),
       );
     } catch (error) {
+      unawaited(BackgroundAnalysisService.instance.stopAndClear());
       state = state.copyWith(
         isUploading: false,
         uploadProgress: 0,
