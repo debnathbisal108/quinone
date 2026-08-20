@@ -23,7 +23,7 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 
   Future<void> _continue() async {
-    await Future<void>.delayed(const Duration(milliseconds: 850));
+    await Future<void>.delayed(const Duration(milliseconds: 2500));
     if (!mounted) return;
     final pending = await BackgroundAnalysisService.instance.takeRequestedRoute();
     if (!mounted) return;
