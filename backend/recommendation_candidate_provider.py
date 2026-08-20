@@ -28,7 +28,13 @@ from usda_recipe_service import search_usda_foods
 
 logger = logging.getLogger("quinone.recommendation_candidates")
 
-DYNAMIC_CANDIDATE_PROVIDER_VERSION = "2.0.0"
+DYNAMIC_CANDIDATE_PROVIDER_VERSION = "2.1.0"
+
+# Recommendation discovery is user-initiated and must stay responsive.  The
+# internal food base is broad, but only a small context-ranked slice needs USDA
+# hydration on each request.  If USDA is slow, fall back to the verified local
+# catalogue rather than letting the whole recommendation request time out.
+_USDA_DISCOVERY_TIMEOUT_S = 18.0
 
 _PREPARATION_TOKENS = {
     "raw", "cooked", "boiled", "steamed", "roasted", "baked", "fried",
@@ -242,7 +248,7 @@ def _selected_seed_ideas(
     # Search a moderate pool, not all 100+ foods per button tap. Round-robin by
     # food group keeps the shortlist varied and prevents repetitive berry/nut
     # suggestions even when many foods share the same target nutrient.
-    search_budget = max(maximum_candidates + 8, min(maximum_candidates * 2, 32))
+    search_budget = min(12, max(6, maximum_candidates))
     buckets: dict[str, list[dict[str, Any]]] = {}
     group_order: list[str] = []
     for _, _, seed in ranked:
@@ -516,9 +522,23 @@ async def discover_recommendation_candidates(
     if not ideas:
         return _fallback_result(fallback_candidates, "all_internal_candidates_already_present")
 
+    async def _verify() -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], dict[int, dict[str, Any]]]:
+        resolved_rows = await _resolve_idea_searches(ideas)
+        attached_rows = await _attach_usda_per100(resolved_rows)
+        return resolved_rows, attached_rows
+
     try:
-        resolved = await _resolve_idea_searches(ideas)
-        attached = await _attach_usda_per100(resolved)
+        resolved, attached = await asyncio.wait_for(
+            _verify(),
+            timeout=_USDA_DISCOVERY_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "USDA recommendation candidate verification exceeded %.1fs; "
+            "using the local verified fallback catalogue.",
+            _USDA_DISCOVERY_TIMEOUT_S,
+        )
+        return _fallback_result(fallback_candidates, "usda_verification_timeout")
     except Exception as error:
         logger.warning("USDA recommendation candidate verification failed: %s", error)
         return _fallback_result(fallback_candidates, "usda_verification_failed")
