@@ -149,7 +149,14 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
         .trim()
         .toLowerCase();
 
-    unawaited(BackgroundAnalysisService.instance.stopAndClear());
+    // Keep the foreground-service notification alive when Quinone is in
+    // the background so the user can see the completed state and tap it to
+    // return. When the app is already visible, clean it up immediately.
+    final appIsVisible =
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+    if (appIsVisible) {
+      unawaited(BackgroundAnalysisService.instance.stopAndClear());
+    }
 
     if (status == 'waiting_for_back_label') {
       _handledResponse = true;
