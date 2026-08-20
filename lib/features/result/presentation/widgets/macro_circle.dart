@@ -22,10 +22,20 @@ class MacroCircle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final ratio = target.ratioFor(value);
-    final percent = ratio * 100;
-    final over = ratio > 1;
-    final valueColor = over ? theme.colorScheme.error : theme.colorScheme.primary;
+    final percent = target.percentFor(value);
+    final over = target.isExcess(value);
+    final aboveReference = !over && target.isAboveReference(value);
+    final ratio = over
+        ? target.visualRatioFor(value)
+        : aboveReference
+            ? target.referenceOverflowRatioFor(value)
+            : target.visualRatioFor(value);
+    final overflowColor = over ? theme.colorScheme.error : Colors.orange;
+    final valueColor = over
+        ? theme.colorScheme.error
+        : aboveReference
+            ? Colors.orange
+            : theme.colorScheme.primary;
 
     return Material(
       color: theme.colorScheme.surfaceContainerLow,
@@ -44,8 +54,9 @@ class MacroCircle extends StatelessWidget {
                 painter: _TargetRingPainter(
                   ratio: ratio,
                   safeColor: theme.colorScheme.primary,
-                  excessColor: theme.colorScheme.error,
+                  excessColor: overflowColor,
                   trackColor: theme.colorScheme.surfaceContainerHighest,
+                  isExcess: over || aboveReference,
                 ),
                 child: Center(
                   child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -80,11 +91,12 @@ class MacroCircle extends StatelessWidget {
 }
 
 class _TargetRingPainter extends CustomPainter {
-  const _TargetRingPainter({required this.ratio, required this.safeColor, required this.excessColor, required this.trackColor});
+  const _TargetRingPainter({required this.ratio, required this.safeColor, required this.excessColor, required this.trackColor, required this.isExcess});
   final double ratio;
   final Color safeColor;
   final Color excessColor;
   final Color trackColor;
+  final bool isExcess;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -96,7 +108,7 @@ class _TargetRingPainter extends CustomPainter {
     canvas.drawCircle(center, baseRadius, track);
 
     final ring = Rect.fromCircle(center: center, radius: baseRadius);
-    if (ratio <= 1) {
+    if (!isExcess || ratio <= 1) {
       final safeRatio = ratio.clamp(0.0, 1.0).toDouble();
       if (safeRatio > 0) {
         canvas.drawArc(
@@ -110,9 +122,8 @@ class _TargetRingPainter extends CustomPainter {
       return;
     }
 
-    // Above 100%, target and excess share the same complete ring. The target
-    // is 100 parts of the total percentage, while everything beyond 100 is
-    // excess. At 200%, for example, the ring is 50% green and 50% red.
+    // Above 100%, target and overflow share the same complete ring. Red is
+    // reserved for true excess; minimum/reference-only overflow is amber.
     final targetShare = (1 / ratio).clamp(0.0, 1.0).toDouble();
     final excessShare = 1 - targetShare;
     final targetSweep = math.pi * 2 * targetShare;
@@ -139,5 +150,5 @@ class _TargetRingPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _TargetRingPainter old) => old.ratio != ratio || old.safeColor != safeColor || old.excessColor != excessColor || old.trackColor != trackColor;
+  bool shouldRepaint(covariant _TargetRingPainter old) => old.ratio != ratio || old.isExcess != isExcess || old.safeColor != safeColor || old.excessColor != excessColor || old.trackColor != trackColor;
 }
