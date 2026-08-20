@@ -52,11 +52,24 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
           .where((record) => record.analysisId != latest.analysisId)
           .map((record) => Map<String, dynamic>.from(record.rawResult))
           .toList(growable: false);
+      final preferredDomains = _category == InsightCategory.health &&
+              _metricKey.isNotEmpty &&
+              _metricKey != 'overall'
+          ? <String>[_metricKey]
+          : const <String>[];
+      final preferredNutrients = _category != InsightCategory.health &&
+              _metricKey.isNotEmpty &&
+              _metricKey != 'overall'
+          ? <String>[_metricKey]
+          : const <String>[];
       final value = await _recommendationService.afterAnalysis(
         currentResult: Map<String, dynamic>.from(latest.rawResult),
         todayResults: sameDay,
         profile: ref.read(profileProvider).backendPayload,
         localHour: latest.createdAt.toLocal().hour,
+        maximumResults: 8,
+        preferredDomainKeys: preferredDomains,
+        preferredNutrientKeys: preferredNutrients,
       );
       if (!mounted) return;
       setState(() {
