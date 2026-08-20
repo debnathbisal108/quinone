@@ -29,6 +29,7 @@ class RecommendationService {
     int? localHour,
     int maximumResults = 5,
     List<String> preferredDomainKeys = const [],
+    List<String> preferredNutrientKeys = const [],
   }) async {
     final payload = {
       'current_result': currentResult,
@@ -38,6 +39,8 @@ class RecommendationService {
       'maximum_results': maximumResults,
       if (preferredDomainKeys.isNotEmpty)
         'preferred_domain_keys': preferredDomainKeys,
+      if (preferredNutrientKeys.isNotEmpty)
+        'preferred_nutrient_keys': preferredNutrientKeys,
     };
     final cacheKey = jsonEncode(payload);
     final cached = _requestCache[cacheKey];
