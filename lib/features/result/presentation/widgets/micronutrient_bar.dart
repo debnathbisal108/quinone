@@ -18,11 +18,21 @@ class MicronutrientBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final percent = target.ratioFor(nutrient.amount) * 100;
-    final over = percent > 100;
+    final percent = target.percentFor(nutrient.amount);
+    final over = target.isExcess(nutrient.amount);
+    final aboveReference = !over && target.isAboveReference(nutrient.amount);
+    final visualPercent = (over
+            ? target.visualRatioFor(nutrient.amount)
+            : aboveReference
+                ? target.referenceOverflowRatioFor(nutrient.amount)
+                : target.visualRatioFor(nutrient.amount)) *
+        100;
+    final overflowColor = over ? theme.colorScheme.error : Colors.orange;
     final valueColor = over
         ? theme.colorScheme.error
-        : theme.colorScheme.primary;
+        : aboveReference
+            ? Colors.orange
+            : theme.colorScheme.primary;
 
     return Material(
       color: theme.colorScheme.surfaceContainerLow,
@@ -89,9 +99,10 @@ class MicronutrientBar extends StatelessWidget {
               ),
               const SizedBox(height: 12),
               _MicronutrientProgress(
-                percent: percent,
+                percent: visualPercent,
+                showOverflow: over || aboveReference,
                 safeColor: theme.colorScheme.primary,
-                excessColor: theme.colorScheme.error,
+                overflowColor: overflowColor,
                 trackColor: theme.colorScheme.surfaceContainerHighest,
               ),
             ],
@@ -111,14 +122,16 @@ class MicronutrientBar extends StatelessWidget {
 class _MicronutrientProgress extends StatelessWidget {
   const _MicronutrientProgress({
     required this.percent,
+    required this.showOverflow,
     required this.safeColor,
-    required this.excessColor,
+    required this.overflowColor,
     required this.trackColor,
   });
 
   final double percent;
+  final bool showOverflow;
   final Color safeColor;
-  final Color excessColor;
+  final Color overflowColor;
   final Color trackColor;
 
   @override
@@ -129,7 +142,7 @@ class _MicronutrientProgress extends StatelessWidget {
       borderRadius: BorderRadius.circular(999),
       child: SizedBox(
         height: 9,
-        child: clamped <= 100
+        child: !showOverflow || clamped <= 100
             ? Stack(
                 fit: StackFit.expand,
                 children: [
@@ -154,7 +167,7 @@ class _MicronutrientProgress extends StatelessWidget {
                   return Stack(
                     fit: StackFit.expand,
                     children: [
-                      ColoredBox(color: excessColor),
+                      ColoredBox(color: overflowColor),
                       Align(
                         alignment: Alignment.centerLeft,
                         child: SizedBox(
