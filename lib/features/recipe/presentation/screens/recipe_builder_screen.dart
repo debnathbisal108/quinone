@@ -358,7 +358,7 @@ class _RecipeBuilderScreenState extends ConsumerState<RecipeBuilderScreen> {
     if (!mounted) return;
 
     final targetContext = _searchFieldKey.currentContext;
-    if (targetContext == null) return;
+    if (targetContext == null || !targetContext.mounted) return;
     await Scrollable.ensureVisible(
       targetContext,
       duration: const Duration(milliseconds: 260),
