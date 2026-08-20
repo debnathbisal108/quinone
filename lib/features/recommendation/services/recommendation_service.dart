@@ -67,7 +67,7 @@ class RecommendationService {
           responseType: ResponseType.json,
           contentType: Headers.jsonContentType,
           headers: const {'Accept': 'application/json'},
-          receiveTimeout: const Duration(seconds: 45),
+          receiveTimeout: const Duration(seconds: 60),
         ),
       );
       final data = response.data;
