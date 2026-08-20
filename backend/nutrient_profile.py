@@ -757,6 +757,19 @@ def _attach_profile(entry: Dict[str, Any], profiles_by_id: Dict[int, Dict[str, A
     weight_g = _resolve_entry_weight_g(entry)
     entry["nutrients"] = _scale_nutrients(profile["nutrients"], weight_g)
     entry["all_nutrients"] = _scale_all_nutrients(profile["all_nutrients"], weight_g)
+    entry["nutrient_basis"] = {
+        "source": "USDA FoodData Central",
+        "fdc_id": int(fdc_id),
+        "matched_name": resolver.get("matched_name")
+        or resolver.get("matched_description")
+        or resolver.get("description"),
+        "match_query": resolver.get("match_query"),
+        "data_type": resolver.get("data_type"),
+        "per_100g_basis": "as_listed_by_usda",
+        "scaled_weight_g": weight_g,
+        "quantity_basis": entry.get("quantity_basis") or "as_served",
+        "preparation": entry.get("preparation"),
+    }
 
 def _sum_decomposed_components(
     food: Dict[str, Any],
