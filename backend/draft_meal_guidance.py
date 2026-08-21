@@ -27,7 +27,7 @@ from recommendation_engine import (
 )
 
 
-GUIDANCE_ENGINE_VERSION = "2.3.0"
+GUIDANCE_ENGINE_VERSION = "2.4.0"
 
 _LABELS: dict[str, tuple[str, str]] = {
     "energy_kcal": ("Energy", "kcal"),
@@ -768,11 +768,12 @@ def build_draft_meal_guidance(
 
         expected = daily * fraction
         amount = max(0.0, draft_totals.get(key, 0.0))
-        ratio = amount / expected if expected > 0 else 1.0
-        if ratio >= 0.80:
+        meal_share_ratio = amount / expected if expected > 0 else 1.0
+        if meal_share_ratio >= 0.80:
             continue
         label, unit = _label_and_unit(key, target)
         generic_reference = bool(target.get("generic_reference"))
+        daily_percentage = amount / daily * 100.0 if daily > 0 else 0.0
         alert = {
             "direction": "low",
             "severity": "notice",
@@ -780,14 +781,15 @@ def build_draft_meal_guidance(
             "label": label,
             "amount": round(amount, 2),
             "unit": unit,
-            "reference": round(expected, 2),
-            "percentage": round(ratio * 100.0, 1),
+            # Display the same daily-reference denominator used by the final
+            # analysis screen. The meal-share ratio remains an internal
+            # trigger only and is never exposed as a competing percentage.
+            "reference": round(daily, 2),
+            "percentage": round(daily_percentage, 1),
             "message": (
-                f"{label} is low for this meal's {fraction * 100:.0f}% share of the general daily reference; "
-                "this is not a diagnosis of a daily deficiency."
+                f"This meal provides {daily_percentage:.0f}% of the general daily reference for {label}."
                 if generic_reference
-                else f"{label} is low for this meal's {fraction * 100:.0f}% share of the personalized daily target; "
-                "this is not a diagnosis of a daily deficiency."
+                else f"This meal provides {daily_percentage:.0f}% of your personalized daily target for {label}."
             ),
             "contributors": _contributors(foods, key),
             "suggestions": _suggestions(
@@ -801,7 +803,7 @@ def build_draft_meal_guidance(
                 candidate_pool=recommendation_candidates,
             ),
         }
-        shortfalls.append((0 if key in _MACROS else 1, ratio, alert))
+        shortfalls.append((0 if key in _MACROS else 1, meal_share_ratio, alert))
     # Show only the most meaningful shortages. A long list of mildly-low
     # nutrients is noisy and makes the guidance harder to act on. Sort by
     # percent-of-target first and keep the six lowest nutrients only.
