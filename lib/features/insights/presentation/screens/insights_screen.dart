@@ -822,9 +822,9 @@ class _FoodContributorRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final percentage = contribution.percentage >= 10
-        ? contribution.percentage.toStringAsFixed(0)
-        : contribution.percentage.toStringAsFixed(1);
+    final percentage = _insightContributionPercent(
+      contribution.percentage,
+    );
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -853,7 +853,7 @@ class _FoodContributorRow extends StatelessWidget {
                   style: const TextStyle(fontWeight: FontWeight.w700),
                 ),
                 TextSpan(
-                  text: ' · $percentage% $percentageLabel',
+                  text: ' · $percentage $percentageLabel',
                   style: TextStyle(
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
@@ -1678,6 +1678,14 @@ class _DomainTrendCard extends StatelessWidget {
   }
 }
 
+String _insightContributionPercent(double percentage) {
+  if (percentage <= 0) return '';
+  if (percentage < 1) return '<1%';
+  return percentage >= 10
+      ? '${percentage.toStringAsFixed(0)}%'
+      : '${percentage.toStringAsFixed(1)}%';
+}
+
 class _NutritionBalanceSection extends StatelessWidget {
   const _NutritionBalanceSection({
     required this.insights,
@@ -1710,17 +1718,13 @@ class _NutritionBalanceSection extends StatelessWidget {
     final high = summaries
         .where((item) => item.dominantState == BalanceState.high)
         .toList();
-    final unknown = summaries
-        .where((item) => item.dominantState == BalanceState.unknown)
-        .toList();
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const _SectionTitle('Nutrition balance'),
         const SizedBox(height: 6),
         Text(
-          'Every measured nutrient is listed. Quinone uses the personalized target when available, otherwise a standard daily reference; nutrients without a defensible reference stay visible as unavailable.',
+          'Quinone uses the personalized target when available, otherwise a standard daily reference. Only nutrients with a usable numeric reference are listed here.',
           style: theme.textTheme.bodyMedium?.copyWith(
             color: theme.colorScheme.onSurfaceVariant,
           ),
@@ -1745,13 +1749,6 @@ class _NutritionBalanceSection extends StatelessWidget {
             title: 'Frequently above target',
             color: theme.colorScheme.error,
             items: high,
-            onTap: onTap,
-          ),
-        if (unknown.isNotEmpty)
-          _BalanceGroup(
-            title: 'Reference unavailable',
-            color: theme.colorScheme.onSurfaceVariant,
-            items: unknown,
             onTap: onTap,
           ),
       ],
