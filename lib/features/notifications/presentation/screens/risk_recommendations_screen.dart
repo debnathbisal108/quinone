@@ -172,16 +172,18 @@ class _RiskRecommendationsScreenState
                 ),
               ),
             ),
-          const SizedBox(height: 8),
-          Text(
-            _recommendations?.disclaimer.trim().isNotEmpty == true
-                ? _recommendations!.disclaimer
-                : 'These are dietary-support suggestions based on logged '
-                    'meals, not a diagnosis or treatment recommendation.',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-          ),
+          if (addOptions.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              _recommendations?.disclaimer.trim().isNotEmpty == true
+                  ? _recommendations!.disclaimer
+                  : 'These are dietary-support suggestions based on logged '
+                      'meals, not a diagnosis or treatment recommendation.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+            ),
+          ],
         ],
       ),
     );
