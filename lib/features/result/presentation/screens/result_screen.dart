@@ -191,7 +191,7 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
                 ),
-                if (summaryValues.isNotEmpty) ...[
+                if (summaryValues.any((item) => item.available)) ...[
                   const SizedBox(height: 20),
                   Text(
                     summaryTitle,
@@ -212,7 +212,7 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                   const SizedBox(height: 10),
                   _NutrientDetailList(items: summaryValues),
                 ],
-                if (relatedValues.isNotEmpty) ...[
+                if (relatedValues.any((item) => item.available)) ...[
                   const SizedBox(height: 20),
                   Text(
                     breakdownTitle,
@@ -234,37 +234,26 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                   const SizedBox(height: 10),
                   _NutrientDetailList(items: relatedValues),
                 ],
-                const SizedBox(height: 20),
-                Text(
-                  contributorTitle,
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                if (contributorNote != null &&
-                    contributorNote.trim().isNotEmpty) ...[
-                  const SizedBox(height: 6),
+                if (contributions.isNotEmpty) ...[
+                  const SizedBox(height: 20),
                   Text(
-                    contributorNote,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                      height: 1.4,
+                    contributorTitle,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
                     ),
                   ),
-                ],
-                const SizedBox(height: 10),
-                if (contributions.isEmpty)
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.surfaceContainerLow,
-                      borderRadius: BorderRadius.circular(18),
+                  if (contributorNote != null &&
+                      contributorNote.trim().isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      contributorNote,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        height: 1.4,
+                      ),
                     ),
-                    child: const Text(
-                      'Food-level contribution data is not available for this nutrient.',
-                    ),
-                  )
-                else
+                  ],
+                  const SizedBox(height: 10),
                   ...contributions.map(
                     (item) => Padding(
                       padding: const EdgeInsets.only(bottom: 10),
@@ -302,6 +291,7 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                       ),
                     ),
                   ),
+                ],
               ],
             );
           },
@@ -459,7 +449,12 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
       ),
     ];
 
-    void addReported(String label, String key, {bool nested = false}) {
+    void addReported(
+      String label,
+      String key, {
+      bool nested = false,
+      bool showContributors = false,
+    }) {
       final value = result.carbohydrateComposition[key];
       if (value == null) return;
       items.add(
@@ -468,6 +463,8 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
           value: value,
           unit: 'g',
           available: true,
+          contributors:
+              showContributors ? result.contributionsFor(key) : const [],
         ),
       );
     }
@@ -488,6 +485,7 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
         value: result.sugars ?? 0,
         unit: 'g',
         available: result.sugars != null,
+        contributors: result.contributionsFor('sugars_g'),
       ),
     );
     if (result.addedSugars != null) {
@@ -497,16 +495,17 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
           value: result.addedSugars!,
           unit: 'g',
           available: true,
+          contributors: result.contributionsFor('added_sugars_g'),
         ),
       );
     }
 
-    addReported('Sucrose', 'sucrose_g', nested: true);
-    addReported('Glucose', 'glucose_g', nested: true);
-    addReported('Fructose', 'fructose_g', nested: true);
-    addReported('Lactose', 'lactose_g', nested: true);
-    addReported('Maltose', 'maltose_g', nested: true);
-    addReported('Galactose', 'galactose_g', nested: true);
+    addReported('Sucrose', 'sucrose_g', nested: true, showContributors: true);
+    addReported('Glucose', 'glucose_g', nested: true, showContributors: true);
+    addReported('Fructose', 'fructose_g', nested: true, showContributors: true);
+    addReported('Lactose', 'lactose_g', nested: true, showContributors: true);
+    addReported('Maltose', 'maltose_g', nested: true, showContributors: true);
+    addReported('Galactose', 'galactose_g', nested: true, showContributors: true);
     addReported('Starch', 'starch_g');
     addReported('Component-derived carbohydrate', 'component_sum_g');
 
@@ -660,13 +659,15 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                                             label: 'Reported major subtypes',
                                             value: _reportedMajorFatTotal(),
                                             unit: 'g',
-                                            available: true,
+                                            available: result.saturatedFat != null ||
+                                                result.monounsaturatedFat != null ||
+                                                result.polyunsaturatedFat != null,
                                           ),
                                           _NutrientDetailItem(
                                             label: 'Not classified by source',
                                             value: _unclassifiedFat(),
                                             unit: 'g',
-                                            available: true,
+                                            available: _unclassifiedFat() > 0.0001,
                                           ),
                                         ],
                                         breakdownTitle: 'Reported fat details',
@@ -682,42 +683,63 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                                             value: result.saturatedFat ?? 0,
                                             unit: 'g',
                                             available: result.saturatedFat != null,
+                                            contributors: result.contributionsFor(
+                                              'saturated_fat_g',
+                                            ),
                                           ),
                                           _NutrientDetailItem(
                                             label: 'Monounsaturated fat',
                                             value: result.monounsaturatedFat ?? 0,
                                             unit: 'g',
                                             available: result.monounsaturatedFat != null,
+                                            contributors: result.contributionsFor(
+                                              'monounsaturated_fat_g',
+                                            ),
                                           ),
                                           _NutrientDetailItem(
                                             label: 'Polyunsaturated fat',
                                             value: result.polyunsaturatedFat ?? 0,
                                             unit: 'g',
                                             available: result.polyunsaturatedFat != null,
+                                            contributors: result.contributionsFor(
+                                              'polyunsaturated_fat_g',
+                                            ),
                                           ),
                                           _NutrientDetailItem(
                                             label: 'Trans fat',
                                             value: result.transFat ?? 0,
                                             unit: 'g',
                                             available: result.transFat != null,
+                                            contributors: result.contributionsFor(
+                                              'trans_fat_g',
+                                            ),
                                           ),
                                           _NutrientDetailItem(
                                             label: 'Omega-3',
                                             value: result.omega3 ?? 0,
                                             unit: 'g',
                                             available: result.omega3 != null,
+                                            contributors: result.contributionsFor(
+                                              'omega3_g',
+                                            ),
                                           ),
                                           _NutrientDetailItem(
                                             label: 'Omega-6',
                                             value: result.omega6 ?? 0,
                                             unit: 'g',
                                             available: result.omega6 != null,
+                                            contributors: result.contributionsFor(
+                                              'omega6_g',
+                                            ),
                                           ),
                                           _NutrientDetailItem(
                                             label: 'Cholesterol',
                                             value: result.cholesterol ?? 0,
                                             unit: 'mg',
                                             available: result.cholesterol != null,
+                                            contributors: result.contributionsFor(
+                                              'cholesterol_mg',
+                                            ),
                                           ),
                                         ],
                                       );
@@ -1013,7 +1035,8 @@ class _RecommendationSection extends StatelessWidget {
                   ),
                 ),
               ),
-            if (recommendations!.disclaimer.trim().isNotEmpty) ...[
+            if (recommendations!.items.isNotEmpty &&
+                recommendations!.disclaimer.trim().isNotEmpty) ...[
               const SizedBox(height: 4),
               Text(
                 recommendations!.disclaimer,
@@ -1368,12 +1391,14 @@ class _NutrientDetailItem {
     required this.value,
     required this.unit,
     required this.available,
+    this.contributors = const [],
   });
 
   final String label;
   final double value;
   final String unit;
   final bool available;
+  final List<NutrientContribution> contributors;
 }
 
 class _NutrientDetailList extends StatelessWidget {
@@ -1384,6 +1409,9 @@ class _NutrientDetailList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final visibleItems =
+        items.where((item) => item.available).toList(growable: false);
+    if (visibleItems.isEmpty) return const SizedBox.shrink();
 
     return Container(
       decoration: BoxDecoration(
@@ -1391,41 +1419,12 @@ class _NutrientDetailList extends StatelessWidget {
         borderRadius: BorderRadius.circular(18),
         border: Border.all(color: theme.colorScheme.outlineVariant),
       ),
+      clipBehavior: Clip.antiAlias,
       child: Column(
         children: [
-          for (var index = 0; index < items.length; index++) ...[
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 16,
-                vertical: 14,
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      items[index].label,
-                      style: theme.textTheme.bodyLarge?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Text(
-                    items[index].available
-                        ? '${_formatResultNumber(items[index].value)} '
-                            '${items[index].unit}'
-                        : 'Not available',
-                    style: theme.textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w800,
-                      color: items[index].available
-                          ? null
-                          : theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (index < items.length - 1)
+          for (var index = 0; index < visibleItems.length; index++) ...[
+            _NutrientDetailRow(item: visibleItems[index]),
+            if (index < visibleItems.length - 1)
               Divider(
                 height: 1,
                 color: theme.colorScheme.outlineVariant,
@@ -1435,6 +1434,106 @@ class _NutrientDetailList extends StatelessWidget {
       ),
     );
   }
+}
+
+class _NutrientDetailRow extends StatelessWidget {
+  const _NutrientDetailRow({required this.item});
+
+  final _NutrientDetailItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final valueText = '${_formatResultNumber(item.value)} ${item.unit}';
+    final contributors = item.contributors
+        .where((entry) => entry.amount > 0)
+        .toList(growable: false);
+
+    if (contributors.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                item.label,
+                style: theme.textTheme.bodyLarge?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              valueText,
+              style: theme.textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Theme(
+      data: theme.copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        tilePadding: const EdgeInsets.symmetric(horizontal: 16),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        title: Row(
+          children: [
+            Expanded(
+              child: Text(
+                item.label,
+                style: theme.textTheme.bodyLarge?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              valueText,
+              style: theme.textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+        ),
+        children: [
+          for (final contribution in contributors)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      contribution.foodName,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    '${_formatResultNumber(contribution.amount)} ${item.unit}'
+                    '${item.value > 0 ? ' · ${_resultContributionPercent(contribution.amount, item.value)}' : ''}',
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+String _resultContributionPercent(double amount, double total) {
+  if (amount <= 0 || total <= 0) return '';
+  final percentage = amount / total * 100;
+  if (percentage < 1) return '<1%';
+  return '${percentage.toStringAsFixed(0)}%';
 }
 
 String _formatResultNumber(double value) =>
