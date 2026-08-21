@@ -41,16 +41,16 @@ class NutrientTargetBand {
   bool isSafetyExcess(double value) {
     if (isUpperLimit) {
       final ceiling = high ?? reference;
-      return ceiling != null && ceiling > 0 && value > ceiling;
+      return ceiling != null && ceiling >= 0 && value > ceiling;
     }
     final ceiling = high;
-    return ceiling != null && ceiling > 0 && value > ceiling;
+    return ceiling != null && ceiling >= 0 && value > ceiling;
   }
 
   BalanceState classify(double value) {
     if (isUpperLimit) {
       final ceiling = high ?? reference;
-      if (ceiling == null || ceiling <= 0) {
+      if (ceiling == null || ceiling < 0) {
         return BalanceState.unknown;
       }
       return value <= ceiling ? BalanceState.balanced : BalanceState.high;
@@ -486,10 +486,11 @@ class NutritionInsights {
         }
       }
 
-      // A measured nutrient must never silently disappear from Nutrition
-      // balance. If Quinone has no defensible target/reference, keep the row
-      // visible as "Reference unavailable" instead of dropping it.
-      if (observed == 0) continue;
+      // User-facing balance lists contain only nutrients that can actually be
+      // classified. A measured nutrient with no defensible numeric reference
+      // remains available in the detailed meal breakdown, but is not shown as
+      // a misleading "Reference unavailable" balance row.
+      if (observed == 0 || low + balanced + high == 0) continue;
 
       summaries.add(
         NutrientBalanceSummary(
@@ -959,7 +960,7 @@ NutrientTargetBand? _bandFromPersonalizedTarget(
       type.contains('limit') ||
       type.contains('maximum')) {
     final ceiling = target.rangeHigh ?? upper ?? resolved;
-    if (ceiling != null && ceiling > 0) {
+    if (ceiling != null && ceiling >= 0) {
       return NutrientTargetBand(
         low: null,
         high: ceiling,
@@ -1071,6 +1072,10 @@ NutrientTargetBand? _genericTargetFor(String rawKey) {
     'saturated_fat_g': 20,
     'added_sugars_g': 50,
     'cholesterol_mg': 300,
+    // Public-health guidance treats trans fat as an as-low-as-possible target.
+    // In the app this is represented as a zero maximum: 0 g is in range and
+    // any reported positive amount is above target.
+    'trans_fat_g': 0,
   };
 
   final upper = upperLimits[key];
@@ -1141,6 +1146,12 @@ const _metricAliasGroups = <String, List<String>>{
   'trans_fat_g': ['trans_fat_g', 'total_trans_fat_g'],
   'omega_3_g': ['omega_3_g', 'omega3_g'],
   'omega_6_g': ['omega_6_g', 'omega6_g'],
+  'alpha_linolenic_acid_g': [
+    'alpha_linolenic_acid_g',
+    'ala_g',
+    '18_3_n_3_g',
+  ],
+  'linoleic_acid_g': ['linoleic_acid_g', '18_2_n_6_g'],
   'cholesterol_mg': ['cholesterol_mg', 'cholesterol'],
   'sugars_g': ['sugars_g', 'total_sugars_g', 'sugar_g', 'sugars'],
   'added_sugars_g': ['added_sugars_g', 'added_sugar_g', 'added_sugars'],
@@ -1244,9 +1255,9 @@ List<_CanonicalMetricEntry> _canonicalMetricEntries(
     );
   }
 
-  // Preserve nutrients that are not yet in the alias registry. They remain
-  // visible in Insights and will appear under "Reference unavailable" rather
-  // than being silently discarded.
+  // Preserve measured nutrients internally even when they are not yet in the
+  // alias registry. User-facing balance lists omit them unless a defensible
+  // numeric target/reference can classify them.
   for (final normalized in normalizedSource.entries) {
     if (consumed.contains(normalized.key)) continue;
     final original = normalized.value;
@@ -1327,6 +1338,8 @@ bool _isMacroKey(String rawKey) {
     'trans_fat_g',
     'omega_3_g',
     'omega_6_g',
+    'alpha_linolenic_acid_g',
+    'linoleic_acid_g',
     'cholesterol_mg',
     'sugars_g',
     'added_sugars_g',
@@ -1369,6 +1382,8 @@ String friendlyMetricName(String value) {
     'trans_fat_g': 'Trans fat',
     'omega_3_g': 'Omega-3',
     'omega_6_g': 'Omega-6',
+    'alpha_linolenic_acid_g': 'Alpha-linolenic acid (ALA)',
+    'linoleic_acid_g': 'Linoleic acid (LA)',
     'cholesterol_mg': 'Cholesterol',
     'sugars_g': 'Total sugars',
     'added_sugars_g': 'Added sugars',
