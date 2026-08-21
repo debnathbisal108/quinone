@@ -554,13 +554,25 @@ List<_TodayNutrientItem> _todayNutrientItems(
         ? insights.macroKeys
         : insights.micronutrientKeys;
     for (final key in keys) {
+      final normalizedKey = key.trim().toLowerCase();
+      // Sugars stay available in meal-level carbohydrate details, but the
+      // Home nutrient-balance list intentionally excludes sugar rows.
+      if (normalizedKey == 'sugars_g' ||
+          normalizedKey == 'total_sugars_g' ||
+          normalizedKey == 'sugar_g' ||
+          normalizedKey == 'added_sugars_g' ||
+          normalizedKey == 'added_sugar_g') {
+        continue;
+      }
+
       final value = day.metricValue(category, key);
       final target = insights.targetForDay(day, key);
-      if (value == null) continue;
-      final classified = target?.classify(value) ?? BalanceState.unknown;
-      final state = target != null &&
-              target.minimumStyle &&
-              target.isAboveReference(value)
+      // A nutrient without a defensible numeric target is omitted rather than
+      // shown as an unavailable/unknown balance row.
+      if (value == null || target == null) continue;
+      final classified = target.classify(value);
+      if (classified == BalanceState.unknown) continue;
+      final state = target.minimumStyle && target.isAboveReference(value)
           ? BalanceState.high
           : classified;
       result.add(
@@ -569,7 +581,7 @@ List<_TodayNutrientItem> _todayNutrientItems(
           key: key,
           label: friendlyMetricName(key),
           value: value,
-          unit: target == null || target.unit.isEmpty ? unitForMetric(key) : target.unit,
+          unit: target.unit.isEmpty ? unitForMetric(key) : target.unit,
           state: state,
           target: target,
           contributors: day.contributorsFor(category, key),
@@ -591,7 +603,6 @@ void _showTodayNutrients(
     BalanceState.low: items.where((i) => i.state == BalanceState.low).toList(),
     BalanceState.balanced: items.where((i) => i.state == BalanceState.balanced).toList(),
     BalanceState.high: items.where((i) => i.state == BalanceState.high).toList(),
-    BalanceState.unknown: items.where((i) => i.state == BalanceState.unknown).toList(),
   };
 
   showModalBottomSheet<void>(
@@ -638,13 +649,6 @@ void _showTodayNutrients(
               title: 'Above target',
               items: groups[BalanceState.high]!,
             ),
-            if (groups[BalanceState.unknown]!.isNotEmpty) ...[
-              const SizedBox(height: 20),
-              _TodayNutrientGroup(
-                title: 'Reference unavailable',
-                items: groups[BalanceState.unknown]!,
-              ),
-            ],
           ],
         ),
       );
@@ -690,11 +694,15 @@ class _TodayNutrientGroup extends StatelessWidget {
                       Text('${_homeCompact(item.value)} ${item.unit}', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
                     ],
                   ),
-                  if (reference != null && reference > 0) ...[
+                  if (reference != null && reference >= 0) ...[
                     const SizedBox(height: 3),
                     Text(
-                      'Reference ${_homeCompact(reference)} ${item.unit} · ${(item.value / reference * 100).round()}%',
-                      style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                      reference == 0
+                          ? 'Reference 0 ${item.unit}'
+                          : 'Reference ${_homeCompact(reference)} ${item.unit} · ${(item.value / reference * 100).round()}%',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
                     ),
                     const SizedBox(height: 10),
                     _TodayNutrientProgress(
@@ -707,13 +715,13 @@ class _TodayNutrientGroup extends StatelessWidget {
                     const SizedBox(height: 8),
                     Text(
                       highest == lowest
-                          ? 'Only contributor: ${highest.foodName} · ${highest.percentage.toStringAsFixed(0)}%'
-                          : 'Highest: ${highest.foodName} · ${highest.percentage.toStringAsFixed(0)}%',
+                          ? 'Only contributor: ${highest.foodName} · ${_homeContributionPercent(highest.percentage)}'
+                          : 'Highest: ${highest.foodName} · ${_homeContributionPercent(highest.percentage)}',
                       style: theme.textTheme.bodySmall,
                     ),
                     if (lowest != null && lowest != highest)
                       Text(
-                        'Lowest: ${lowest.foodName} · ${lowest.percentage.toStringAsFixed(0)}%',
+                        'Lowest: ${lowest.foodName} · ${_homeContributionPercent(lowest.percentage)}',
                         style: theme.textTheme.bodySmall,
                       ),
                   ],
@@ -755,7 +763,22 @@ class _TodayNutrientProgress extends StatelessWidget {
         ? target.high ?? target.reference
         : target.high;
     final goal = safetyExcess ? safetyGoal ?? referenceGoal : referenceGoal;
-    if (goal == null || goal <= 0) {
+    if (goal == null) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(999),
+        child: SizedBox(height: 9, child: ColoredBox(color: track)),
+      );
+    }
+    // Zero is a meaningful maximum for trans fat: zero intake is in range,
+    // while any positive reported amount is above target.
+    if (goal == 0) {
+      final fill = value > 0 ? red : green;
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(999),
+        child: SizedBox(height: 9, child: ColoredBox(color: fill)),
+      );
+    }
+    if (goal < 0) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(999),
         child: SizedBox(height: 9, child: ColoredBox(color: track)),
@@ -824,6 +847,12 @@ class _TodayNutrientProgress extends StatelessWidget {
 String _homeCompact(double value) => value == value.roundToDouble()
     ? value.toStringAsFixed(0)
     : value.toStringAsFixed(value.abs() < 10 ? 2 : 1);
+
+String _homeContributionPercent(double percentage) {
+  if (percentage <= 0) return '';
+  if (percentage < 1) return '<1%';
+  return '${percentage.toStringAsFixed(0)}%';
+}
 
 class _RecentMealCard extends StatelessWidget {
   const _RecentMealCard({required this.record, required this.onTap});
