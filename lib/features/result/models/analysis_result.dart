@@ -214,6 +214,17 @@ class AnalysisResult {
       case 'cholesterol_mg':
       case 'cholesterol':
         return cholesterol;
+      case 'sucrose_g':
+      case 'glucose_g':
+      case 'fructose_g':
+      case 'lactose_g':
+      case 'maltose_g':
+      case 'galactose_g':
+      case 'starch_g':
+      case 'component_sum_g':
+      case 'carbohydrate_by_difference_g':
+      case 'carbohydrate_by_summation_g':
+        return carbohydrateComposition[key];
       default:
         for (final nutrient in micronutrients) {
           if (nutrient.key == key) return nutrient.amount;
@@ -353,7 +364,7 @@ class AnalysisResult {
     return AnalysisResult(
       mealName: _firstText(
             meal,
-            const ['meal_name', 'name', 'title', 'meal_type'],
+            const ['recipe_name', 'meal_name', 'name', 'title', 'meal_type'],
           ) ??
           'Meal analysis',
       summary: _firstText(meal, const ['summary', 'description']) ??
@@ -759,6 +770,11 @@ class FoodSummary {
 
   Map<String, double> get nutrients => {
         ...macronutrients,
+        ...carbohydrateComposition,
+        if (carbohydrateComposition['total_sugar_g'] != null)
+          'sugars_g': carbohydrateComposition['total_sugar_g']!,
+        if (carbohydrateComposition['added_sugar_g'] != null)
+          'added_sugars_g': carbohydrateComposition['added_sugar_g']!,
         ...vitamins,
         ...minerals,
       };
