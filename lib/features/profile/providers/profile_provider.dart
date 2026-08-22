@@ -171,6 +171,12 @@ class ProfileNotifier extends StateNotifier<ProfileState> {
     ));
   }
 
+  void toggleAppearanceHealthConcern(String value) {
+    final values = Set<String>.from(state.profile.appearanceHealthConcerns);
+    values.contains(value) ? values.remove(value) : values.add(value);
+    update(state.profile.copyWith(appearanceHealthConcerns: values));
+  }
+
   void toggleMedication(String value) {
     final values = Set<String>.from(state.profile.medications);
     values.contains(value) ? values.remove(value) : values.add(value);
