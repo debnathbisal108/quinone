@@ -2357,7 +2357,8 @@ def _resolved_meal_to_review_draft(
         )
 
     meal_name = str(
-        meal.get("meal_name")
+        meal.get("recipe_name")
+        or meal.get("meal_name")
         or meal.get("meal_type")
         or "Detected meal"
     ).strip()
