@@ -27,6 +27,7 @@ class UserProfile {
     this.ckdStage,
     this.dialysisModality,
     this.chronicConditions = const <String>{},
+    this.appearanceHealthConcerns = const <String>{},
     this.medications = const <String>{},
     this.allergies = const <String>{},
   });
@@ -56,6 +57,7 @@ class UserProfile {
   final String? ckdStage;
   final String? dialysisModality;
   final Set<String> chronicConditions;
+  final Set<String> appearanceHealthConcerns;
   final Set<String> medications;
   final Set<String> allergies;
 
@@ -85,6 +87,7 @@ class UserProfile {
           !resistanceTraining &&
           !enduranceTraining &&
           chronicConditions.isEmpty &&
+          appearanceHealthConcerns.isEmpty &&
           medications.isEmpty &&
           allergies.isEmpty);
 
@@ -153,6 +156,9 @@ class UserProfile {
     if (chronicConditions.isNotEmpty) {
       output['chronic_conditions'] = _sorted(chronicConditions);
     }
+    if (appearanceHealthConcerns.isNotEmpty) {
+      output['appearance_health_concerns'] = _sorted(appearanceHealthConcerns);
+    }
     if (hasCkd) addText('ckd_stage', ckdStage);
     if (hasCkd) addText('dialysis_modality', dialysisModality);
     if (medications.isNotEmpty) output['medications'] = _sorted(medications);
@@ -189,6 +195,7 @@ class UserProfile {
       ckdStage: _text(json['ckd_stage']),
       dialysisModality: _text(json['dialysis_modality']),
       chronicConditions: _set(json['chronic_conditions'] ?? json['conditions']),
+      appearanceHealthConcerns: _set(json['appearance_health_concerns']),
       medications: _set(json['medications']),
       allergies: _set(json['allergies']),
     );
@@ -220,6 +227,7 @@ class UserProfile {
     Object? ckdStage = _unset,
     Object? dialysisModality = _unset,
     Set<String>? chronicConditions,
+    Set<String>? appearanceHealthConcerns,
     Set<String>? medications,
     Set<String>? allergies,
   }) {
@@ -265,6 +273,8 @@ class UserProfile {
           ? this.dialysisModality
           : dialysisModality as String?,
       chronicConditions: chronicConditions ?? this.chronicConditions,
+      appearanceHealthConcerns:
+          appearanceHealthConcerns ?? this.appearanceHealthConcerns,
       medications: medications ?? this.medications,
       allergies: allergies ?? this.allergies,
     );
