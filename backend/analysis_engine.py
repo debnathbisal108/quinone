@@ -187,6 +187,7 @@ MEAL_RESPONSE_JSON_SCHEMA = {
         "meal": {
             "type": "object",
             "properties": {
+                "recipe_name": {"type": "string"},
                 "meal_type": {"type": "string"},
                 "estimated_visible_food_weight_g": {"type": "number"},
                 "foods": {
@@ -199,7 +200,7 @@ MEAL_RESPONSE_JSON_SCHEMA = {
                 },
             },
             "required": [
-                "meal_type", "estimated_visible_food_weight_g", "foods",
+                "recipe_name", "meal_type", "estimated_visible_food_weight_g", "foods",
             ],
         },
     },
@@ -215,6 +216,7 @@ SIMPLE_MEAL_RESPONSE_JSON_SCHEMA = {
         "meal": {
             "type": "object",
             "properties": {
+                "recipe_name": {"type": "string"},
                 "meal_type": {"type": "string"},
                 "estimated_visible_food_weight_g": {"type": "number"},
                 "foods": {
@@ -261,7 +263,7 @@ SIMPLE_MEAL_RESPONSE_JSON_SCHEMA = {
                 },
             },
             "required": [
-                "meal_type", "estimated_visible_food_weight_g", "foods",
+                "recipe_name", "meal_type", "estimated_visible_food_weight_g", "foods",
             ],
         },
     },
@@ -276,6 +278,7 @@ SIMPLE_MEAL_RESPONSE_JSON_SCHEMA = {
 ATOMIC_MEAL_INVENTORY_JSON_SCHEMA = {
     "type": "object",
     "properties": {
+        "recipe_name": {"type": "string"},
         "meal_type": {"type": "string"},
         "items": {
             "type": "array",
@@ -314,7 +317,7 @@ ATOMIC_MEAL_INVENTORY_JSON_SCHEMA = {
             },
         },
     },
-    "required": ["meal_type", "items"],
+    "required": ["recipe_name", "meal_type", "items"],
 }
 
 _LABEL_NUTRIENT_PROPERTIES = {
@@ -2148,6 +2151,22 @@ visible topping or spread that hasn't been listed yet?" Add any that
 were missed.
 
 ==========================
+RECIPE / DISH NAME
+==========================
+
+Always return meal.recipe_name as a concise user-facing name for the prepared
+food or meal in the photograph. This is metadata only and must not be added as
+a nutrient-bearing food object when its ingredients are already returned.
+
+Examples:
+- Roti photo decomposed into whole-wheat flour, water and salt -> recipe_name = "Roti"
+- Oatmeal bowl decomposed into oats, milk, berries and seeds -> recipe_name = "Oatmeal"
+- Plain apple -> recipe_name = "Apple"
+
+Avoid generic recipe names such as "Mixed", "Meal", "Lunch" or "Food" when a
+recognizable food/dish name can be identified.
+
+==========================
 VISIBLE FOOD ONLY
 ==========================
 
@@ -2187,6 +2206,7 @@ Schema
 
 {
   "meal": {
+    "recipe_name": "Rice, Chicken Curry and Naan",
     "meal_type": "Lunch",
     "estimated_visible_food_weight_g": 685,
     "foods": [
@@ -2734,6 +2754,7 @@ dish parent and the same ingredients as separate nutrition entities.
 Return this shape:
 {
   "meal": {
+    "recipe_name": "concise user-facing dish or meal name",
     "meal_type": "short meal description",
     "estimated_visible_food_weight_g": 0,
     "foods": [
@@ -2787,9 +2808,15 @@ Rules:
   mass is already represented by its atomic components. This applies equally
   to bowls, plates, curries, sandwiches, wraps, salads, soups, drinks, desserts
   and isolated foods.
+- recipe_name is the concise user-facing name of what the user would call the
+  prepared food or meal. It is metadata, not a nutrient-bearing food object.
+  Examples: "Roti", "Vegetable Oatmeal", "Chicken Curry with Rice",
+  "Paneer Tikka". If the photo contains one plain atomic food, use that food
+  name. Avoid generic names such as "Mixed", "Meal", "Lunch", or "Food" when
+  a recognizable dish/food name is visible.
 - Break foods down only as far as the photograph supports. Never invent a
   fully hidden ingredient, but never replace multiple clearly visible foods
-  with one vague combined label. A prepared dish name belongs in meal_type,
+  with one vague combined label. A prepared dish name belongs in recipe_name,
   not as an extra nutrient-bearing food when its components are listed.
 - Hydration-expanded staple ingredients must use their dry foundational
   reference basis when they are recovered from a prepared dish. This includes
@@ -2806,10 +2833,11 @@ Rules:
   should be matched as served.
 - Keep independent foods separate. A topping/spread physically attached to a
   food is a separate object with belongs_to_food_id pointing to that food.
-- Never return a prepared meal name alongside its ingredients. In particular,
-  if rolled oats, milk, fruit, seeds or nuts are returned, do not also return
-  Oatmeal, Oatmeal Porridge or Porridge. The prepared name may be used only as
-  meal_type; it is not a nutrient-bearing food object.
+- Never return a prepared meal name as an extra FOOD alongside its ingredients.
+  In particular, if rolled oats, milk, fruit, seeds or nuts are returned, do
+  not also return Oatmeal, Oatmeal Porridge or Porridge as a food object. The
+  prepared name SHOULD be returned in recipe_name; it is metadata and is not a
+  nutrient-bearing food object.
 - Use DIRECT_USDA for an identifiable single food. Use one precise
   usda_food_description and zero or one fallback query; do not generate lists
   of near-duplicate searches.
@@ -3116,7 +3144,7 @@ def _generate_json(
                 is SIMPLE_MEAL_RESPONSE_JSON_SCHEMA
             ):
                 retry_instruction = (
-                    "Inspect this meal image and return its nutrient-bearing "
+                    "Inspect this meal image and return a concise recipe_name plus its nutrient-bearing "
                     "core foods. Return ingredients such as rolled oats, milk, "
                     "fruit, nuts, and seeds—not a parent name such as oatmeal. "
                     "Use DIRECT_USDA for ordinary foods. Use NUTRITION_LABEL "
@@ -3135,7 +3163,7 @@ def _generate_json(
                 is ATOMIC_MEAL_INVENTORY_JSON_SCHEMA
             ):
                 retry_instruction = (
-                    "Re-inspect every supplied view of this one meal. Return "
+                    "Re-inspect every supplied view of this one meal. Return a concise recipe_name and "
                     "the complete atomic food inventory required by the "
                     "schema. Each item must be one ingredient only. Split "
                     "combined dishes into visually supportable ingredients; "
@@ -3227,6 +3255,15 @@ def _validate_model_contract(
         foods = meal.get("foods")
         if not isinstance(foods, list):
             raise ValueError("The AI response did not contain a foods array.")
+        recipe_name = str(meal.get("recipe_name") or "").strip()
+        if not recipe_name:
+            # recipe_name is part of the Gemini contract, but missing metadata
+            # must never throw away an otherwise valid food analysis. Preserve
+            # availability with a deterministic fallback.
+            meal["recipe_name"] = _choose_recipe_name(
+                [str(meal.get("meal_type") or "")],
+                [food for food in foods if isinstance(food, dict)],
+            )
         for food in foods:
             if not isinstance(food, dict):
                 raise ValueError("The AI returned an invalid food item.")
@@ -3604,7 +3641,9 @@ def _audit_and_correct_complete_food_inventory(
         "synonym, or has both a prepared and ingredient name; aggregate its "
         "mass into one item unless the foods are different branded products. "
         "A prepared dish name is not an extra food when its constituent "
-        "ingredients are present. Before returning, reconcile the coverage ledger: "
+        "ingredients are present. Return that recognizable prepared/dish identity "
+        "in recipe_name instead. recipe_name is metadata and does not count toward "
+        "the atomic food inventory. Before returning, reconcile the coverage ledger: "
         "(1) no visible edible region may be unrepresented; (2) no physical food "
         "may appear twice through a synonym, prepared name, crop, or combined parent; "
         "and (3) no vague combined label may remain when the image supports its "
@@ -3626,7 +3665,7 @@ def _audit_and_correct_complete_food_inventory(
         "mass so totals do not double count. Use DIRECT_USDA for generic "
         "ingredients and NUTRITION_LABEL only for a clearly branded packaged "
         "product. Return only one JSON object in this exact compact shape: "
-        '{"meal_type":"...","items":[{"name":"...",'
+        '{"recipe_name":"...","meal_type":"...","items":[{"name":"...",'
         '"canonical_name":"...","category":"...","container":"...",'
         '"role":"...","food_source":"Generic","brand":null,'
         '"quantity":1,"unit":"g","preparation":"...",'
@@ -3705,9 +3744,13 @@ def _audit_and_correct_complete_food_inventory(
         [food.get("name") for food in foods],
         recovered,
     )
+    primary_meal = result.get("meal") if isinstance(result.get("meal"), dict) else {}
+    audited_recipe_name = str(audited.get("recipe_name") or "").strip()
+    primary_recipe_name = str(primary_meal.get("recipe_name") or "").strip()
     return {
         "meal": {
-            "meal_type": str(audited.get("meal_type") or "Mixed"),
+            "recipe_name": audited_recipe_name or primary_recipe_name or "Detected meal",
+            "meal_type": str(audited.get("meal_type") or primary_meal.get("meal_type") or "Mixed"),
             "estimated_visible_food_weight_g": sum(
                 float(food.get("quantity", 0) or 0)
                 for food in foods
@@ -5066,6 +5109,52 @@ def post_process(
     return result
 
 
+def _is_generic_recipe_name(value: Any) -> bool:
+    text = _identity_text(value)
+    return text in {
+        "", "mixed", "meal", "mixed meal", "detected meal", "food", "foods",
+        "breakfast", "lunch", "dinner", "snack", "plate", "bowl",
+    }
+
+
+def _choose_recipe_name(
+    candidates: list[str],
+    foods: list[dict[str, Any]],
+) -> str:
+    """Preserve Gemini's prepared-dish name while keeping a safe fallback."""
+    seen: set[str] = set()
+    meaningful: list[str] = []
+    for candidate in candidates:
+        clean = str(candidate or "").strip()
+        identity = _identity_text(clean)
+        if not clean or identity in seen or _is_generic_recipe_name(clean):
+            continue
+        seen.add(identity)
+        meaningful.append(clean)
+
+    if meaningful:
+        # The current upload UX treats the photo as one meal/recipe. If several
+        # image results exist, prefer the first stable Gemini identity instead
+        # of manufacturing a new LLM-like name in backend code.
+        return meaningful[0]
+
+    visible_names: list[str] = []
+    for food in foods:
+        if not isinstance(food, dict) or food.get("display_in_food_list") is False:
+            continue
+        name = str(food.get("display_name") or food.get("name") or "").strip()
+        identity = _identity_text(name)
+        if not name or identity in seen:
+            continue
+        seen.add(identity)
+        visible_names.append(name)
+    if len(visible_names) == 1:
+        return visible_names[0]
+    if 1 < len(visible_names) <= 3:
+        return " with ".join([visible_names[0], " and ".join(visible_names[1:])])
+    return "Detected meal"
+
+
 # =============================================================================
 # MAIN FLOW – MULTIPLE FILES → SINGLE MERGED RESULT
 # =============================================================================
@@ -5278,6 +5367,8 @@ def analyze_meal(
             ) from error
 
     all_foods: list[dict[str, Any]] = []
+    detected_recipe_names: list[str] = []
+    detected_meal_types: list[str] = []
 
     # ---------------------------------------------------------
     # Analyse food photographs
@@ -5344,6 +5435,14 @@ def analyze_meal(
                     error,
                 )
 
+        detected_meal = result.get("meal") if isinstance(result.get("meal"), dict) else {}
+        recipe_name = str(detected_meal.get("recipe_name") or "").strip()
+        meal_type = str(detected_meal.get("meal_type") or "").strip()
+        if recipe_name:
+            detected_recipe_names.append(recipe_name)
+        if meal_type:
+            detected_meal_types.append(meal_type)
+
         foods = (
             result
             .get("meal", {})
@@ -5379,7 +5478,8 @@ def analyze_meal(
 
     merged_result = {
         "meal": {
-            "meal_type": "Mixed",
+            "recipe_name": _choose_recipe_name(detected_recipe_names, all_foods),
+            "meal_type": detected_meal_types[0] if detected_meal_types else "Mixed",
             "estimated_visible_food_weight_g": 0,
             "foods": all_foods,
         }
@@ -5448,7 +5548,8 @@ def analyze_label_only(
 
     merged_result = {
         "meal": {
-            "meal_type": "Mixed",
+            "recipe_name": str(food.get("display_name") or food.get("name") or "Packaged food"),
+            "meal_type": "Packaged food",
             "estimated_visible_food_weight_g": 0,
             "foods": [food],
         }
