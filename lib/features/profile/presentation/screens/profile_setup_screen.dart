@@ -358,6 +358,25 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
                         ],
                       ],
                     ),
+                    _Section(
+                      title: 'Skin, eye, hair & nail context',
+                      icon: Icons.visibility_outlined,
+                      children: [
+                        Text(
+                          'Optional. Select only concerns or exposures you want Quinone to use when weighting these four support scores.',
+                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                                height: 1.35,
+                              ),
+                        ),
+                        const SizedBox(height: 12),
+                        _MultiChoices(
+                          selected: profile.appearanceHealthConcerns,
+                          options: _appearanceHealthConcerns,
+                          onToggle: notifier.toggleAppearanceHealthConcern,
+                        ),
+                      ],
+                    ),
                     if (profile.sex == 'female')
                       _Section(
                         title: 'Pregnancy and lactation',
@@ -592,6 +611,25 @@ const _conditions = <String, String>{
   'osteoporosis': 'Osteoporosis or osteopenia',
   'iron_deficiency': 'Iron deficiency',
   'thyroid_disease': 'Thyroid disease',
+};
+
+const _appearanceHealthConcerns = <String, String>{
+  'acne_inflammatory_skin': 'Acne / inflammatory skin',
+  'dry_skin_barrier': 'Dry skin / barrier issues',
+  'high_uv_exposure': 'High UV exposure',
+  'wound_healing_post_procedure': 'Wound healing / post-procedure',
+  'amd_risk': 'Age-related macular degeneration risk',
+  'high_screen_time': 'High screen time / digital eye strain',
+  'cataract_risk': 'Cataract risk',
+  'dry_eye': 'Dry eye',
+  'vitamin_a_deficiency_risk': 'Vitamin A deficiency risk',
+  'telogen_effluvium': 'Telogen effluvium / increased shedding',
+  'androgenetic_alopecia': 'Androgenetic alopecia',
+  'alopecia_areata': 'Alopecia areata',
+  'brittle_hair_thinning': 'Brittle hair / thinning',
+  'brittle_nails_splitting': 'Brittle nails / splitting',
+  'koilonychia': 'Koilonychia / spoon nails',
+  'onycholysis': 'Onycholysis / nail separation',
 };
 
 const _medications = <String, String>{
