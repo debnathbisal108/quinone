@@ -45,7 +45,7 @@ logger.setLevel(os.environ.get("NUTRICA_LOG_LEVEL", "INFO"))
 
 # _ROUND_DP = 2
 
-PERSONALIZATION_VERSION = "1.2.0"
+PERSONALIZATION_VERSION = "1.3.0"
 
 COMBINED_MULTIPLIER_BOUNDS = (
     0.3,
@@ -204,6 +204,31 @@ def _has_any_condition(*names: str) -> Callable[[Dict[str, Any]], bool]:
     return _check
 
 
+def _has_any_profile_list_value(field_name: str, *names: str) -> Callable[[Dict[str, Any]], bool]:
+    normalized = {n.strip().lower() for n in names}
+
+    def _check(profile: Dict[str, Any]) -> bool:
+        values = profile.get(field_name) or []
+        if not isinstance(values, (list, tuple, set)):
+            return False
+        value_set = {str(value).strip().lower() for value in values}
+        return bool(normalized & value_set)
+
+    return _check
+
+
+def _has_any_appearance_context(*names: str) -> Callable[[Dict[str, Any]], bool]:
+    """Match the dedicated optional concern list, while also accepting the
+    same keys in chronic_conditions for backward/API compatibility."""
+    in_concerns = _has_any_profile_list_value("appearance_health_concerns", *names)
+    in_conditions = _has_any_condition(*names)
+
+    def _check(profile: Dict[str, Any]) -> bool:
+        return in_concerns(profile) or in_conditions(profile)
+
+    return _check
+
+
 def _all_of(*predicates: Callable[[Dict[str, Any]], bool]) -> Callable[[Dict[str, Any]], bool]:
     def _check(profile: Dict[str, Any]) -> bool:
         return all(p(profile) for p in predicates)
@@ -215,7 +240,7 @@ def _all_of(*predicates: Callable[[Dict[str, Any]], bool]) -> Callable[[Dict[str
 # MODIFIER DATABASES
 # =========================================================================
 #
-# Nine named groups, matching the requested architecture. Each modifier's
+# Modifier groups. Each modifier's
 # reason/multiplier/confidence reflects the same scientific grounding
 # already used for evidence_engine.py's POPULATION_MODIFIERS and the
 # per-domain "population modifier" notes in the coefficient reference
@@ -427,10 +452,191 @@ TRAINING_MODIFIERS: List[Modifier] = [
     ),
 ]
 
+# The four appearance-related module specifications define which features
+# become more relevant for a given context, but do not provide numeric
+# context multipliers. Use one conservative +20% relevance multiplier for
+# all such contexts rather than inventing different strengths. Rule-level
+# targeting keeps these modifiers isolated to Skin/Eye/Hair/Nail scoring.
+_APPEARANCE_CONTEXT_MULTIPLIER = 1.20
+
+APPEARANCE_HEALTH_MODIFIERS: List[Modifier] = [
+    Modifier(
+        id="appearance_older_adult_skin", category="appearance_health", applies_when=_age_at_least(65),
+        reason="Older-adult skin context increases collagen, vitamin C, polyphenol, and zinc relevance",
+        affected_domains=("Skin Health",),
+        affected_rules=("skin_collagen", "skin_vitamin_c", "skin_polyphenols", "skin_zinc"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_older_adult_eye", category="appearance_health", applies_when=_age_at_least(65),
+        reason="Older-adult eye context increases lutein/zeaxanthin, vitamins C/E, zinc, and EPA+DHA relevance",
+        affected_domains=("Eye Health",),
+        affected_rules=("eye_lutein_zeaxanthin", "eye_vitamin_c", "eye_vitamin_e", "eye_zinc", "eye_omega3"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_older_adult_nail", category="appearance_health", applies_when=_age_at_least(65),
+        reason="Older-adult nail context increases protein, biotin, and zinc relevance",
+        affected_domains=("Nail Health",),
+        affected_rules=("nail_protein", "nail_biotin", "nail_zinc"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_skin_acne_inflammatory", category="appearance_health",
+        applies_when=_has_any_appearance_context("acne_inflammatory_skin", "acne", "inflammatory_skin_condition"),
+        reason="Acne/inflammatory-skin context increases omega-3, zinc, and polyphenol relevance",
+        affected_domains=("Skin Health",),
+        affected_rules=("skin_omega3", "skin_zinc", "skin_polyphenols"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_skin_dry_barrier", category="appearance_health",
+        applies_when=_has_any_appearance_context("dry_skin_barrier", "dry_skin", "skin_barrier_issue"),
+        reason="Dry-skin/barrier context increases omega-3, hydration, and vitamin E relevance",
+        affected_domains=("Skin Health",),
+        affected_rules=("skin_omega3", "skin_hydration", "skin_vitamin_e"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_skin_high_uv", category="appearance_health",
+        applies_when=_has_any_appearance_context("high_uv_exposure"),
+        reason="High-UV context increases carotenoid, vitamin C, and vitamin E relevance",
+        affected_domains=("Skin Health",),
+        affected_rules=("skin_carotenoids", "skin_vitamin_c", "skin_vitamin_e"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_skin_wound_healing", category="appearance_health",
+        applies_when=_has_any_appearance_context("wound_healing_post_procedure", "wound_healing", "post_procedure"),
+        reason="Wound-healing/post-procedure context increases protein, vitamin C, zinc, and collagen relevance",
+        affected_domains=("Skin Health",),
+        affected_rules=("skin_protein", "skin_vitamin_c", "skin_zinc", "skin_collagen"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_eye_amd_risk", category="appearance_health",
+        applies_when=_has_any_appearance_context("amd_risk", "age_related_macular_degeneration_risk"),
+        reason="AMD-risk context increases lutein/zeaxanthin, vitamins C/E, zinc, and EPA+DHA relevance",
+        affected_domains=("Eye Health",),
+        affected_rules=("eye_lutein_zeaxanthin", "eye_vitamin_c", "eye_vitamin_e", "eye_zinc", "eye_omega3"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_eye_high_screen_time", category="appearance_health",
+        applies_when=_has_any_appearance_context("high_screen_time", "digital_eye_strain"),
+        reason="High-screen-time/digital-eye-strain context increases lutein/zeaxanthin and omega-3 relevance",
+        affected_domains=("Eye Health",),
+        affected_rules=("eye_lutein_zeaxanthin", "eye_omega3"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_eye_cataract_risk", category="appearance_health",
+        applies_when=_has_any_appearance_context("cataract_risk"),
+        reason="Cataract-risk context increases vitamin C, vitamin E, and carotenoid relevance",
+        affected_domains=("Eye Health",),
+        affected_rules=("eye_vitamin_c", "eye_vitamin_e", "eye_vitamin_a"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_eye_dry_eye", category="appearance_health",
+        applies_when=_has_any_appearance_context("dry_eye"),
+        reason="Dry-eye context increases omega-3 relevance",
+        affected_domains=("Eye Health",),
+        affected_rules=("eye_omega3",),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_eye_vitamin_a_risk", category="appearance_health",
+        applies_when=_has_any_appearance_context("vitamin_a_deficiency_risk"),
+        reason="Vitamin-A-deficiency-risk context increases vitamin A/carotenoid relevance",
+        affected_domains=("Eye Health",),
+        affected_rules=("eye_vitamin_a",),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_hair_telogen", category="appearance_health",
+        applies_when=_has_any_appearance_context("telogen_effluvium", "hair_shedding"),
+        reason="Telogen-effluvium/shedding context increases iron, protein, zinc, and vitamin D relevance",
+        affected_domains=("Hair Health",),
+        affected_rules=("hair_iron", "hair_protein", "hair_zinc", "hair_vitamin_d"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_hair_androgenetic", category="appearance_health",
+        applies_when=_has_any_appearance_context("androgenetic_alopecia"),
+        reason="Androgenetic-alopecia context increases iron, zinc, vitamin D, and biotin relevance",
+        affected_domains=("Hair Health",),
+        affected_rules=("hair_iron", "hair_zinc", "hair_vitamin_d", "hair_biotin"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_hair_alopecia_areata", category="appearance_health",
+        applies_when=_has_any_appearance_context("alopecia_areata"),
+        reason="Alopecia-areata context increases zinc, vitamin D, and iron relevance",
+        affected_domains=("Hair Health",),
+        affected_rules=("hair_zinc", "hair_vitamin_d", "hair_iron"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_hair_brittle_thinning", category="appearance_health",
+        applies_when=_has_any_appearance_context("brittle_hair_thinning", "brittle_hair", "hair_thinning"),
+        reason="Brittle-hair/thinning context increases biotin, zinc, selenium, and protein relevance",
+        affected_domains=("Hair Health",),
+        affected_rules=("hair_biotin", "hair_zinc", "hair_selenium", "hair_protein"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_hair_vegetarian", category="appearance_health", applies_when=_field_in("diet_type", "vegetarian", "vegan"),
+        reason="Vegetarian/vegan context increases iron, zinc, biotin, and vitamin D relevance for hair support",
+        affected_domains=("Hair Health",),
+        affected_rules=("hair_iron", "hair_zinc", "hair_biotin", "hair_vitamin_d"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_nail_brittle", category="appearance_health",
+        applies_when=_has_any_appearance_context("brittle_nails_splitting", "brittle_nails", "nail_splitting"),
+        reason="Brittle-nail/splitting context increases biotin, protein, iron, and zinc relevance",
+        affected_domains=("Nail Health",),
+        affected_rules=("nail_biotin", "nail_protein", "nail_iron", "nail_zinc"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_nail_koilonychia", category="appearance_health",
+        applies_when=_has_any_appearance_context("koilonychia", "spoon_nails"),
+        reason="Koilonychia/spoon-nail context increases iron relevance",
+        affected_domains=("Nail Health",),
+        affected_rules=("nail_iron",),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_nail_onycholysis", category="appearance_health",
+        applies_when=_has_any_appearance_context("onycholysis", "nail_separation"),
+        reason="Onycholysis/nail-separation context increases biotin, zinc, and omega-3 relevance",
+        affected_domains=("Nail Health",),
+        affected_rules=("nail_biotin", "nail_zinc", "nail_omega3"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_nail_vegetarian", category="appearance_health", applies_when=_field_in("diet_type", "vegetarian", "vegan"),
+        reason="Vegetarian/vegan context increases iron, zinc, biotin, and selenium relevance for nail support",
+        affected_domains=("Nail Health",),
+        affected_rules=("nail_iron", "nail_zinc", "nail_biotin", "nail_selenium"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_iron_deficiency_hair_nail", category="appearance_health",
+        applies_when=_has_any_condition("iron_deficiency"),
+        reason="An explicitly selected iron-deficiency context raises iron relevance for hair and nail support",
+        affected_domains=("Hair Health", "Nail Health"),
+        affected_rules=("hair_iron", "nail_iron"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+]
+
 ALL_MODIFIER_GROUPS: Tuple[List[Modifier], ...] = (
     AGE_MODIFIERS, GOAL_MODIFIERS, DISEASE_MODIFIERS, ACTIVITY_MODIFIERS,
     DIET_MODIFIERS, PREGNANCY_MODIFIERS, FRAILTY_MODIFIERS,
-    LOW_APPETITE_MODIFIERS, TRAINING_MODIFIERS,
+    LOW_APPETITE_MODIFIERS, TRAINING_MODIFIERS, APPEARANCE_HEALTH_MODIFIERS,
 )
 
 
@@ -440,7 +646,7 @@ ALL_MODIFIER_GROUPS: Tuple[List[Modifier], ...] = (
 
 def load_modifier_database() -> List[Modifier]:
     """
-    Assemble every modifier across all nine categories into one flat
+    Assemble every modifier across all categories into one flat
     list. The full database is small (dozens of entries, not hundreds),
     so this is deliberately NOT cached/memoized (see PERFORMANCE / "remain
     cache-free" in the module docstring) - recomputing a plain list
@@ -587,6 +793,15 @@ def normalize_user_profile(
         dict.fromkeys(conditions)
     )
 
+    raw_appearance_concerns = profile.get("appearance_health_concerns")
+    appearance_concerns: List[str] = []
+    if isinstance(raw_appearance_concerns, (list, tuple, set)):
+        for concern in raw_appearance_concerns:
+            cleaned = clean_text(concern)
+            if cleaned:
+                appearance_concerns.append(cleaned)
+    normalized["appearance_health_concerns"] = list(dict.fromkeys(appearance_concerns))
+
     raw_medications = profile.get("medications")
     medications: List[str] = []
 
@@ -717,10 +932,25 @@ def apply_domain_modifiers(evidence_item: Dict[str, Any], modifier_index: Modifi
 
 def apply_evidence_modifiers(evidence_item: Dict[str, Any], modifier_index: ModifierIndex) -> List[Modifier]:
     """Every active feature- or rule-level modifier matching this evidence
-    item's own feature key or rule_id."""
-    matches = list(modifier_index.by_feature.get(evidence_item.get("feature"), []))
+    item's feature/rule and, when supplied, its intended health domain.
+
+    Domain filtering matters because the same feature (for example protein
+    density) can participate in many independent modules. A modifier declared
+    for Bone Health must not leak into Hair Health merely because both use
+    protein_density.
+    """
+    domain_label = evidence_item.get("health_domain")
+
+    def domain_matches(modifier: Modifier) -> bool:
+        return not modifier.affected_domains or domain_label in modifier.affected_domains
+
+    matches = [
+        modifier
+        for modifier in modifier_index.by_feature.get(evidence_item.get("feature"), [])
+        if domain_matches(modifier)
+    ]
     for modifier in modifier_index.by_rule.get(evidence_item.get("rule_id"), []):
-        if modifier not in matches:
+        if domain_matches(modifier) and modifier not in matches:
             matches.append(modifier)
     return matches
 
