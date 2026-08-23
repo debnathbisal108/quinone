@@ -27,7 +27,7 @@ from recommendation_engine import (
 )
 
 
-GUIDANCE_ENGINE_VERSION = "2.5.0"
+GUIDANCE_ENGINE_VERSION = "2.6.0"
 
 _LABELS: dict[str, tuple[str, str]] = {
     "energy_kcal": ("Energy", "kcal"),
@@ -511,6 +511,83 @@ def _suggestions(
     ]
 
 
+def _validate_alert_suggestions(
+    alerts: list[dict[str, Any]],
+    candidates: Iterable[dict[str, Any]],
+) -> None:
+    """Enforce nutrient truth at the final guidance boundary.
+
+    A suggestion is allowed to remain under a nutrient card only when the
+    exact candidate nutrient payload proves that the proposed serving contains
+    a meaningful amount of that same nutrient.  This is deliberately repeated
+    after matching so no ranking/assignment bug can ever place (for example)
+    almonds under Vitamin C.
+    """
+    candidate_list = [item for item in candidates if isinstance(item, dict)]
+    by_query = {
+        str(item.get("search_query") or "").strip().lower(): item
+        for item in candidate_list
+        if str(item.get("search_query") or "").strip()
+    }
+    by_name = {
+        str(item.get("name") or "").strip().lower(): item
+        for item in candidate_list
+        if str(item.get("name") or "").strip()
+    }
+    by_fdc = {
+        int(item["fdc_id"]): item
+        for item in candidate_list
+        if isinstance(item.get("fdc_id"), int)
+    }
+
+    for alert in alerts:
+        if not isinstance(alert, dict) or alert.get("direction") != "low":
+            continue
+        nutrient = str(alert.get("nutrient") or "").strip()
+        reference = _number(alert.get("reference")) or 0.0
+        current = _number(alert.get("amount")) or 0.0
+        validated: list[dict[str, Any]] = []
+        for raw in alert.get("suggestions", []) or []:
+            if not isinstance(raw, dict):
+                continue
+            suggestion = dict(raw)
+            if str(suggestion.get("target_nutrient") or nutrient).strip() != nutrient:
+                continue
+            candidate = None
+            fdc_id = suggestion.get("fdc_id")
+            if isinstance(fdc_id, int):
+                candidate = by_fdc.get(fdc_id)
+            if candidate is None:
+                candidate = (
+                    by_query.get(str(suggestion.get("search_query") or "").strip().lower())
+                    or by_name.get(str(suggestion.get("name") or "").strip().lower())
+                )
+            # Never trust an orphaned suggestion whose nutrient payload cannot
+            # be traced back to the exact verified candidate used to create it.
+            if candidate is None:
+                continue
+            per100 = _number((candidate.get("nutrients") or {}).get(nutrient)) or 0.0
+            serving = _number(suggestion.get("quantity")) or _number(candidate.get("serving_g")) or 0.0
+            delivered = per100 * serving / 100.0
+            if per100 <= 0 or serving <= 0 or delivered <= 0:
+                continue
+            # Require a useful change, not a technically-nonzero trace amount.
+            # Five percent of the daily reference is intentionally conservative
+            # enough for micronutrients while filtering nutritionally irrelevant
+            # recommendations.
+            if reference > 0 and delivered < reference * 0.05:
+                continue
+            suggestion["target_nutrient"] = nutrient
+            suggestion["target_nutrient_per_100g"] = round(per100, 6)
+            suggestion["expected_nutrient_amount"] = round(delivered, 6)
+            if reference > 0:
+                suggestion["expected_new_percentage"] = round(
+                    (current + delivered) / reference * 100.0, 1
+                )
+            validated.append(suggestion)
+        alert["suggestions"] = validated[:3]
+
+
 async def apply_personalized_guidance_safety(
     guidance: dict[str, Any],
     nutrient_result: dict[str, Any],
@@ -802,7 +879,11 @@ def build_draft_meal_guidance(
                 if generic_reference
                 else f"This meal provides {daily_percentage:.0f}% of your personalized daily target for {label}."
             ),
-            "contributors": _contributors(foods, key),
+            "contributors": (
+                _contributors(foods, key)
+                if daily_percentage >= 0.5 and round(amount, 2) > 0
+                else []
+            ),
             "suggestions": _suggestions(
                 nutrient_key=key,
                 direction="low",
@@ -917,6 +998,8 @@ def build_draft_meal_guidance(
             if len(selected) >= 3:
                 break
         alert["suggestions"] = selected
+
+    _validate_alert_suggestions(alerts, duplicate_candidates)
 
     severity_order = {"critical": 0, "warning": 1, "notice": 2}
     alerts.sort(key=lambda item: severity_order.get(str(item.get("severity")), 9))
