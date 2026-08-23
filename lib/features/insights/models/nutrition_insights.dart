@@ -1410,6 +1410,18 @@ String friendlyMetricName(String value) {
     'metabolic_health': 'Metabolic health',
     'digestive_health': 'Digestive health',
     'bone_health': 'Bone health',
+    'skin': 'Skin Health',
+    'eye': 'Eye Health',
+    'hair': 'Hair Health',
+    'nail': 'Nail Health',
+    'skin_health': 'Skin Health',
+    'eye_health': 'Eye Health',
+    'hair_health': 'Hair Health',
+    'nail_health': 'Nail Health',
+    'teeth': 'Teeth and Oral Health',
+    'oral': 'Teeth and Oral Health',
+    'teeth_health': 'Teeth and Oral Health',
+    'oral_health': 'Teeth and Oral Health',
   };
   final direct = aliases[canonical];
   if (direct != null) return direct;
