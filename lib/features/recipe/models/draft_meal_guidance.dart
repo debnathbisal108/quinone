@@ -134,6 +134,12 @@ class DraftFoodSuggestion {
     required this.quantity,
     required this.unit,
     required this.reason,
+    this.fdcId,
+    this.description,
+    this.dataType,
+    this.foodCategory,
+    this.targetNutrient,
+    this.targetNutrientPer100g,
   });
 
   final String type;
@@ -142,6 +148,12 @@ class DraftFoodSuggestion {
   final double quantity;
   final String unit;
   final String reason;
+  final int? fdcId;
+  final String? description;
+  final String? dataType;
+  final String? foodCategory;
+  final String? targetNutrient;
+  final double? targetNutrientPer100g;
 
   factory DraftFoodSuggestion.fromJson(Map<String, dynamic> json) {
     return DraftFoodSuggestion(
@@ -151,8 +163,26 @@ class DraftFoodSuggestion {
       quantity: _number(json['quantity']),
       unit: json['unit']?.toString() ?? 'g',
       reason: json['reason']?.toString() ?? '',
+      fdcId: _nullableInt(json['fdc_id']),
+      description: json['description']?.toString(),
+      dataType: json['data_type']?.toString(),
+      foodCategory: json['food_category']?.toString(),
+      targetNutrient: json['target_nutrient']?.toString(),
+      targetNutrientPer100g: _nullableNumber(json['target_nutrient_per_100g']),
     );
   }
+}
+
+int? _nullableInt(dynamic value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  return int.tryParse(value?.toString() ?? '');
+}
+
+double? _nullableNumber(dynamic value) {
+  if (value == null) return null;
+  if (value is num) return value.toDouble();
+  return double.tryParse(value.toString());
 }
 
 double _number(dynamic value) {
