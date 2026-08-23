@@ -24,7 +24,7 @@ if not logger.handlers:
 logger.setLevel(os.environ.get("NUTRICA_LOG_LEVEL", "INFO"))
 logger.propagate = False
 
-FEATURE_VERSION = "1.2"
+FEATURE_VERSION = "1.4"
 _ROUND_DP = 6
 _VALID_ENTITY_TYPES = {"food", "ingredient", "spice"}
 _GRAM_UNITS = {"g", "gram", "grams"}
@@ -168,12 +168,35 @@ def _build_fat_profile(nutrients, raw_index):
 
 def _build_vitamins(nutrients, raw_index):
     keys = ["vitamin_a_ug", "vitamin_c_mg", "vitamin_d_ug", "vitamin_e_mg", "vitamin_k_ug", "thiamin_mg", "riboflavin_mg", "niacin_mg", "pantothenic_acid_mg", "vitamin_b6_mg", "folate_ug", "vitamin_b12_ug", "choline_mg"]
-    return {key: get_nutrient(nutrients, raw_index, key) for key in keys}
+    values = {key: get_nutrient(nutrients, raw_index, key) for key in keys}
+    # Biotin is not consistently promoted into the canonical nutrient map by
+    # every USDA route, but it can be present in the raw FoodData Central
+    # nutrient records. Preserve it when it is actually reported; never
+    # synthesize a value when the source does not provide one.
+    values["biotin_ug"] = get_nutrient(
+        nutrients,
+        raw_index,
+        "biotin_ug",
+        names=("biotin", "vitamin b7", "vitamin b-7"),
+    )
+    return values
 
 
 def _build_minerals(nutrients, raw_index):
     keys = ["calcium_mg", "iron_mg", "magnesium_mg", "phosphorus_mg", "potassium_mg", "sodium_mg", "zinc_mg", "copper_mg", "manganese_mg", "selenium_ug"]
-    return {key: get_nutrient(nutrients, raw_index, key) for key in keys}
+    values = {key: get_nutrient(nutrients, raw_index, key) for key in keys}
+    # Fluoride is sparse in FoodData Central and is often present only in the
+    # raw nutrient rows. Keep it measured-only; the canonical map now promotes
+    # it when available, while this raw fallback protects mixed cache/data
+    # versions during rollout.
+    values["fluoride_mg"] = get_nutrient(
+        nutrients,
+        raw_index,
+        "fluoride_mg",
+        numbers=("313",),
+        names=("fluoride, f", "fluoride"),
+    )
+    return values
 
 
 _AMINO_ACID_MATCHERS = {
