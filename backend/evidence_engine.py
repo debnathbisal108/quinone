@@ -28,7 +28,7 @@ logger.propagate = False
 # CONFIG / ENUMS
 # =========================================================================
 
-ENGINE_VERSION = "1.0"
+ENGINE_VERSION = "1.2"
 
 
 class CurveType:
@@ -65,6 +65,11 @@ DOMAIN_ORIENTATION: Dict[str, str] = {
     "weight": ScoreOrientation.RISK,
     "muscle": ScoreOrientation.SUPPORT,
     "gut": ScoreOrientation.SUPPORT,
+    "skin": ScoreOrientation.SUPPORT,
+    "eye": ScoreOrientation.SUPPORT,
+    "hair": ScoreOrientation.SUPPORT,
+    "nail": ScoreOrientation.SUPPORT,
+    "teeth": ScoreOrientation.SUPPORT,
 }
 
 DOMAIN_HEALTH_LABEL: Dict[str, str] = {
@@ -82,6 +87,11 @@ DOMAIN_HEALTH_LABEL: Dict[str, str] = {
     "weight": "Weight Management",
     "muscle": "Musculoskeletal Health & Healthy Aging",
     "gut": "Gut Health",
+    "skin": "Skin Health",
+    "eye": "Eye Health",
+    "hair": "Hair Health",
+    "nail": "Nail Health",
+    "teeth": "Teeth and Oral Health",
 }
 
 # Qualitative "Confidence" column from the source document -> numeric
@@ -266,6 +276,13 @@ def _resolve_iron_density(e): return _density(e, _get(e, "minerals", "iron_mg"))
 def _resolve_saturated_fat_density(e): return _density(e, _get(e, "fat_profile", "saturated_fat_g"))
 def _resolve_trans_fat_density(e): return _density(e, _get(e, "fat_profile", "trans_fat_g"))
 def _resolve_omega3_density(e): return _density(e, _get(e, "fat_profile", "omega3_g"))
+def _resolve_epa_dha_density(e):
+    epa = _valid_number(_get(e, "fatty_acids", "epa_g"))
+    dha = _valid_number(_get(e, "fatty_acids", "dha_g"))
+    known = [value for value in (epa, dha) if value is not None]
+    if not known:
+        return None
+    return _density(e, sum(known))
 def _resolve_omega6_density(e): return _density(e, _get(e, "fat_profile", "omega6_g"))
 def _resolve_cholesterol_density(e): return _density(e, _get(e, "fat_profile", "cholesterol_mg"))
 
@@ -281,6 +298,167 @@ def _resolve_fructose_density(e): return _density(e, _get(e, "sugars", "fructose
 
 def _resolve_caffeine_density(e): return _density(e, _get(e, "bioactives", "caffeine_mg"))
 def _resolve_alcohol_density(e): return _density(e, _get(e, "macronutrients", "alcohol_g"))
+
+
+# ---- Skin / eye / hair / nail module features -----------------------
+#
+# These resolvers deliberately reuse measured USDA/feature-engineering data
+# wherever possible. The two features that are explicitly *proxies* in the
+# supplied module specification (polyphenols and collagen) are conservative,
+# deterministic proxies; they never manufacture a nutrient quantity.
+
+def _resolve_vitamin_c_density(e): return _density(e, _get(e, "vitamins", "vitamin_c_mg"))
+def _resolve_vitamin_e_density(e): return _density(e, _get(e, "vitamins", "vitamin_e_mg"))
+def _resolve_vitamin_a_density(e): return _density(e, _get(e, "vitamins", "vitamin_a_ug"))
+def _resolve_zinc_density(e): return _density(e, _get(e, "minerals", "zinc_mg"))
+def _resolve_selenium_density(e): return _density(e, _get(e, "minerals", "selenium_ug"))
+def _resolve_biotin_density(e): return _density(e, _get(e, "vitamins", "biotin_ug"))
+def _resolve_fluoride_density(e): return _density(e, _get(e, "minerals", "fluoride_mg"))
+
+
+def _resolve_xylitol_proxy(e):
+    """Unitless proxy that fires only for explicitly identified xylitol.
+
+    USDA does not expose a reliable universal xylitol nutrient field. The
+    supplied oral-health module explicitly calls this a proxy, so absence of
+    an explicit xylitol/birch-sugar identity is treated as no xylitol signal,
+    never as a fabricated dose.
+    """
+    text = _text(e)
+    if not text:
+        return None
+    return 1.0 if _any_kw(text, ("xylitol", "birch sugar")) else 0.0
+
+
+def _resolve_lutein_zeaxanthin_density(e):
+    combined = _valid_number(_get(e, "bioactives", "lutein_zeaxanthin_combined_ug"))
+    if combined is not None:
+        return _density(e, combined)
+    lutein = _valid_number(_get(e, "bioactives", "lutein_ug"))
+    zeaxanthin = _valid_number(_get(e, "bioactives", "zeaxanthin_ug"))
+    known = [value for value in (lutein, zeaxanthin) if value is not None]
+    if not known:
+        return None
+    # A partial raw USDA record is treated as a measured lower-bound signal,
+    # not as proof that an unreported sibling carotenoid is zero.
+    return _density(e, sum(known))
+
+
+def _resolve_vitamin_a_carotenoid_proxy(e):
+    """Unitless 0..1.5 support proxy from measured vitamin A/carotenoids.
+
+    Lutein/zeaxanthin are intentionally excluded from this combined proxy so
+    the Eye module can weight them separately without double-counting. The
+    normalizers correspond to roughly one twentieth of an adult daily
+    reference per 100 kcal (vitamin A) and a conservative carotenoid-density
+    anchor. They are implementation scale parameters, not new RDAs.
+    """
+    normalized: List[float] = []
+
+    vitamin_a_density = _resolve_vitamin_a_density(e)
+    if vitamin_a_density is not None:
+        normalized.append(min(max(float(vitamin_a_density) / 45.0, 0.0), 1.5))
+
+    carotenoid_keys = (
+        "beta_carotene_ug",
+        "alpha_carotene_ug",
+        "cryptoxanthin_beta_ug",
+        "lycopene_ug",
+    )
+    measured = [
+        _valid_number(_get(e, "bioactives", key))
+        for key in carotenoid_keys
+    ]
+    known = [value for value in measured if value is not None]
+    if known:
+        carotenoid_density = _density(e, sum(known))
+        if carotenoid_density is not None:
+            normalized.append(min(max(float(carotenoid_density) / 500.0, 0.0), 1.5))
+
+    return round(max(normalized), 6) if normalized else None
+
+
+_POLYPHENOL_STRONG_KEYWORDS = (
+    "blueberry", "blackberry", "raspberry", "strawberry", "cranberry",
+    "grape", "pomegranate", "cherry", "plum", "cocoa", "cacao",
+    "dark chocolate", "green tea", "black tea", "tea", "coffee",
+    "olive", "clove", "cinnamon", "turmeric", "oregano", "rosemary",
+    "thyme", "sage", "parsley", "basil",
+)
+
+
+def _resolve_polyphenol_proxy(e):
+    """Conservative food-identity proxy, never a fabricated polyphenol dose.
+
+    FoodData Central does not provide a uniform total-polyphenol nutrient. The
+    supplied module explicitly asks for a *proxy*, so Quinone uses only coarse
+    food-matrix identity: strongly recognized polyphenol-rich foods score 1,
+    spices/herbs 0.8, and other plant foods 0.5. Unknown identity returns None.
+    """
+    text = _text(e)
+    if _any_kw(text, _POLYPHENOL_STRONG_KEYWORDS):
+        return 1.0
+
+    is_spice = _get(e, "food_matrix", "is_spice")
+    if is_spice is True:
+        return 0.8
+
+    plant_flags = (
+        _get(e, "food_matrix", "is_fruit"),
+        _get(e, "food_matrix", "is_vegetable"),
+        _get(e, "food_matrix", "is_legume"),
+        _get(e, "food_matrix", "is_nut"),
+        _get(e, "food_matrix", "is_seed"),
+        _get(e, "food_matrix", "is_whole_grain"),
+    )
+    if any(flag is True for flag in plant_flags):
+        return 0.5
+    if any(flag is not None for flag in plant_flags):
+        return 0.0
+    return None
+
+
+_COLLAGEN_EXPLICIT_KEYWORDS = (
+    "collagen", "gelatin", "gelatine", "bone broth", "pork skin",
+    "chicken skin", "fish skin",
+)
+
+
+def _resolve_collagen_proxy(e):
+    """Unitless collagen-support proxy using only observed identity/amino acids.
+
+    Explicit collagen/gelatin foods are recognized directly. Otherwise, an
+    animal-food signal is only emitted when USDA supplies glycine, proline and
+    total protein, using the glycine+proline share as a conservative structural
+    proxy. It is not reported or displayed as grams of collagen.
+    """
+    text = _text(e)
+    if _any_kw(text, _COLLAGEN_EXPLICIT_KEYWORDS):
+        return 1.0
+
+    animal_flags = (
+        _get(e, "food_matrix", "is_red_meat"),
+        _get(e, "food_matrix", "is_white_meat"),
+        _get(e, "food_matrix", "is_fish"),
+        _get(e, "food_matrix", "is_shellfish"),
+    )
+    if not any(flag is True for flag in animal_flags):
+        if any(flag is not None for flag in animal_flags):
+            return 0.0
+        return None
+
+    glycine = _valid_number(_get(e, "amino_acids", "glycine_g"))
+    proline = _valid_number(_get(e, "amino_acids", "proline_g"))
+    protein = _valid_number(_get(e, "macronutrients", "protein_g"))
+    if glycine is None or proline is None or protein is None or protein <= 0:
+        return None
+    fraction = (glycine + proline) / protein
+    return round(min(max(fraction / 0.25, 0.0), 1.5), 6)
+
+
+def _resolve_low_upf_tag(e):
+    value = _resolve_ultra_processed_tag(e)
+    return None if value is None else (not bool(value))
 
 
 def _resolve_unsaturated_fat_quality(e): return _get(e, "ratios", "unsaturated_saturated_ratio")
@@ -472,23 +650,36 @@ FEATURE_RESOLVERS: Dict[str, Callable[[Dict[str, Any]], Optional[Any]]] = {
     "calcium_density": _resolve_calcium_density,
     "phosphorus_density": _resolve_phosphorus_density,
     "iron_density": _resolve_iron_density,
+    "zinc_density": _resolve_zinc_density,
+    "selenium_density": _resolve_selenium_density,
+    "fluoride_density": _resolve_fluoride_density,
     # Fats
     "saturated_fat_density": _resolve_saturated_fat_density,
     "trans_fat_density": _resolve_trans_fat_density,
     "omega3_density": _resolve_omega3_density,
+    "epa_dha_density": _resolve_epa_dha_density,
     "omega6_density": _resolve_omega6_density,
     "cholesterol_density": _resolve_cholesterol_density,
     "unsaturated_fat_quality": _resolve_unsaturated_fat_quality,
     "fat_quality_composite": _resolve_fat_quality_composite,
     # Vitamins
+    "vitamin_a_density": _resolve_vitamin_a_density,
+    "vitamin_c_density": _resolve_vitamin_c_density,
     "vitamin_d_density": _resolve_vitamin_d_density,
+    "vitamin_e_density": _resolve_vitamin_e_density,
     "vitamin_k_density": _resolve_vitamin_k_density,
+    "biotin_density": _resolve_biotin_density,
     "choline_density": _resolve_choline_density,
     "b_vitamin_density_index": _resolve_b_vitamin_density_index,
     # Bioactives / other
     "caffeine_density": _resolve_caffeine_density,
     "alcohol_density": _resolve_alcohol_density,
     "protein_quality_leucine_proxy": _resolve_protein_quality_leucine_proxy,
+    "lutein_zeaxanthin_density": _resolve_lutein_zeaxanthin_density,
+    "vitamin_a_carotenoid_proxy": _resolve_vitamin_a_carotenoid_proxy,
+    "polyphenol_proxy": _resolve_polyphenol_proxy,
+    "collagen_proxy": _resolve_collagen_proxy,
+    "xylitol_proxy": _resolve_xylitol_proxy,
     # Boolean tags
     "whole_grain_tag": _resolve_whole_grain_tag,
     "refined_grain_tag": _resolve_refined_grain_tag,
@@ -497,6 +688,7 @@ FEATURE_RESOLVERS: Dict[str, Callable[[Dict[str, Any]], Optional[Any]]] = {
     "fruit_vegetable_tag": _resolve_fruit_vegetable_tag,
     "dairy_or_fortified_tag": _resolve_dairy_or_fortified_tag,
     "ultra_processed_tag": _resolve_ultra_processed_tag,
+    "low_upf_tag": _resolve_low_upf_tag,
     "processed_food_tag": _resolve_processed_food_tag,
     "processed_meat_tag": _resolve_processed_meat_tag,
     "red_meat_tag": _resolve_red_meat_tag,
@@ -871,7 +1063,7 @@ def _directional_rule_name(
             )
         except (TypeError, ValueError):
             below_low = False
-        return "Low Protein" if below_low else "Adequate Protein"
+        return "Low Protein Density" if below_low else "Adequate Protein Density"
 
     if direction == "negative":
         return "High Protein Load"
@@ -884,7 +1076,7 @@ def _directional_rule_name(
 # DOMAIN RULE DATABASES
 # =========================================================================
 #
-# Twelve domains, each extracted from the coefficient reference document's
+# Domain rules are extracted from the existing coefficient reference documents plus the user-supplied Skin/Eye/Hair/Nail modules.
 # own coefficient table + interaction table + threshold policy +
 # population-modifier section. Coefficients are exactly as written in the
 # source, in that domain's own RISK/SUPPORT orientation (see
@@ -2731,7 +2923,7 @@ MUSCLE_RULES: List[Rule] = [
     ),
     Rule(
         rule_id="muscle_low_calcium_pattern", domain="muscle", feature="calcium_density",
-        display_name="Low calcium / bone-support pattern", coefficient=-0.10,
+        display_name="Low calcium density / bone-support pattern", coefficient=-0.10,
         curve=CurveType.INVERSE, curve_params={"reference": 80.0},
         mechanism="Bone and muscle health are linked, especially in older adults",
         pathway="Bone-muscle axis", organ="Bone / skeletal muscle",
@@ -2779,6 +2971,328 @@ MUSCLE_INTERACTIONS: List[Interaction] = [
 
 GUT_RULES: List[Rule] = []
 GUT_INTERACTIONS: List[Interaction] = []
+
+
+# -------------------------------------------------------------------
+# 15. SKIN HEALTH - SUPPORT oriented
+# -------------------------------------------------------------------
+#
+# Coefficients/confidence labels below are the user-supplied module values.
+# The source specifies qualitative curve shapes but not numeric saturation
+# points. The numeric curve parameters are therefore implementation scale
+# choices, following the same convention used by the existing domains: roughly
+# one twentieth of a daily adult reference per 100 kcal for nutrients where a
+# reference exists, and unitless 1.0 anchors for explicit proxy features.
+# Population modifiers from the supplied module are intentionally deferred: the
+# source says to apply them later as context multipliers.
+
+_SKIN_SOURCE = "User-supplied Skin Health Module"
+_EYE_SOURCE = "User-supplied Eye Health Module"
+_HAIR_SOURCE = "User-supplied Hair Health Module"
+_NAIL_SOURCE = "User-supplied Nail Health Module"
+_TEETH_SOURCE = "User-supplied Teeth and Oral Health Module"
+
+SKIN_RULES: List[Rule] = [
+    Rule("skin_vitamin_c", "skin", "vitamin_c_density", "Vitamin C density", 0.80,
+         CurveType.SATURATING, {"saturation_point": 4.5},
+         "Critical for collagen/elastin synthesis and antioxidant protection",
+         "Collagen synthesis / antioxidant defense", "Skin", "High", source=_SKIN_SOURCE),
+    Rule("skin_polyphenols", "skin", "polyphenol_proxy", "Polyphenol proxy", 0.70,
+         CurveType.SATURATING, {"saturation_point": 1.0},
+         "Polyphenol-rich foods support antioxidant defenses and collagen-preserving pathways",
+         "Antioxidant / matrix protection", "Skin", "High", source=_SKIN_SOURCE),
+    Rule("skin_collagen", "skin", "collagen_proxy", "Collagen proxy", 0.55,
+         CurveType.SATURATING, {"saturation_point": 1.0},
+         "Collagen-rich structural protein patterns may support hydration and elasticity",
+         "Dermal matrix support", "Skin", "Medium-high", source=_SKIN_SOURCE),
+    Rule("skin_vitamin_e", "skin", "vitamin_e_density", "Vitamin E density", 0.45,
+         CurveType.SATURATING, {"saturation_point": 0.75},
+         "Vitamin E supports antioxidant protection and skin-barrier function",
+         "Antioxidant / barrier support", "Skin", "Medium-high", source=_SKIN_SOURCE),
+    Rule("skin_carotenoids", "skin", "vitamin_a_carotenoid_proxy", "Vitamin A / carotenoid proxy", 0.40,
+         CurveType.SATURATING, {"saturation_point": 1.0},
+         "Vitamin A and carotenoid-rich foods support cell turnover and photoprotective antioxidant patterns",
+         "Cell turnover / photoprotection", "Skin", "Medium-high", source=_SKIN_SOURCE),
+    Rule("skin_zinc", "skin", "zinc_density", "Zinc density", 0.35,
+         CurveType.SATURATING, {"saturation_point": 0.55},
+         "Zinc supports wound healing, inflammatory regulation, and skin integrity",
+         "Repair / inflammatory regulation", "Skin", "Medium-high", source=_SKIN_SOURCE),
+    Rule("skin_selenium", "skin", "selenium_density", "Selenium density", 0.25,
+         CurveType.SATURATING, {"saturation_point": 2.75},
+         "Selenium supports antioxidant-enzyme activity relevant to dermal protection",
+         "Antioxidant enzyme support", "Skin", "Medium", source=_SKIN_SOURCE),
+    Rule("skin_omega3", "skin", "omega3_density", "Omega-3 density", 0.30,
+         CurveType.SATURATING, {"saturation_point": 0.08},
+         "Omega-3 fats support anti-inflammatory signaling, barrier function, and hydration",
+         "Inflammatory regulation / barrier support", "Skin", "Medium-high", source=_SKIN_SOURCE),
+    Rule("skin_protein", "skin", "protein_density", "Protein adequacy", 0.25,
+         CurveType.SATURATING, {"saturation_point": 2.5},
+         "Adequate protein provides structural substrate for skin matrix and repair",
+         "Structural protein / repair", "Skin", "Medium-high", source=_SKIN_SOURCE),
+    Rule("skin_hydration", "skin", "water_density", "Water / hydration proxy", 0.20,
+         CurveType.SATURATING, {"saturation_point": 50.0},
+         "Water-rich foods contribute to a dietary hydration pattern that supports skin moisture",
+         "Hydration / barrier support", "Skin", "Medium", source=_SKIN_SOURCE),
+    Rule("skin_upf", "skin", "ultra_processed_tag", "Ultra-processed indicator", -0.45,
+         CurveType.BINARY_INTENSITY, {},
+         "Ultra-processed dietary patterns can increase inflammatory and oxidative-stress burden",
+         "Inflammation / oxidative stress", "Skin", "High", source=_SKIN_SOURCE),
+    Rule("skin_added_sugar", "skin", "added_sugar_density", "Added sugar density", -0.35,
+         CurveType.LINEAR, {"scale": 0.20, "cap": 1.5},
+         "Higher added-sugar density increases glycation burden relevant to collagen quality",
+         "Glycation", "Skin", "Medium-high", source=_SKIN_SOURCE),
+    Rule("skin_alcohol", "skin", "alcohol_density", "Alcohol burden", -0.30,
+         CurveType.THRESHOLD, {"threshold": 0.5},
+         "Alcohol can worsen hydration, oxidative stress, and repair",
+         "Hydration / oxidative stress", "Skin", "Medium-high", source=_SKIN_SOURCE),
+    Rule("skin_saturated_fat", "skin", "saturated_fat_density", "Saturated fat", -0.15,
+         CurveType.LINEAR, {"scale": 0.10, "cap": 1.0},
+         "High saturated-fat density can contribute to a less favorable inflammatory dietary pattern",
+         "Inflammatory pattern", "Skin", "Medium", source=_SKIN_SOURCE),
+]
+
+SKIN_INTERACTIONS: List[Interaction] = [
+    Interaction("skin_int_vitc_collagen", "skin", ("vitamin_c_density", "collagen_proxy"),
+                "Vitamin C x Collagen: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Vitamin C is required for collagen synthesis"),
+    Interaction("skin_int_poly_vite", "skin", ("polyphenol_proxy", "vitamin_e_density"),
+                "Polyphenols x Vitamin E: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Combined antioxidant protection"),
+    Interaction("skin_int_omega3_low_upf", "skin", ("omega3_density", "low_upf_tag"),
+                "Omega-3 x Low UPF: stronger benefit (qualitative; gamma not supplied)", None,
+                "Anti-inflammatory support is stronger in a cleaner dietary pattern"),
+    Interaction("skin_int_sugar_upf", "skin", ("added_sugar_density", "ultra_processed_tag"),
+                "Added sugar x Ultra-processed: stronger penalty (qualitative; gamma not supplied)", None,
+                "Combined glycation and inflammatory burden"),
+    Interaction("skin_int_zinc_protein", "skin", ("zinc_density", "protein_density"),
+                "Zinc x Protein: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Structural repair and wound-healing support"),
+    Interaction("skin_int_carot_vite", "skin", ("vitamin_a_carotenoid_proxy", "vitamin_e_density"),
+                "Carotenoids x Vitamin E: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Combined antioxidant and photoprotective support"),
+]
+
+
+# -------------------------------------------------------------------
+# 16. EYE HEALTH - SUPPORT oriented
+# -------------------------------------------------------------------
+
+EYE_RULES: List[Rule] = [
+    Rule("eye_lutein_zeaxanthin", "eye", "lutein_zeaxanthin_density", "Lutein + zeaxanthin proxy", 0.90,
+         CurveType.SATURATING, {"saturation_point": 500.0},
+         "Lutein and zeaxanthin are predominant retinal carotenoids and support macular pigment",
+         "Macular pigment / antioxidant defense", "Retina", "High", source=_EYE_SOURCE),
+    Rule("eye_vitamin_c", "eye", "vitamin_c_density", "Vitamin C density", 0.60,
+         CurveType.SATURATING, {"saturation_point": 4.5},
+         "Vitamin C contributes antioxidant protection relevant to ocular tissues",
+         "Antioxidant defense", "Eye", "High", source=_EYE_SOURCE),
+    Rule("eye_vitamin_e", "eye", "vitamin_e_density", "Vitamin E density", 0.50,
+         CurveType.SATURATING, {"saturation_point": 0.75},
+         "Vitamin E contributes lipid-phase antioxidant protection relevant to retinal tissues",
+         "Antioxidant defense", "Retina", "High", source=_EYE_SOURCE),
+    Rule("eye_zinc", "eye", "zinc_density", "Zinc density", 0.50,
+         CurveType.SATURATING, {"saturation_point": 0.55},
+         "Zinc is required for retinal function and vitamin A metabolism",
+         "Retinal metabolism", "Retina", "High", source=_EYE_SOURCE),
+    Rule("eye_omega3", "eye", "epa_dha_density", "Omega-3 density (EPA+DHA)", 0.40,
+         CurveType.SATURATING, {"saturation_point": 0.08},
+         "Omega-3 intake supports anti-inflammatory and tear-film/retinal dietary patterns",
+         "Inflammatory regulation / retinal lipids", "Eye", "Medium-high", source=_EYE_SOURCE),
+    Rule("eye_vitamin_a", "eye", "vitamin_a_carotenoid_proxy", "Vitamin A / carotenoid proxy", 0.35,
+         CurveType.SATURATING, {"saturation_point": 1.0},
+         "Vitamin A is essential for visual function and carotenoid-rich foods support ocular antioxidant status",
+         "Visual cycle / carotenoid support", "Retina", "High", source=_EYE_SOURCE),
+    Rule("eye_polyphenols", "eye", "polyphenol_proxy", "Polyphenol proxy", 0.30,
+         CurveType.SATURATING, {"saturation_point": 1.0},
+         "Polyphenol-rich foods provide antioxidant and anti-inflammatory support",
+         "Antioxidant / inflammatory regulation", "Eye", "Medium-high", source=_EYE_SOURCE),
+    Rule("eye_selenium", "eye", "selenium_density", "Selenium density", 0.20,
+         CurveType.SATURATING, {"saturation_point": 2.75},
+         "Selenium supports antioxidant-enzyme systems",
+         "Antioxidant enzyme support", "Eye", "Medium", source=_EYE_SOURCE),
+    Rule("eye_upf", "eye", "ultra_processed_tag", "Ultra-processed indicator", -0.45,
+         CurveType.BINARY_INTENSITY, {},
+         "Ultra-processed patterns can increase oxidative-stress and inflammatory burden",
+         "Oxidative stress / inflammation", "Eye", "High", source=_EYE_SOURCE),
+    Rule("eye_added_sugar", "eye", "added_sugar_density", "Added sugar density", -0.35,
+         CurveType.LINEAR, {"scale": 0.20, "cap": 1.5},
+         "Added sugar contributes to glycation and oxidative-stress burden",
+         "Glycation / oxidative stress", "Eye", "Medium-high", source=_EYE_SOURCE),
+    Rule("eye_alcohol", "eye", "alcohol_density", "Alcohol burden", -0.25,
+         CurveType.THRESHOLD, {"threshold": 0.5},
+         "Alcohol can increase oxidative stress and displace micronutrient-rich foods",
+         "Oxidative stress / nutrient displacement", "Eye", "Medium", source=_EYE_SOURCE),
+    Rule("eye_saturated_fat", "eye", "saturated_fat_density", "Saturated fat", -0.15,
+         CurveType.LINEAR, {"scale": 0.10, "cap": 1.0},
+         "High saturated-fat density can contribute to a less favorable inflammatory dietary pattern",
+         "Inflammatory pattern", "Eye", "Medium", source=_EYE_SOURCE),
+]
+
+EYE_INTERACTIONS: List[Interaction] = [
+    Interaction("eye_int_lz_omega3", "eye", ("lutein_zeaxanthin_density", "epa_dha_density"),
+                "Lutein + zeaxanthin x Omega-3: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Complementary retinal-support pathways"),
+    Interaction("eye_int_vitc_vite", "eye", ("vitamin_c_density", "vitamin_e_density"),
+                "Vitamin C x Vitamin E: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Combined antioxidant protection"),
+    Interaction("eye_int_zinc_vita", "eye", ("zinc_density", "vitamin_a_carotenoid_proxy"),
+                "Zinc x Vitamin A: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Zinc supports vitamin A metabolism and retinal function"),
+    Interaction("eye_int_poly_carot", "eye", ("polyphenol_proxy", "vitamin_a_carotenoid_proxy"),
+                "Polyphenols x Carotenoids: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Combined antioxidant and anti-inflammatory support"),
+    Interaction("eye_int_upf_sugar", "eye", ("ultra_processed_tag", "added_sugar_density"),
+                "Ultra-processed x Added sugar: stronger penalty (qualitative; gamma not supplied)", None,
+                "Combined oxidative-stress and glycation burden"),
+]
+
+
+# -------------------------------------------------------------------
+# 17. HAIR HEALTH - SUPPORT oriented
+# -------------------------------------------------------------------
+
+HAIR_RULES: List[Rule] = [
+    Rule("hair_protein", "hair", "protein_density", "Protein adequacy", 0.90,
+         CurveType.SATURATING, {"saturation_point": 2.5},
+         "Hair is keratin-based and inadequate protein intake impairs growth",
+         "Keratin synthesis", "Hair follicle", "High", source=_HAIR_SOURCE),
+    Rule("hair_iron", "hair", "iron_density", "Iron adequacy", 0.70,
+         CurveType.SATURATING, {"saturation_point": 0.9},
+         "Adequate dietary iron supports rapidly dividing follicle cells when iron status is insufficient",
+         "Follicle cell metabolism", "Hair follicle", "High", source=_HAIR_SOURCE),
+    Rule("hair_zinc", "hair", "zinc_density", "Zinc density", 0.60,
+         CurveType.SATURATING, {"saturation_point": 0.55},
+         "Zinc supports follicle cell division and keratin synthesis",
+         "Keratin synthesis / cell division", "Hair follicle", "High", source=_HAIR_SOURCE),
+    Rule("hair_biotin", "hair", "biotin_density", "Biotin density", 0.50,
+         CurveType.SATURATING, {"saturation_point": 1.5},
+         "Biotin contributes to maintenance of normal hair when available in the diet",
+         "Keratin-support nutrient pattern", "Hair", "Medium-high", source=_HAIR_SOURCE),
+    Rule("hair_selenium", "hair", "selenium_density", "Selenium density", 0.35,
+         CurveType.SATURATING, {"saturation_point": 2.75},
+         "Selenium contributes to maintenance of normal hair and antioxidant enzyme activity",
+         "Antioxidant enzyme support", "Hair follicle", "Medium", source=_HAIR_SOURCE),
+    Rule("hair_vitamin_d", "hair", "vitamin_d_density", "Vitamin D density", 0.40,
+         CurveType.SATURATING, {"saturation_point": 1.0},
+         "Vitamin D receptor signaling is relevant to the follicle growth cycle",
+         "Follicle growth-cycle support", "Hair follicle", "Medium-high", source=_HAIR_SOURCE),
+    Rule("hair_omega3", "hair", "omega3_density", "Omega-3 density", 0.30,
+         CurveType.SATURATING, {"saturation_point": 0.08},
+         "Omega-3 fats support an anti-inflammatory scalp dietary pattern",
+         "Inflammatory regulation", "Scalp / hair follicle", "Medium", source=_HAIR_SOURCE),
+    Rule("hair_polyphenols", "hair", "polyphenol_proxy", "Polyphenol proxy", 0.25,
+         CurveType.SATURATING, {"saturation_point": 1.0},
+         "Polyphenol-rich foods provide antioxidant support relevant to follicles",
+         "Antioxidant support", "Hair follicle", "Medium", source=_HAIR_SOURCE),
+    Rule("hair_upf", "hair", "ultra_processed_tag", "Ultra-processed indicator", -0.45,
+         CurveType.BINARY_INTENSITY, {},
+         "Ultra-processed patterns can increase inflammation and nutrient displacement",
+         "Inflammation / nutrient displacement", "Hair follicle", "High", source=_HAIR_SOURCE),
+    Rule("hair_added_sugar", "hair", "added_sugar_density", "Added sugar density", -0.35,
+         CurveType.LINEAR, {"scale": 0.20, "cap": 1.5},
+         "High added-sugar density contributes to glycation and inflammatory burden",
+         "Glycation / inflammation", "Hair follicle", "Medium-high", source=_HAIR_SOURCE),
+    Rule("hair_alcohol", "hair", "alcohol_density", "Alcohol burden", -0.25,
+         CurveType.THRESHOLD, {"threshold": 0.5},
+         "Alcohol can displace nutrients and increase oxidative stress",
+         "Nutrient displacement / oxidative stress", "Hair follicle", "Medium", source=_HAIR_SOURCE),
+    Rule("hair_saturated_fat", "hair", "saturated_fat_density", "Saturated fat", -0.15,
+         CurveType.LINEAR, {"scale": 0.10, "cap": 1.0},
+         "High saturated-fat density can contribute to a less favorable inflammatory dietary pattern",
+         "Inflammatory pattern", "Hair follicle", "Medium", source=_HAIR_SOURCE),
+]
+
+HAIR_INTERACTIONS: List[Interaction] = [
+    Interaction("hair_int_protein_iron", "hair", ("protein_density", "iron_density"),
+                "Protein x Iron: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Both are critical to keratin synthesis and follicle function"),
+    Interaction("hair_int_zinc_biotin", "hair", ("zinc_density", "biotin_density"),
+                "Zinc x Biotin: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Complementary normal-hair maintenance support"),
+    Interaction("hair_int_vitd_iron", "hair", ("vitamin_d_density", "iron_density"),
+                "Vitamin D x Iron: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Both are linked to hair-loss patterns when status is insufficient"),
+    Interaction("hair_int_omega3_poly", "hair", ("omega3_density", "polyphenol_proxy"),
+                "Omega-3 x Polyphenols: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Combined anti-inflammatory and antioxidant support"),
+    Interaction("hair_int_upf_sugar", "hair", ("ultra_processed_tag", "added_sugar_density"),
+                "Ultra-processed x Added sugar: stronger penalty (qualitative; gamma not supplied)", None,
+                "Inflammation and nutrient displacement"),
+]
+
+
+# -------------------------------------------------------------------
+# 18. NAIL HEALTH - SUPPORT oriented
+# -------------------------------------------------------------------
+
+NAIL_RULES: List[Rule] = [
+    Rule("nail_protein", "nail", "protein_density", "Protein adequacy", 0.85,
+         CurveType.SATURATING, {"saturation_point": 2.5},
+         "Nails are keratin-based and adequate protein supports nail growth and strength",
+         "Keratin synthesis", "Nail matrix", "High", source=_NAIL_SOURCE),
+    Rule("nail_iron", "nail", "iron_density", "Iron adequacy", 0.70,
+         CurveType.SATURATING, {"saturation_point": 0.9},
+         "Adequate iron status supports normal nail structure when deficiency is present",
+         "Nail-matrix cell metabolism", "Nail matrix", "High", source=_NAIL_SOURCE),
+    Rule("nail_biotin", "nail", "biotin_density", "Biotin density", 0.55,
+         CurveType.SATURATING, {"saturation_point": 1.5},
+         "Biotin contributes to maintenance of normal hair and nails",
+         "Keratin-support nutrient pattern", "Nail matrix", "Medium-high", source=_NAIL_SOURCE),
+    Rule("nail_zinc", "nail", "zinc_density", "Zinc density", 0.50,
+         CurveType.SATURATING, {"saturation_point": 0.55},
+         "Zinc supports keratin synthesis and normal nail structure",
+         "Keratin synthesis", "Nail matrix", "Medium-high", source=_NAIL_SOURCE),
+    Rule("nail_selenium", "nail", "selenium_density", "Selenium density", 0.35,
+         CurveType.SATURATING, {"saturation_point": 2.75},
+         "Selenium contributes to maintenance of normal hair and nails",
+         "Antioxidant enzyme support", "Nail matrix", "Medium", source=_NAIL_SOURCE),
+    Rule("nail_vitamin_d", "nail", "vitamin_d_density", "Vitamin D density", 0.30,
+         CurveType.SATURATING, {"saturation_point": 1.0},
+         "Vitamin D contributes contextual support to normal nail biology",
+         "Cell differentiation support", "Nail matrix", "Medium", source=_NAIL_SOURCE),
+    Rule("nail_omega3", "nail", "omega3_density", "Omega-3 density", 0.25,
+         CurveType.SATURATING, {"saturation_point": 0.08},
+         "Omega-3 fats support hydration and an anti-inflammatory dietary pattern",
+         "Hydration / inflammatory regulation", "Nail matrix", "Medium", source=_NAIL_SOURCE),
+    Rule("nail_polyphenols", "nail", "polyphenol_proxy", "Polyphenol proxy", 0.20,
+         CurveType.SATURATING, {"saturation_point": 1.0},
+         "Polyphenol-rich foods provide antioxidant support relevant to the nail matrix",
+         "Antioxidant support", "Nail matrix", "Medium", source=_NAIL_SOURCE),
+    Rule("nail_upf", "nail", "ultra_processed_tag", "Ultra-processed indicator", -0.45,
+         CurveType.BINARY_INTENSITY, {},
+         "Ultra-processed patterns can increase inflammation and nutrient displacement",
+         "Inflammation / nutrient displacement", "Nail matrix", "High", source=_NAIL_SOURCE),
+    Rule("nail_added_sugar", "nail", "added_sugar_density", "Added sugar density", -0.35,
+         CurveType.LINEAR, {"scale": 0.20, "cap": 1.5},
+         "High added-sugar density contributes to glycation and inflammatory burden",
+         "Glycation / inflammation", "Nail matrix", "Medium-high", source=_NAIL_SOURCE),
+    Rule("nail_alcohol", "nail", "alcohol_density", "Alcohol burden", -0.25,
+         CurveType.THRESHOLD, {"threshold": 0.5},
+         "Alcohol can displace nutrients and increase oxidative stress",
+         "Nutrient displacement / oxidative stress", "Nail matrix", "Medium", source=_NAIL_SOURCE),
+    Rule("nail_saturated_fat", "nail", "saturated_fat_density", "Saturated fat", -0.15,
+         CurveType.LINEAR, {"scale": 0.10, "cap": 1.0},
+         "High saturated-fat density can contribute to a less favorable inflammatory dietary pattern",
+         "Inflammatory pattern", "Nail matrix", "Medium", source=_NAIL_SOURCE),
+]
+
+NAIL_INTERACTIONS: List[Interaction] = [
+    Interaction("nail_int_protein_iron", "nail", ("protein_density", "iron_density"),
+                "Protein x Iron: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Both are important to keratin synthesis and nail-matrix function"),
+    Interaction("nail_int_biotin_zinc", "nail", ("biotin_density", "zinc_density"),
+                "Biotin x Zinc: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Complementary normal nail-maintenance support"),
+    Interaction("nail_int_selenium_biotin", "nail", ("selenium_density", "biotin_density"),
+                "Selenium x Biotin: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Combined normal hair/nail maintenance support"),
+    Interaction("nail_int_omega3_poly", "nail", ("omega3_density", "polyphenol_proxy"),
+                "Omega-3 x Polyphenols: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Combined anti-inflammatory and antioxidant support"),
+    Interaction("nail_int_upf_sugar", "nail", ("ultra_processed_tag", "added_sugar_density"),
+                "Ultra-processed x Added sugar: stronger penalty (qualitative; gamma not supplied)", None,
+                "Inflammation and nutrient displacement"),
+]
 
 
 # =========================================================================
@@ -2982,10 +3496,98 @@ for _pm in POPULATION_MODIFIERS:
         _POPULATION_MODIFIER_BY_FEATURE.setdefault(_feat, []).append(_pm)
 
 
+
+# -------------------------------------------------------------------
+# 19. TEETH AND ORAL HEALTH - SUPPORT oriented
+# -------------------------------------------------------------------
+
+TEETH_RULES: List[Rule] = [
+    Rule("teeth_fluoride", "teeth", "fluoride_density", "Fluoride adequacy", 0.90,
+         CurveType.SATURATING, {"saturation_point": 0.15},
+         "Measured dietary fluoride supports enamel remineralization and caries resistance",
+         "Enamel mineralization / caries prevention", "Teeth / oral cavity", "High", source=_TEETH_SOURCE),
+    Rule("teeth_calcium", "teeth", "calcium_density", "Calcium density", 0.75,
+         CurveType.SATURATING, {"saturation_point": 65.0},
+         "Calcium supports tooth mineralization and periodontal bone",
+         "Mineralization / periodontal bone support", "Teeth / periodontium", "High", source=_TEETH_SOURCE),
+    Rule("teeth_vitamin_d", "teeth", "vitamin_d_density", "Vitamin D density", 0.70,
+         CurveType.SATURATING, {"saturation_point": 1.0},
+         "Vitamin D regulates calcium and phosphate handling relevant to tooth and periodontal support",
+         "Calcium-phosphate regulation", "Teeth / periodontium", "High", source=_TEETH_SOURCE),
+    Rule("teeth_phosphorus", "teeth", "phosphorus_density", "Phosphorus density", 0.55,
+         CurveType.SATURATING, {"saturation_point": 62.5},
+         "Phosphorus contributes to the mineral matrix of teeth alongside calcium and vitamin D",
+         "Tooth mineral matrix", "Teeth", "High", source=_TEETH_SOURCE),
+    Rule("teeth_vitamin_c", "teeth", "vitamin_c_density", "Vitamin C density", 0.65,
+         CurveType.SATURATING, {"saturation_point": 4.5},
+         "Vitamin C supports collagen synthesis and gingival tissue integrity",
+         "Gingival collagen / periodontal support", "Gingiva / periodontium", "High", source=_TEETH_SOURCE),
+    Rule("teeth_polyphenols", "teeth", "polyphenol_proxy", "Polyphenol proxy", 0.50,
+         CurveType.SATURATING, {"saturation_point": 1.0},
+         "Polyphenol-rich foods provide antioxidant and antimicrobial dietary support",
+         "Antioxidant / antimicrobial support", "Oral cavity / periodontium", "Medium-high", source=_TEETH_SOURCE),
+    Rule("teeth_omega3", "teeth", "omega3_density", "Omega-3 density", 0.40,
+         CurveType.SATURATING, {"saturation_point": 0.08},
+         "Omega-3 fats support an anti-inflammatory periodontal dietary pattern",
+         "Inflammatory regulation", "Periodontium", "Medium-high", source=_TEETH_SOURCE),
+    Rule("teeth_xylitol", "teeth", "xylitol_proxy", "Xylitol proxy", 0.35,
+         CurveType.SATURATING, {"saturation_point": 1.0},
+         "Explicit xylitol-containing foods can reduce cariogenic bacterial substrate exposure",
+         "Cariogenic-bacteria / caries support", "Oral cavity", "Medium", source=_TEETH_SOURCE),
+    Rule("teeth_zinc", "teeth", "zinc_density", "Zinc density", 0.30,
+         CurveType.SATURATING, {"saturation_point": 0.55},
+         "Zinc supports antimicrobial defenses and periodontal tissue integrity",
+         "Antimicrobial / tissue support", "Periodontium", "Medium", source=_TEETH_SOURCE),
+    Rule("teeth_protein", "teeth", "protein_density", "Protein adequacy", 0.25,
+         CurveType.SATURATING, {"saturation_point": 2.5},
+         "Protein provides structural substrate for periodontal tissues",
+         "Periodontal tissue structure", "Periodontium", "Medium", source=_TEETH_SOURCE),
+    Rule("teeth_added_sugar", "teeth", "added_sugar_density", "Added sugar density", -0.80,
+         CurveType.LINEAR, {"scale": 0.20, "cap": 1.5},
+         "High added-sugar density increases cariogenic substrate and caries burden",
+         "Cariogenic substrate", "Teeth / oral biofilm", "High", source=_TEETH_SOURCE),
+    Rule("teeth_upf", "teeth", "ultra_processed_tag", "Ultra-processed indicator", -0.50,
+         CurveType.BINARY_INTENSITY, {},
+         "Ultra-processed patterns can increase inflammatory and cariogenic dietary burden",
+         "Inflammation / cariogenic pattern", "Oral cavity / periodontium", "High", source=_TEETH_SOURCE),
+    Rule("teeth_alcohol", "teeth", "alcohol_density", "Alcohol burden", -0.30,
+         CurveType.THRESHOLD, {"threshold": 0.5},
+         "Alcohol can contribute to dehydration, nutrient displacement, and periodontal risk",
+         "Dehydration / nutrient displacement", "Oral cavity / periodontium", "Medium", source=_TEETH_SOURCE),
+    Rule("teeth_saturated_fat", "teeth", "saturated_fat_density", "Saturated fat", -0.15,
+         CurveType.LINEAR, {"scale": 0.10, "cap": 1.0},
+         "High saturated-fat density can contribute to a less favorable inflammatory dietary pattern",
+         "Inflammatory pattern", "Periodontium", "Medium", source=_TEETH_SOURCE),
+]
+
+TEETH_INTERACTIONS: List[Interaction] = [
+    Interaction("teeth_int_calcium_vitd", "teeth", ("calcium_density", "vitamin_d_density"),
+                "Calcium x Vitamin D: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Vitamin D regulates calcium/phosphate for tooth mineralization"),
+    Interaction("teeth_int_vitc_poly", "teeth", ("vitamin_c_density", "polyphenol_proxy"),
+                "Vitamin C x Polyphenols: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Combined collagen support and antioxidant protection"),
+    Interaction("teeth_int_omega3_poly", "teeth", ("omega3_density", "polyphenol_proxy"),
+                "Omega-3 x Polyphenols: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Combined anti-inflammatory and antimicrobial support"),
+    Interaction("teeth_int_fluoride_low_sugar", "teeth", ("fluoride_density", "added_sugar_density"),
+                "Fluoride x Low sugar: stronger protective bonus (qualitative; gamma not supplied)", None,
+                "Fluoride protection is strongest when cariogenic substrate is low"),
+    Interaction("teeth_int_xylitol_low_sugar", "teeth", ("xylitol_proxy", "added_sugar_density"),
+                "Xylitol x Low sugar: extra protective bonus (qualitative; gamma not supplied)", None,
+                "Xylitol support is complementary to lower added-sugar exposure"),
+    Interaction("teeth_int_upf_sugar", "teeth", ("ultra_processed_tag", "added_sugar_density"),
+                "Added sugar x Ultra-processed: stronger penalty (qualitative; gamma not supplied)", None,
+                "Combined cariogenic and inflammatory burden"),
+]
+
+
+
 ALL_DOMAIN_RULES: List[List[Rule]] = [
     BLOOD_SUGAR_RULES, BLOOD_PRESSURE_RULES, HEART_RULES, METABOLIC_SYNDROME_RULES,
     KIDNEY_RULES, LIVER_RULES, BONE_RULES, BRAIN_RULES, INFLAMMATION_RULES,
     CANCER_RULES, WEIGHT_RULES, MUSCLE_RULES, ARTHRITIS_RULES, GUT_RULES,
+    SKIN_RULES, EYE_RULES, HAIR_RULES, NAIL_RULES, TEETH_RULES,
 ]
 
 ALL_DOMAIN_INTERACTIONS: List[List[Interaction]] = [
@@ -2994,6 +3596,7 @@ ALL_DOMAIN_INTERACTIONS: List[List[Interaction]] = [
     BONE_INTERACTIONS, BRAIN_INTERACTIONS, INFLAMMATION_INTERACTIONS,
     CANCER_INTERACTIONS, WEIGHT_INTERACTIONS,
     MUSCLE_INTERACTIONS, ARTHRITIS_INTERACTIONS, GUT_INTERACTIONS,
+    SKIN_INTERACTIONS, EYE_INTERACTIONS, HAIR_INTERACTIONS, NAIL_INTERACTIONS, TEETH_INTERACTIONS,
 ]
 
 
@@ -3009,7 +3612,7 @@ _INTERACTION_INDEX_CACHE: Optional[Dict[str, List[Interaction]]] = None
 
 def load_rule_database(force_reload: bool = False) -> Tuple[List[Rule], List[Interaction]]:
     """
-    Assemble every Rule and Interaction across all twelve domains into two
+    Assemble every Rule and Interaction across all configured domains into two
     flat lists. Cached after the first call (the database is static,
     module-level data - there is nothing to invalidate between calls
     within one process).
@@ -3270,8 +3873,14 @@ def process_ingredient(
     if rule_index is None or interaction_index is None:
         rule_index, interaction_index = initialize_rule_index()
 
+    # Resolve the union of rule and interaction feature keys. Historically
+    # interactions happened to reuse rule features, but the Skin module needs
+    # an interaction-only ``low_upf_tag`` to express "Omega-3 x Low UPF"
+    # without inverting the base ultra-processed penalty.
+    feature_keys = set(rule_index.keys()) | set(interaction_index.keys())
     feature_values: Dict[str, Any] = {
-        feature_key: resolve_feature_value(feature_key, entity) for feature_key in rule_index.keys()
+        feature_key: resolve_feature_value(feature_key, entity)
+        for feature_key in feature_keys
     }
 
     interaction_records = evaluate_interactions(entity, feature_values, interaction_index, active_modifiers)
