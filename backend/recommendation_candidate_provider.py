@@ -28,7 +28,7 @@ from usda_recipe_service import search_usda_foods
 
 logger = logging.getLogger("quinone.recommendation_candidates")
 
-DYNAMIC_CANDIDATE_PROVIDER_VERSION = "2.1.0"
+DYNAMIC_CANDIDATE_PROVIDER_VERSION = "2.3.0"
 
 # Recommendation discovery is user-initiated and must stay responsive.  The
 # internal food base is broad, but only a small context-ranked slice needs USDA
@@ -86,6 +86,17 @@ _DOMAIN_NUTRIENT_HINTS: dict[str, tuple[str, ...]] = {
     "cognitive": ("omega3_g", "folate_ug", "vitamin_b12_ug"),
     "gut": ("fiber_g",),
     "digestive": ("fiber_g",),
+    # Skin / eye / hair / nail modules. These hints only rank which internal
+    # food identities are worth USDA verification; the evidence/scoring
+    # simulation remains the authority on whether a food actually improves
+    # the selected module.
+    "skin": ("vitamin_c_mg", "vitamin_e_mg", "zinc_mg", "selenium_ug", "omega3_g", "protein_g", "vitamin_a_ug"),
+    "eye": ("vitamin_a_ug", "vitamin_c_mg", "vitamin_e_mg", "zinc_mg", "omega3_g", "selenium_ug"),
+    "hair": ("protein_g", "iron_mg", "zinc_mg", "vitamin_d_ug", "selenium_ug", "omega3_g"),
+    "nail": ("protein_g", "iron_mg", "zinc_mg", "vitamin_d_ug", "selenium_ug", "omega3_g"),
+    "nails": ("protein_g", "iron_mg", "zinc_mg", "vitamin_d_ug", "selenium_ug", "omega3_g"),
+    "teeth": ("fluoride_mg", "calcium_mg", "vitamin_d_ug", "phosphorus_mg", "vitamin_c_mg", "omega3_g", "zinc_mg", "protein_g"),
+    "oral": ("fluoride_mg", "calcium_mg", "vitamin_d_ug", "phosphorus_mg", "vitamin_c_mg", "omega3_g", "zinc_mg", "protein_g"),
 }
 
 _NUTRIENT_ALIASES: dict[str, str] = {
