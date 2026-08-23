@@ -289,11 +289,18 @@ class AnalysisResult {
     final personalizedScores = _asMap(
       personalization?['personalized_domain_scores'],
     );
-    final scoreMap = personalizedScores ??
-        _asMap(meal['health_domain_scores']) ??
+    // Keep every raw health domain and overlay personalized values where
+    // available. Older/mixed backend deployments can return a partial
+    // personalized map; treating it as a replacement would silently hide
+    // newer domains such as Skin/Eye/Hair/Nail/Teeth from Result.
+    final rawScoreMap = _asMap(meal['health_domain_scores']) ??
         _asMap(root['health_domain_scores']) ??
         _asMap(root['health_scores']) ??
         const <String, dynamic>{};
+    final scoreMap = <String, dynamic>{...rawScoreMap};
+    if (personalizedScores != null) {
+      scoreMap.addAll(personalizedScores);
+    }
 
     final scores = scoreMap.entries
         .map((entry) => HealthScore.fromEntry(entry.key, entry.value))
