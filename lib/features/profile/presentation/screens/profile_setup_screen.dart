@@ -359,11 +359,11 @@ class _ProfileSetupScreenState extends ConsumerState<ProfileSetupScreen> {
                       ],
                     ),
                     _Section(
-                      title: 'Skin, eye, hair & nail context',
+                      title: 'Skin, eye, hair, nail & oral context',
                       icon: Icons.visibility_outlined,
                       children: [
                         Text(
-                          'Optional. Select only concerns or exposures you want Quinone to use when weighting these four support scores.',
+                          'Optional. Select only concerns or exposures you want Quinone to use when weighting these support scores.',
                           style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                                 color: Theme.of(context).colorScheme.onSurfaceVariant,
                                 height: 1.35,
@@ -630,6 +630,10 @@ const _appearanceHealthConcerns = <String, String>{
   'brittle_nails_splitting': 'Brittle nails / splitting',
   'koilonychia': 'Koilonychia / spoon nails',
   'onycholysis': 'Onycholysis / nail separation',
+  'high_caries_risk': 'High caries risk',
+  'periodontitis_gingivitis': 'Periodontitis / gingivitis',
+  'dry_mouth_xerostomia': 'Dry mouth / xerostomia',
+  'orthodontic_treatment': 'Orthodontic treatment',
 };
 
 const _medications = <String, String>{
