@@ -45,7 +45,7 @@ logger.setLevel(os.environ.get("NUTRICA_LOG_LEVEL", "INFO"))
 
 # _ROUND_DP = 2
 
-PERSONALIZATION_VERSION = "1.3.0"
+PERSONALIZATION_VERSION = "1.4.0"
 
 COMBINED_MULTIPLIER_BOUNDS = (
     0.3,
@@ -452,11 +452,11 @@ TRAINING_MODIFIERS: List[Modifier] = [
     ),
 ]
 
-# The four appearance-related module specifications define which features
+# The appearance/oral-health module specifications define which features
 # become more relevant for a given context, but do not provide numeric
 # context multipliers. Use one conservative +20% relevance multiplier for
 # all such contexts rather than inventing different strengths. Rule-level
-# targeting keeps these modifiers isolated to Skin/Eye/Hair/Nail scoring.
+# targeting keeps these modifiers isolated to their intended health domain.
 _APPEARANCE_CONTEXT_MULTIPLIER = 1.20
 
 APPEARANCE_HEALTH_MODIFIERS: List[Modifier] = [
@@ -629,6 +629,51 @@ APPEARANCE_HEALTH_MODIFIERS: List[Modifier] = [
         reason="An explicitly selected iron-deficiency context raises iron relevance for hair and nail support",
         affected_domains=("Hair Health", "Nail Health"),
         affected_rules=("hair_iron", "nail_iron"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),    Modifier(
+        id="appearance_older_adult_teeth", category="appearance_health", applies_when=_age_at_least(65),
+        reason="Older-adult oral-health context increases calcium, vitamin D, vitamin C, and omega-3 relevance",
+        affected_domains=("Teeth and Oral Health",),
+        affected_rules=("teeth_calcium", "teeth_vitamin_d", "teeth_vitamin_c", "teeth_omega3"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_child_adolescent_teeth", category="appearance_health", applies_when=_age_below(19),
+        reason="Child/adolescent oral-health context increases fluoride, calcium, vitamin D, and added-sugar relevance",
+        affected_domains=("Teeth and Oral Health",),
+        affected_rules=("teeth_fluoride", "teeth_calcium", "teeth_vitamin_d", "teeth_added_sugar"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_teeth_high_caries_risk", category="appearance_health",
+        applies_when=_has_any_appearance_context("high_caries_risk", "caries_risk"),
+        reason="High-caries-risk context increases fluoride, calcium, vitamin D, xylitol, and added-sugar relevance",
+        affected_domains=("Teeth and Oral Health",),
+        affected_rules=("teeth_fluoride", "teeth_calcium", "teeth_vitamin_d", "teeth_xylitol", "teeth_added_sugar"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_teeth_periodontal", category="appearance_health",
+        applies_when=_has_any_appearance_context("periodontitis_gingivitis", "periodontitis", "gingivitis"),
+        reason="Periodontitis/gingivitis context increases vitamin C, vitamin D, omega-3, polyphenol, and zinc relevance",
+        affected_domains=("Teeth and Oral Health",),
+        affected_rules=("teeth_vitamin_c", "teeth_vitamin_d", "teeth_omega3", "teeth_polyphenols", "teeth_zinc"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_teeth_dry_mouth", category="appearance_health",
+        applies_when=_has_any_appearance_context("dry_mouth_xerostomia", "dry_mouth", "xerostomia"),
+        reason="Dry-mouth/xerostomia context increases xylitol and vitamin C relevance; hydration is not reweighted because the supplied Teeth equation gives it no coefficient",
+        affected_domains=("Teeth and Oral Health",),
+        affected_rules=("teeth_xylitol", "teeth_vitamin_c"),
+        multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
+    ),
+    Modifier(
+        id="appearance_teeth_orthodontic", category="appearance_health",
+        applies_when=_has_any_appearance_context("orthodontic_treatment", "orthodontics"),
+        reason="Orthodontic-treatment context increases fluoride, calcium, vitamin C, and polyphenol relevance",
+        affected_domains=("Teeth and Oral Health",),
+        affected_rules=("teeth_fluoride", "teeth_calcium", "teeth_vitamin_c", "teeth_polyphenols"),
         multiplier=_APPEARANCE_CONTEXT_MULTIPLIER, confidence=1.0, evidence_strength="Contextual",
     ),
 ]
