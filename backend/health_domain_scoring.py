@@ -52,6 +52,33 @@ DEFAULT_COVERAGE_SATURATION = 10.0
 # proportion to the reliability of the evidence base.
 DEFAULT_RELIABILITY_ADJUSTMENT = True
 
+
+# Appearance/oral support modules use nutrient-density rules for diet quality,
+# but density alone can make a tiny meal look highly supportive (for example,
+# 3 g protein in a 45 kcal meal is >6 g/100 kcal).  For meal-level scores we
+# therefore gate those density signals by the meal's absolute exposure relative
+# to a conservative share of a general daily reference.  This keeps density as
+# the quality signal while preventing trace amounts from producing strong
+# benefits.
+_APPEARANCE_ORAL_DOMAINS = {"skin", "eye", "hair", "nail", "teeth"}
+_APPEARANCE_EXPOSURE_REFERENCES = {
+    "protein_density": ("protein_g", 50.0),
+    "iron_density": ("iron_mg", 18.0),
+    "zinc_density": ("zinc_mg", 11.0),
+    "selenium_density": ("selenium_ug", 55.0),
+    "vitamin_d_density": ("vitamin_d_ug", 20.0),
+    "omega3_density": ("omega3_g", 1.1),
+    "vitamin_c_density": ("vitamin_c_mg", 90.0),
+    "vitamin_e_density": ("vitamin_e_mg", 15.0),
+    "vitamin_a_carotenoid_proxy": ("vitamin_a_ug", 900.0),
+    "calcium_density": ("calcium_mg", 1000.0),
+    "phosphorus_density": ("phosphorus_mg", 700.0),
+    "magnesium_density": ("magnesium_mg", 420.0),
+    "folate_density": ("folate_ug", 400.0),
+    "biotin_density": ("biotin_ug", 30.0),
+    "fluoride_density": ("fluoride_mg", 4.0),
+}
+
 _ROUND_DP = 2
 _EPSILON = 1e-12
 
@@ -1333,6 +1360,75 @@ def collect_domain_evidence(
     return by_domain
 
 
+
+def _meal_fraction_for_support_score(meal: Dict[str, Any]) -> float:
+    name = " ".join(
+        str(meal.get(key) or "")
+        for key in ("meal_name", "recipe_name", "meal_type")
+    ).lower()
+    if any(token in name for token in ("snack", "dessert", "drink", "beverage")):
+        return 0.15
+    return 0.30
+
+
+def _meal_nutrient_totals(root: Dict[str, Any]) -> Dict[str, float]:
+    meal = root.get("meal") if isinstance(root, dict) else None
+    foods = meal.get("foods") if isinstance(meal, dict) else None
+    totals: Dict[str, float] = {}
+    if not isinstance(foods, list):
+        return totals
+    for food in foods:
+        if not isinstance(food, dict):
+            continue
+        nutrients = food.get("nutrients")
+        if not isinstance(nutrients, dict):
+            continue
+        for key, value in nutrients.items():
+            if isinstance(value, bool):
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(number) or number <= 0:
+                continue
+            totals[str(key)] = totals.get(str(key), 0.0) + number
+    return totals
+
+
+def _apply_meal_exposure_gate(
+    domain: str,
+    evidence_items: List[Dict[str, Any]],
+    nutrient_totals: Dict[str, float],
+    meal_fraction: float,
+) -> List[Dict[str, Any]]:
+    if domain not in _APPEARANCE_ORAL_DOMAINS:
+        return evidence_items
+    gated: List[Dict[str, Any]] = []
+    for original in evidence_items:
+        item = dict(original)
+        feature = str(item.get("feature") or "")
+        exposure = _APPEARANCE_EXPOSURE_REFERENCES.get(feature)
+        if item.get("direction") == "positive" and exposure is not None:
+            nutrient_key, daily_reference = exposure
+            amount = max(0.0, nutrient_totals.get(nutrient_key, 0.0))
+            expected = max(daily_reference * meal_fraction, _EPSILON)
+            adequacy = max(0.0, min(amount / expected, 1.0))
+            # Trace exposure should not count as a distinct supportive signal.
+            # Above 5% of the meal reference, scale smoothly with adequacy.
+            multiplier = 0.0 if adequacy < 0.05 else adequacy
+            item["effective_weight"] = _round(
+                _effective_weight(item) * multiplier, 4
+            )
+            raw = _finite_number(item.get("raw_effect"), default=0.0)
+            item["raw_effect"] = _round(raw * multiplier, 6)
+            item["meal_exposure_multiplier"] = _round(multiplier, 4)
+            item["meal_nutrient_amount"] = _round(amount, 4)
+            item["meal_reference_amount"] = _round(expected, 4)
+        gated.append(item)
+    return gated
+
+
 # =========================================================================
 # SCORING ENTRY POINTS
 # =========================================================================
@@ -1403,7 +1499,6 @@ def score_food(
         in by_domain.items()
     }
 
-
 def score_meal(
     meal_json: Dict[str, Any],
     aggregator: Optional[
@@ -1425,23 +1520,38 @@ def score_meal(
         or _DEFAULT_AGGREGATOR
     )
 
-    return {
-        domain: (
-            selected_aggregator.score(
-                domain=domain,
-                health_domain=(
-                    accumulator
-                    .health_domain
-                ),
-                evidence_items=(
-                    accumulator
-                    .evidence_items
-                ),
-            ).to_dict()
+    meal = meal_json.get("meal") if isinstance(meal_json, dict) else {}
+    nutrient_totals = _meal_nutrient_totals(meal_json)
+    meal_fraction = _meal_fraction_for_support_score(
+        meal if isinstance(meal, dict) else {}
+    )
+    appearance_aggregator = DomainAggregator(
+        normalizer=SigmoidNormalizer(steepness=1.25),
+        coverage_calculator=selected_aggregator.coverage_calculator,
+        confidence_calculator=selected_aggregator.confidence_calculator,
+        explanation_builder=selected_aggregator.explanation_builder,
+        reliability_adjustment=selected_aggregator.reliability_adjustment,
+    )
+
+    output: Dict[str, Dict[str, Any]] = {}
+    for domain, accumulator in by_domain.items():
+        evidence_items = _apply_meal_exposure_gate(
+            domain,
+            accumulator.evidence_items,
+            nutrient_totals,
+            meal_fraction,
         )
-        for domain, accumulator
-        in by_domain.items()
-    }
+        domain_aggregator = (
+            appearance_aggregator
+            if domain in _APPEARANCE_ORAL_DOMAINS and aggregator is None
+            else selected_aggregator
+        )
+        output[domain] = domain_aggregator.score(
+            domain=domain,
+            health_domain=accumulator.health_domain,
+            evidence_items=evidence_items,
+        ).to_dict()
+    return output
 
 
 # =========================================================================
