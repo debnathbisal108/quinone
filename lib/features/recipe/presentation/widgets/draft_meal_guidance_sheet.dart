@@ -487,7 +487,9 @@ class _NutrientAlertCard extends StatelessWidget {
               ),
               if (!alert.requiresClinicalInput)
                 Text(
-                  '${adjustedPercentage.toStringAsFixed(0)}%',
+                  adjustedPercentage > 0 && adjustedPercentage < 1
+                      ? '<1%'
+                      : '${adjustedPercentage.toStringAsFixed(0)}%',
                   style: theme.textTheme.labelLarge?.copyWith(
                     color: color,
                     fontWeight: FontWeight.w900,
