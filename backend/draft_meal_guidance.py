@@ -27,7 +27,7 @@ from recommendation_engine import (
 )
 
 
-GUIDANCE_ENGINE_VERSION = "2.4.0"
+GUIDANCE_ENGINE_VERSION = "2.5.0"
 
 _LABELS: dict[str, tuple[str, str]] = {
     "energy_kcal": ("Energy", "kcal"),
@@ -494,7 +494,18 @@ def _suggestions(
             "quantity": round(float(candidate.get("serving_g") or 100.0), 1),
             "unit": "g",
             "reason": f"Add a source of {(_LABELS.get(nutrient_key) or (nutrient_key, ''))[0].lower()}.",
-            "nutrient_basis": "idea_only_until_usda_selection",
+            # Preserve the exact USDA identity that was nutrient-verified for
+            # this suggestion. The Recipe page may still show normal search
+            # results, but pinning this FDC record prevents a fresh generic
+            # search from silently substituting a similarly named food whose
+            # Vitamin D (or other target nutrient) is missing/zero.
+            **({"fdc_id": int(candidate["fdc_id"])} if isinstance(candidate.get("fdc_id"), int) else {}),
+            **({"data_type": candidate.get("data_type")} if candidate.get("data_type") else {}),
+            **({"food_category": candidate.get("food_category")} if candidate.get("food_category") else {}),
+            "description": str(candidate.get("search_query") or candidate.get("name") or "").strip(),
+            "target_nutrient": nutrient_key,
+            "target_nutrient_per_100g": round(per100, 6),
+            "nutrient_basis": "usda_verified" if isinstance(candidate.get("fdc_id"), int) else "verified_fallback",
         }
         for _, candidate in ranked[:3]
     ]
