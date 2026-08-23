@@ -3363,7 +3363,7 @@ def classify_image(client, image):
         except Exception as error:
             last_error = error
             logger.warning(
-                "Image route classification failed on attempt %d/2: %s",
+                "Image route classification failed on attempt %d/3: %s",
                 attempt,
                 error,
             )
@@ -3535,6 +3535,40 @@ def _meal_inventory_views(image: Image.Image) -> list[Image.Image]:
     return [image, *(image.crop(box) for box in boxes)]
 
 
+def _extra_sparse_meal_views(image: Image.Image) -> list[Image.Image]:
+    """Extra focused views used only when a complex meal remains suspiciously sparse."""
+    width, height = image.size
+    if width < 360 or height < 360:
+        return []
+    margin_x = max(1, round(width * 0.18))
+    margin_y = max(1, round(height * 0.18))
+    center = image.crop((margin_x, margin_y, width - margin_x, height - margin_y))
+    band_h = max(1, height // 3)
+    overlap = max(20, round(height * 0.06))
+    bands = [
+        image.crop((0, 0, width, min(height, band_h + overlap))),
+        image.crop((0, max(0, band_h - overlap), width, min(height, 2 * band_h + overlap))),
+        image.crop((0, max(0, 2 * band_h - overlap), width, height)),
+    ]
+    return [center, *bands]
+
+
+def _complex_meal_identity(meal: dict[str, Any]) -> bool:
+    identity = _identity_text(
+        " ".join(
+            str(meal.get(key) or "")
+            for key in ("recipe_name", "meal_name", "meal_type")
+        )
+    )
+    return any(
+        token in identity
+        for token in (
+            "thali", "platter", "plate", "tray", "bento", "combo",
+            "mixed", "meal", "bowl", "spread", "feast",
+        )
+    )
+
+
 def _atomic_inventory_food(
     item: dict[str, Any],
     *,
@@ -3606,7 +3640,11 @@ def _audit_and_correct_complete_food_inventory(
     the entire analysis fail. This pass requests a small JSON object in the
     prompt, retries locally, and is still non-fatal to the primary result.
     """
-    provisional_foods = result.get("meal", {}).get("foods", [])
+    primary_meal = result.get("meal") if isinstance(result.get("meal"), dict) else {}
+    provisional_foods = primary_meal.get("foods", [])
+    sparse_complex_meal = _complex_meal_identity(primary_meal) and len(
+        [food for food in provisional_foods if isinstance(food, dict)]
+    ) <= 2
     provisional = []
     for food in provisional_foods if isinstance(provisional_foods, list) else []:
         if not isinstance(food, dict):
@@ -3623,8 +3661,15 @@ def _audit_and_correct_complete_food_inventory(
         "You are the final completeness auditor for one meal photograph. The "
         "first image is the full meal; any additional images are overlapping "
         "detail crops of that same meal and must never create duplicates. "
-        f"The provisional detector returned: {json.dumps(provisional)}. Treat "
-        "that list only as a checklist: preserve items verified in the image, "
+        f"The provisional detector returned: {json.dumps(provisional)}. "
+        f"The provisional meal identity is recipe_name={primary_meal.get('recipe_name')!r}, "
+        f"meal_type={primary_meal.get('meal_type')!r}. "
+        + (
+            "This is a recognized multi-component meal but the provisional inventory has two or fewer foods; "
+            "treat that as a strong omission warning and inspect every bowl, compartment, staple, curry, side, condiment and garnish before finalizing. "
+            if sparse_complex_meal else ""
+        )
+        + "Treat that list only as a checklist: preserve items verified in the image, "
         "remove false positives, and recover every missed edible component.\n\n"
         "Build a visual coverage ledger for every container: sweep left-to-right "
         "and top-to-bottom, then inspect every visible layer and region, including "
@@ -3678,9 +3723,11 @@ def _audit_and_correct_complete_food_inventory(
         "newly found foods. Keep text concise."
     )
     views = _meal_inventory_views(image)
+    if sparse_complex_meal:
+        views = [*views, *_extra_sparse_meal_views(image)]
     audited: dict[str, Any] | None = None
     last_error: Exception | None = None
-    for attempt in range(1, 3):
+    for attempt in range(1, 4):
         instruction = audit_instruction
         if attempt > 1:
             instruction = (
@@ -3697,12 +3744,22 @@ def _audit_and_correct_complete_food_inventory(
                 candidate,
                 ATOMIC_MEAL_INVENTORY_JSON_SCHEMA,
             )
+            candidate_items = candidate.get("items", [])
+            if (
+                sparse_complex_meal
+                and isinstance(candidate_items, list)
+                and len([item for item in candidate_items if isinstance(item, dict)]) <= 2
+                and attempt < 3
+            ):
+                raise ModelJSONResponseError(
+                    "Completeness audit remained suspiciously sparse for a multi-component meal."
+                )
             audited = candidate
             break
         except Exception as error:
             last_error = error
             logger.warning(
-                "Compact inventory audit image %d failed on attempt %d/2: %s",
+                "Compact inventory audit image %d failed on attempt %d/3: %s",
                 image_index,
                 attempt,
                 error,
@@ -3744,7 +3801,6 @@ def _audit_and_correct_complete_food_inventory(
         [food.get("name") for food in foods],
         recovered,
     )
-    primary_meal = result.get("meal") if isinstance(result.get("meal"), dict) else {}
     audited_recipe_name = str(audited.get("recipe_name") or "").strip()
     primary_recipe_name = str(primary_meal.get("recipe_name") or "").strip()
     return {
