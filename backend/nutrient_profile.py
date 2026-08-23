@@ -48,6 +48,12 @@ MIN_REQUEST_INTERVAL_S = 0.15
 
 NUTRIENT_CACHE_FILE_PATH = os.environ.get("NUTRICA_NUTRIENT_CACHE_PATH", "")
 
+# Increment whenever canonical nutrient extraction changes in a way that can
+# turn a previously-missing value into a real value. Persisted nutrient-cache
+# entries from older deployments are upgraded from their preserved raw USDA
+# nutrient rows instead of silently keeping stale None values forever.
+NUTRIENT_SCHEMA_VERSION = "2.0"
+
 # Units that are a reliable 1:1 gram-equivalent for scaling purposes.
 # "ml" is included as a standard approximation (1 ml ~= 1 g) for typical
 # foods lacking ingredient-specific density data - not exact, but far
@@ -77,9 +83,10 @@ CANONICAL_NUTRIENT_KEYS: List[str] = [
     "vitamin_a_ug", "vitamin_c_mg", "vitamin_d_ug", "vitamin_e_mg", "vitamin_k_ug",
     "thiamin_mg", "riboflavin_mg", "niacin_mg", "pantothenic_acid_mg",
     "vitamin_b6_mg", "folate_ug", "vitamin_b12_ug", "choline_mg",
+    "biotin_ug",
     "saturated_fat_g", "monounsaturated_fat_g", "polyunsaturated_fat_g", "trans_fat_g",
     "cholesterol_mg", "omega3_g", "omega6_g",
-    "caffeine_mg", "water_g", "ash_g",
+    "caffeine_mg", "water_g", "ash_g", "fluoride_mg",
 ]
 
 
@@ -200,7 +207,16 @@ NUTRIENT_MAP: Dict[str, List[Dict[str, Any]]] = {
     "vitamin_d_ug": [
         {"numbers": {"328"}, "names": {"vitamin d (d2 + d3)"}, "target_unit": "UG"},
         # Legacy IU entry: 1 IU vitamin D = 0.025 ug (standard published factor).
-        {"numbers": {"324"}, "names": {"vitamin d"}, "target_unit": "UG", "iu_conversion_factor": 0.025},
+        {
+            "numbers": {"324"},
+            "names": {
+                "vitamin d",
+                "vitamin d (d2 + d3), international units",
+                "vitamin d3 + d2, international units",
+            },
+            "target_unit": "UG",
+            "iu_conversion_factor": 0.025,
+        },
     ],
     "vitamin_e_mg": [{"numbers": {"323"}, "names": {"vitamin e (alpha-tocopherol)"}, "target_unit": "MG"}],
     "vitamin_k_ug": [{"numbers": {"430"}, "names": {"vitamin k (phylloquinone)"}, "target_unit": "UG"}],
@@ -215,6 +231,13 @@ NUTRIENT_MAP: Dict[str, List[Dict[str, Any]]] = {
     ],
     "vitamin_b12_ug": [{"numbers": {"418"}, "names": {"vitamin b-12"}, "target_unit": "UG"}],
     "choline_mg": [{"numbers": {"421"}, "names": {"choline, total"}, "target_unit": "MG"}],
+    # Biotin is not populated on every USDA data type, but when FoodData
+    # Central reports it by name we preserve the measured value directly.
+    "biotin_ug": [{"names": {"biotin", "vitamin b7", "vitamin b-7"}, "target_unit": "UG"}],
+    # USDA commonly reports fluoride as micrograms under nutrient number 313;
+    # Quinone's canonical target schema is milligrams, so standard mass-unit
+    # conversion is applied without estimating any missing value.
+    "fluoride_mg": [{"numbers": {"313"}, "names": {"fluoride, f", "fluoride"}, "target_unit": "MG"}],
     "saturated_fat_g": [{"numbers": {"606"}, "names": {"fatty acids, total saturated"}, "target_unit": "G"}],
     "monounsaturated_fat_g": [{"numbers": {"645"}, "names": {"fatty acids, total monounsaturated"}, "target_unit": "G"}],
     "polyunsaturated_fat_g": [{"numbers": {"646"}, "names": {"fatty acids, total polyunsaturated"}, "target_unit": "G"}],
@@ -461,11 +484,48 @@ class NutrientCache:
 
     async def get(self, fdc_id: int) -> Optional[Dict[str, Any]]:
         async with self._lock:
-            return self._store.get(fdc_id)
+            profile = self._store.get(fdc_id)
+            if profile is None:
+                return None
+
+            if profile.get("schema_version") == NUTRIENT_SCHEMA_VERSION:
+                return profile
+
+            # Older cached profiles preserve every raw USDA nutrient row in
+            # all_nutrients. Rebuild the canonical map from those rows so a
+            # mapping fix (for example Vitamin D or fluoride) takes effect
+            # immediately without waiting for another external USDA request.
+            raw_rows = profile.get("all_nutrients")
+            if isinstance(raw_rows, list) and raw_rows:
+                reconstructed = []
+                for item in raw_rows:
+                    if not isinstance(item, dict):
+                        continue
+                    reconstructed.append({
+                        "nutrient": {
+                            "id": item.get("id"),
+                            "number": item.get("number"),
+                            "name": item.get("name"),
+                            "unitName": item.get("unit"),
+                        },
+                        "amount": item.get("amount"),
+                    })
+                upgraded = dict(profile)
+                upgraded["nutrients"] = extract_canonical_nutrients(reconstructed)
+                upgraded["schema_version"] = NUTRIENT_SCHEMA_VERSION
+                self._store[fdc_id] = upgraded
+                return upgraded
+
+            # No raw rows to safely upgrade from; force a fresh USDA detail
+            # hydration instead of trusting a stale canonical map.
+            self._store.pop(fdc_id, None)
+            return None
 
     async def set(self, fdc_id: int, profile: Dict[str, Any]) -> None:
         async with self._lock:
-            self._store[fdc_id] = profile
+            stored = dict(profile)
+            stored["schema_version"] = NUTRIENT_SCHEMA_VERSION
+            self._store[fdc_id] = stored
             if self._disk_path:
                 try:
                     with open(self._disk_path, "w", encoding="utf-8") as f:
@@ -596,6 +656,7 @@ async def _get_nutrient_profile(fdc_id: int, client: httpx.AsyncClient) -> Dict[
         "nutrient_status": NutrientStatus.DOWNLOADED,
         "nutrients": extract_canonical_nutrients(food_nutrients),
         "all_nutrients": extract_all_nutrients(food_nutrients),
+        "schema_version": NUTRIENT_SCHEMA_VERSION,
     }
     await _nutrient_cache.set(fdc_id, profile)
     return profile
