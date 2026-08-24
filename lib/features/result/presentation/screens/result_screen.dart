@@ -13,7 +13,7 @@ import '../widgets/macro_circle.dart';
 import '../widgets/micronutrient_bar.dart';
 import '../widgets/nutrient_target_view_data.dart';
 import '../widgets/score_gauge.dart';
-import '../../share/services/meal_share_service.dart';
+import '../../../share/services/meal_share_service.dart';
 
 class ResultScreen extends ConsumerStatefulWidget {
   const ResultScreen({
