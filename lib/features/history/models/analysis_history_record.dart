@@ -14,6 +14,7 @@ class AnalysisHistoryRecord {
     required this.nutrientTargets,
     required this.detectedFoods,
     required this.rawResult,
+    this.mealImagePaths = const [],
   });
 
   final String analysisId;
@@ -26,6 +27,7 @@ class AnalysisHistoryRecord {
   final Map<String, double> nutrientTargets;
   final List<String> detectedFoods;
   final Map<String, dynamic> rawResult;
+  final List<String> mealImagePaths;
 
   double get protein => _firstNumber(
         macronutrients,
@@ -129,6 +131,7 @@ class AnalysisHistoryRecord {
       nutrientTargets: Map.unmodifiable(targets),
       detectedFoods: List.unmodifiable(foods),
       rawResult: Map<String, dynamic>.from(json),
+      mealImagePaths: List.unmodifiable(parsed.mealImagePaths),
     );
   }
 
@@ -143,6 +146,7 @@ class AnalysisHistoryRecord {
         'nutrient_targets': nutrientTargets,
         'detected_foods': detectedFoods,
         'raw_result_json': jsonEncode(rawResult),
+        'meal_image_paths': mealImagePaths,
       };
 
   factory AnalysisHistoryRecord.fromJson(Map<String, dynamic> json) {
@@ -190,6 +194,7 @@ class AnalysisHistoryRecord {
           .map((e) => e.toString())
           .toList(growable: false),
       rawResult: raw,
+      mealImagePaths: _asList(json['meal_image_paths']).map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList(growable: false),
     );
   }
 }
