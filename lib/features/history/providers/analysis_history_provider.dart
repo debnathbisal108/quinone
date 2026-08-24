@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../notifications/services/health_risk_notification_service.dart';
+import '../../upload/services/analysis_image_archive_service.dart';
 import '../models/analysis_history_record.dart';
 import '../repositories/analysis_history_repository.dart';
 
@@ -48,7 +49,16 @@ class AnalysisHistoryNotifier
     if (status == 'waiting_for_back_label' || status == 'no_food_detected') {
       return;
     }
-    final record = AnalysisHistoryRecord.fromAnalysisJson(result);
+    final inputMethod = result['input_method']?.toString().trim().toLowerCase();
+    final shouldAttachPending = inputMethod != 'manual_recipe' && inputMethod != 'draft_guidance';
+    final enriched = shouldAttachPending
+        ? AnalysisImageArchiveService.instance.attachPendingImages(result)
+        : result;
+    final record = AnalysisHistoryRecord.fromAnalysisJson(enriched);
+    final imagePaths = enriched['meal_image_paths'];
+    if (imagePaths is List && imagePaths.isNotEmpty) {
+      await AnalysisImageArchiveService.instance.clearPendingMealImages();
+    }
     await _repository.save(record);
     state = _repository.getAll();
     _onHistoryChanged?.call(state, requestPermission: true);
