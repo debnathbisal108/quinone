@@ -6,6 +6,7 @@ import copy
 import math
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from difflib import SequenceMatcher
@@ -48,7 +49,7 @@ MEAL_IMAGE_MAX_EDGE = int(os.environ.get("MEAL_IMAGE_MAX_EDGE", "1280"))
 LABEL_IMAGE_MAX_EDGE = int(os.environ.get("LABEL_IMAGE_MAX_EDGE", "2048"))
 GEMINI_JSON_MAX_ATTEMPTS = max(
     1,
-    int(os.environ.get("GEMINI_JSON_MAX_ATTEMPTS", "3")),
+    int(os.environ.get("GEMINI_JSON_MAX_ATTEMPTS", "2")),
 )
 ENABLE_MEAL_INVENTORY_AUDIT = os.environ.get(
     "ENABLE_MEAL_INVENTORY_AUDIT",
@@ -3831,27 +3832,18 @@ def _should_audit_complete_food_inventory(result: dict[str, Any]) -> bool:
     if not isinstance(foods, list):
         return False
     valid_foods = [food for food in foods if isinstance(food, dict)]
-    if len(valid_foods) >= 2:
-        return True
-    if any(food.get("analysis_route") == "DECOMPOSE" for food in valid_foods):
-        return True
-    meal_type = _identity_text(meal.get("meal_type"))
-    if any(
-        token in meal_type
-        for token in (
-            "mixed", "bowl", "plate", "salad", "sandwich", "wrap",
-            "burger", "curry", "stew", "soup", "porridge", "meal",
-            "platter", "dessert",
-        )
-    ):
-        return True
     if not valid_foods:
         return False
-    roles = {
-        str(food.get("role") or "").lower().strip()
-        for food in valid_foods
-    }
-    return not roles or roles.isdisjoint({"main", "beverage", "snack"})
+    if any(food.get("analysis_route") == "DECOMPOSE" for food in valid_foods):
+        return True
+    meal_identity = _identity_text(" ".join(str(meal.get(key) or "") for key in ("recipe_name", "meal_name", "meal_type")))
+    complex_tokens = ("thali", "platter", "bento", "combo", "mixed", "spread", "feast", "sandwich", "wrap", "burger", "salad", "bowl", "curry", "stew", "soup", "porridge")
+    if any(token in meal_identity for token in complex_tokens):
+        return True
+    if len(valid_foods) <= 2 and any(token in meal_identity for token in ("meal", "plate", "breakfast", "lunch", "dinner")):
+        return True
+    roles = {str(food.get("role") or "").lower().strip() for food in valid_foods}
+    return len(valid_foods) == 1 and (not roles or roles.isdisjoint({"main", "beverage", "snack"}))
 
 
 SEPARATORS = ["/", "&", ",", " and "]
@@ -5380,6 +5372,8 @@ def continue_with_back_label(
 def analyze_meal(
     image_paths: list[str],
     profile: dict[str, Any] | None = None,
+    *,
+    assume_meal_images: bool = False,
 ) -> dict[str, Any]:
     """
     Analyse one or more images supplied by the backend server.
@@ -5427,100 +5421,52 @@ def analyze_meal(
     detected_meal_types: list[str] = []
 
     # ---------------------------------------------------------
-    # Analyse food photographs
+    # Analyse meal photographs
     # ---------------------------------------------------------
-
-    for image_index, (_, classification_image) in enumerate(
-          all_images,
-          start=1,
-    ):
-        classification = classify_image(client, classification_image)
-        image_type = str(classification.get("type") or "").strip().lower()
-
-        if image_type in {"nutrition_label", "back_label", "label"}:
-            label_result = extract_label(client, classification_image)
-            label_food = create_food_from_label(label_result)
-            label_food["id"] = f"img_{image_index:03d}_food_0001"
-            all_foods.append(label_food)
-            continue
-
-        if image_type == "unknown":
-            # A routing outage must not fail a normal meal. Probe strictly for
-            # printed label evidence; if absent/unreadable, continue as food.
-            try:
-                label_result = extract_label(client, classification_image)
-            except Exception as error:
-                logger.warning(
-                    "Unknown-route label probe failed for image %d; "
-                    "continuing as meal: %s",
-                    image_index,
-                    error,
-                )
-            else:
+    def _analyze_one_meal_image(args: tuple[int, Image.Image]) -> tuple[int, dict[str, Any]]:
+        image_index, source_image = args
+        image = prepare_image_for_model(source_image, max_edge=MEAL_IMAGE_MAX_EDGE)
+        if assume_meal_images:
+            result = _generate_plain_meal_json(image, image_index=image_index)
+        else:
+            classification = classify_image(client, image)
+            image_type = str(classification.get("type") or "").strip().lower()
+            if image_type in {"nutrition_label", "back_label", "label"}:
+                label_result = extract_label(client, image)
                 label_food = create_food_from_label(label_result)
                 label_food["id"] = f"img_{image_index:03d}_food_0001"
-                all_foods.append(label_food)
-                continue
-
-        image = prepare_image_for_model(
-            classification_image,
-            max_edge=MEAL_IMAGE_MAX_EDGE,
-        )
-        result = _generate_plain_meal_json(
-            image,
-            image_index=image_index,
-        )
-
-        # This second Gemini pass was the other shared failure point. It is
-        # opt-in and non-fatal; the complete primary result remains usable.
-        if (
-            ENABLE_MEAL_INVENTORY_AUDIT
-            and _should_audit_complete_food_inventory(result)
-        ):
+                return image_index, {"label_food": label_food}
+            result = _generate_plain_meal_json(image, image_index=image_index)
+        if ENABLE_MEAL_INVENTORY_AUDIT and _should_audit_complete_food_inventory(result):
             try:
-                result = _audit_and_correct_complete_food_inventory(
-                    image,
-                    result,
-                    image_index=image_index,
-                )
+                result = _audit_and_correct_complete_food_inventory(image, result, image_index=image_index)
             except Exception as error:
-                logger.warning(
-                    "Optional inventory audit failed for image %d; using "
-                    "primary detection: %s",
-                    image_index,
-                    error,
-                )
+                logger.warning("Optional inventory audit failed for image %d; using primary detection: %s", image_index, error)
+        return image_index, result
 
+    indexed_images = [(index, image) for index, (_, image) in enumerate(all_images, start=1)]
+    if len(indexed_images) > 1:
+        with ThreadPoolExecutor(max_workers=min(3, len(indexed_images))) as pool:
+            analyzed = list(pool.map(_analyze_one_meal_image, indexed_images))
+    else:
+        analyzed = [_analyze_one_meal_image(indexed_images[0])]
+
+    for image_index, result in sorted(analyzed, key=lambda item: item[0]):
+        if "label_food" in result:
+            all_foods.append(result["label_food"])
+            continue
         detected_meal = result.get("meal") if isinstance(result.get("meal"), dict) else {}
         recipe_name = str(detected_meal.get("recipe_name") or "").strip()
         meal_type = str(detected_meal.get("meal_type") or "").strip()
-        if recipe_name:
-            detected_recipe_names.append(recipe_name)
-        if meal_type:
-            detected_meal_types.append(meal_type)
-
-        foods = (
-            result
-            .get("meal", {})
-            .get("foods", [])
-        )
-
-        if not isinstance(foods, list):
-            continue
-
-        foods = namespace_food_ids(
-            foods=foods,
-            image_index=image_index,
-        )
-
+        if recipe_name: detected_recipe_names.append(recipe_name)
+        if meal_type: detected_meal_types.append(meal_type)
+        foods = detected_meal.get("foods", [])
+        if not isinstance(foods, list): continue
+        foods = namespace_food_ids(foods=foods, image_index=image_index)
         for food in foods:
             if food.get("analysis_route") == "NUTRITION_LABEL":
                 food.setdefault("requires_back_image", True)
-                food.setdefault(
-                    "back_image_received",
-                    bool(food.get("nutrition_label")),
-                )
-
+                food.setdefault("back_image_received", bool(food.get("nutrition_label")))
         all_foods.extend(foods)
 
     if not all_foods:
