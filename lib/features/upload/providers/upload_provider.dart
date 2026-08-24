@@ -8,6 +8,7 @@ import '../models/upload_request.dart';
 import '../models/upload_response.dart';
 import '../models/analysis_job_progress.dart';
 import '../services/background_analysis_service.dart';
+import '../services/analysis_image_archive_service.dart';
 import '../../history/providers/analysis_history_provider.dart';
 
 final uploadRepositoryProvider = Provider<UploadRepository>((ref) {
@@ -163,6 +164,10 @@ class UploadNotifier extends StateNotifier<UploadState> {
       return;
     }
 
+    await AnalysisImageArchiveService.instance.archiveMealImages(
+      state.images.map((image) => image.path).toList(growable: false),
+    );
+
     state = state.copyWith(
       isUploading: true,
       uploadProgress: 0.02,
@@ -200,18 +205,20 @@ class UploadNotifier extends StateNotifier<UploadState> {
         },
       );
 
-      final responseData =
-          _normalizeResponseData(response.data);
-
+      var responseData = _normalizeResponseData(response.data);
+      if (responseData != null) {
+        responseData = AnalysisImageArchiveService.instance.attachPendingImages(responseData);
+      }
       if (responseData != null && _isCompletedResult(responseData)) {
         await _historySaver(responseData);
       }
+      final responseWithImages = responseData == null ? response : UploadResponse.fromJson(responseData);
 
       state = state.copyWith(
         isUploading: false,
         uploadProgress: 1,
         progressMessage: 'Analysis complete',
-        response: response,
+        response: responseWithImages,
         analysisId: _extractAnalysisId(responseData),
         foodId: _extractFoodId(responseData),
       );
@@ -241,6 +248,8 @@ class UploadNotifier extends StateNotifier<UploadState> {
       return;
     }
 
+    await AnalysisImageArchiveService.instance.clearPendingMealImages();
+
     state = state.copyWith(
       isUploading: true,
       uploadProgress: 0.02,
@@ -265,18 +274,20 @@ class UploadNotifier extends StateNotifier<UploadState> {
         onAnalysisProgress: _handleAnalysisProgress,
       );
 
-      final responseData =
-          _normalizeResponseData(response.data);
-
+      var responseData = _normalizeResponseData(response.data);
+      if (responseData != null) {
+        responseData = AnalysisImageArchiveService.instance.attachPendingImages(responseData);
+      }
       if (responseData != null && _isCompletedResult(responseData)) {
         await _historySaver(responseData);
       }
+      final responseWithImages = responseData == null ? response : UploadResponse.fromJson(responseData);
 
       state = state.copyWith(
         isUploading: false,
         uploadProgress: 1,
         progressMessage: 'Analysis complete',
-        response: response,
+        response: responseWithImages,
         analysisId: _extractAnalysisId(responseData),
         foodId: _extractFoodId(responseData),
       );
@@ -335,6 +346,8 @@ class UploadNotifier extends StateNotifier<UploadState> {
       return;
     }
 
+    
+
     state = state.copyWith(
       isUploading: true,
       uploadProgress: 0.02,
@@ -358,18 +371,20 @@ class UploadNotifier extends StateNotifier<UploadState> {
         onAnalysisProgress: _handleAnalysisProgress,
       );
 
-      final responseData =
-          _normalizeResponseData(response.data);
-
+      var responseData = _normalizeResponseData(response.data);
+      if (responseData != null) {
+        responseData = AnalysisImageArchiveService.instance.attachPendingImages(responseData);
+      }
       if (responseData != null && _isCompletedResult(responseData)) {
         await _historySaver(responseData);
       }
+      final responseWithImages = responseData == null ? response : UploadResponse.fromJson(responseData);
 
       state = state.copyWith(
         isUploading: false,
         uploadProgress: 1,
         progressMessage: 'Analysis complete',
-        response: response,
+        response: responseWithImages,
         analysisId:
             _extractAnalysisId(responseData) ??
                 resolvedAnalysisId,
