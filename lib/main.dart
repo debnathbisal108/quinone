@@ -15,6 +15,7 @@ import 'features/history/repositories/analysis_history_repository.dart';
 import 'features/history/providers/analysis_history_provider.dart';
 import 'features/notifications/services/health_risk_notification_service.dart';
 import 'features/upload/services/background_analysis_service.dart';
+import 'features/upload/services/analysis_image_archive_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -25,6 +26,7 @@ Future<void> main() async {
   await Hive.initFlutter();
   await AppPreferencesRepository.initialize();
   await AnalysisHistoryRepository.initialize();
+  await AnalysisImageArchiveService.instance.initialize();
   await HealthRiskNotificationService.instance.initialize(
     onOpen: (destination) {
       AppRouter.router.go(
