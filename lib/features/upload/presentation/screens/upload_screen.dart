@@ -14,6 +14,7 @@ import '../widgets/back_label_request_card.dart';
 import '../widgets/image_grid.dart';
 import '../widgets/upload_progress_card.dart';
 import '../widgets/upload_source_sheet.dart';
+import '../widgets/nutrition_label_source_sheet.dart';
 
 class UploadScreen extends ConsumerStatefulWidget {
   const UploadScreen({super.key, this.initialBackgroundResponse});
@@ -92,34 +93,28 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
     _handleUploadResponse();
   }
 
-  Future<void> _startLabelOnlyAnalysis() async {
+  void _showLabelSourceSheet() {
+    if (ref.read(uploadProvider).isUploading) return;
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (_) => NutritionLabelSourceSheet(
+        onSelected: _startLabelOnlyAnalysis,
+      ),
+    );
+  }
+
+  Future<void> _startLabelOnlyAnalysis(String imagePath) async {
     final uploadState = ref.read(uploadProvider);
-
-    if (uploadState.isUploading) {
-      return;
-    }
-
-    final image =
-        await ImagePickerService.instance.pickBackLabelFromCamera();
-
-    if (image == null || !mounted) {
-      return;
-    }
-
+    if (uploadState.isUploading || imagePath.trim().isEmpty) return;
     _handledResponse = false;
-
-    final profilePayload =
-        ref.read(profileProvider).backendPayload;
-
+    final profilePayload = ref.read(profileProvider).backendPayload;
     await ref.read(uploadProvider.notifier).uploadLabelOnly(
-          imagePath: image.path,
+          imagePath: imagePath,
           userProfile: profilePayload,
         );
-
-    if (!mounted) {
-      return;
-    }
-
+    if (!mounted) return;
     _handleUploadResponse();
   }
 
@@ -539,19 +534,24 @@ class _UploadScreenState extends ConsumerState<UploadScreen> {
               const SizedBox(height: 24),
 
               if (!isWaitingForLabel) ...[
-                _AddImagesCard(
-                  enabled: !uploadState.isUploading,
-                  onPressed: _showImageSourceSheet,
+                Row(
+                  children: [
+                    Expanded(
+                      child: _AddImagesCard(
+                        enabled: !uploadState.isUploading,
+                        onPressed: _showImageSourceSheet,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: _AddLabelCard(
+                        enabled: !uploadState.isUploading,
+                        onPressed: _showLabelSourceSheet,
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 12),
-                TextButton.icon(
-                  onPressed: uploadState.isUploading
-                      ? null
-                      : _startLabelOnlyAnalysis,
-                  icon: const Icon(Icons.document_scanner_rounded),
-                  label: const Text('Just have the nutrition label?'),
-                ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 16),
 
                 ImageGrid(
                   images: uploadState.images,
@@ -644,7 +644,7 @@ class _UploadHeader extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         Text(
-          'Upload one clear photo of the complete meal or food.',
+          'Photo first. Review before analysis.',
           style: theme.textTheme.bodyLarge?.copyWith(
             color: theme.colorScheme.onSurfaceVariant,
           ),
@@ -680,8 +680,8 @@ class _UploadHeader extends StatelessWidget {
               Flexible(
                 child: Text(
                   hasProfile
-                      ? 'Personalized analysis enabled'
-                      : 'Generic analysis — no profile saved',
+                      ? 'Personalized'
+                      : 'General targets',
                   style: theme.textTheme.labelLarge?.copyWith(
                     color: hasProfile
                         ? theme
@@ -766,6 +766,45 @@ class _AddImagesCard extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AddLabelCard extends StatelessWidget {
+  const _AddLabelCard({required this.enabled, required this.onPressed});
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Material(
+      color: theme.colorScheme.surfaceContainerLow,
+      borderRadius: BorderRadius.circular(24),
+      child: InkWell(
+        onTap: enabled ? onPressed : null,
+        borderRadius: BorderRadius.circular(24),
+        child: Container(
+          height: 188,
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: theme.colorScheme.outlineVariant),
+          ),
+          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Container(
+              width: 52,
+              height: 52,
+              decoration: BoxDecoration(color: theme.colorScheme.secondaryContainer, shape: BoxShape.circle),
+              child: Icon(Icons.document_scanner_rounded, color: theme.colorScheme.onSecondaryContainer),
+            ),
+            const SizedBox(height: 12),
+            Text('Nutrition label', textAlign: TextAlign.center, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w900)),
+            const SizedBox(height: 4),
+            Text('Packaged food', textAlign: TextAlign.center, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          ]),
         ),
       ),
     );
