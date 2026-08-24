@@ -165,7 +165,7 @@ class _UploadSourceSheetState
             ),
             const SizedBox(height: 8),
             Text(
-              'Take a new photo or choose one or more images from your gallery.',
+              'Add a clear meal photo.',
               style: theme.textTheme.bodyLarge?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
@@ -176,7 +176,7 @@ class _UploadSourceSheetState
               icon: Icons.camera_alt_rounded,
               title: 'Take a photo',
               description:
-                  'Capture the meal using your rear camera.',
+                  'Take a clear meal photo.',
               enabled: !disabled,
               onTap: _takePhoto,
             ),
@@ -186,7 +186,7 @@ class _UploadSourceSheetState
               icon: Icons.photo_outlined,
               title: 'Choose one image',
               description:
-                  'Select a single meal photo from your gallery.',
+                  'Pick one photo.',
               enabled: !disabled,
               onTap: _chooseSingleImage,
             ),
@@ -196,7 +196,7 @@ class _UploadSourceSheetState
               icon: Icons.photo_library_outlined,
               title: 'Choose multiple images',
               description:
-                  'Select multiple dishes or different meal angles.',
+                  'Add different meal angles.',
               enabled: !disabled,
               onTap: _chooseMultipleImages,
             ),
@@ -206,7 +206,7 @@ class _UploadSourceSheetState
               const LinearProgressIndicator(),
               const SizedBox(height: 10),
               Text(
-                'Opening image picker…',
+                'Opening gallery…',
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color:
                       theme.colorScheme.onSurfaceVariant,
