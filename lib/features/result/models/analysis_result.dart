@@ -31,6 +31,7 @@ class AnalysisResult {
     required this.nutrientRiskFlags,
     required this.personalizationApplied,
     required this.usedAuthoritativeNutritionTotals,
+    this.mealImagePaths = const [],
   });
 
   final String mealName;
@@ -85,6 +86,7 @@ class AnalysisResult {
   /// False only for legacy responses that contain no meal-level totals and
   /// therefore require a deduplicated food-level fallback.
   final bool usedAuthoritativeNutritionTotals;
+  final List<String> mealImagePaths;
 
   double get overallScore {
     if (healthScores.isEmpty) return 0;
@@ -368,6 +370,10 @@ class AnalysisResult {
           ].fold<double>(0, math.max)
         : reportedCalories;
 
+    final mealImagePaths = _firstStringList(
+      root['meal_image_paths'] ?? meal['meal_image_paths'] ?? json['meal_image_paths'],
+    );
+
     return AnalysisResult(
       mealName: _firstText(
             meal,
@@ -454,7 +460,13 @@ class AnalysisResult {
       nutrientRiskFlags: List.unmodifiable(nutrientRiskFlags),
       personalizationApplied: personalization?['profile_applied'] == true,
       usedAuthoritativeNutritionTotals: usedAuthoritativeTotals,
+      mealImagePaths: List.unmodifiable(mealImagePaths),
     );
+  }
+
+  static List<String> _firstStringList(dynamic value) {
+    if (value is! List) return const [];
+    return value.map((item) => item.toString().trim()).where((item) => item.isNotEmpty).toList(growable: false);
   }
 
   static Map<String, dynamic> _unwrapResult(Map<String, dynamic> json) {
