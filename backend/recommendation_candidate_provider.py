@@ -259,7 +259,7 @@ def _selected_seed_ideas(
     # Search a moderate pool, not all 100+ foods per button tap. Round-robin by
     # food group keeps the shortlist varied and prevents repetitive berry/nut
     # suggestions even when many foods share the same target nutrient.
-    search_budget = min(12, max(6, maximum_candidates))
+    search_budget = min(8, max(6, maximum_candidates))
     buckets: dict[str, list[dict[str, Any]]] = {}
     group_order: list[str] = []
     for _, _, seed in ranked:
