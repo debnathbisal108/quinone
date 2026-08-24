@@ -18,10 +18,22 @@ class MealShareService {
     required AnalysisResult result,
     List<String> imagePaths = const [],
   }) async {
-    final output = await _buildCard(result: result, imagePaths: imagePaths);
     final box = context.findRenderObject() as RenderBox?;
+  
+    final output = await _buildCard(
+      result: result,
+      imagePaths: imagePaths,
+    );
+  
+    if (!context.mounted) return;
+  
     await Share.shareXFiles(
-      [XFile(output.path, mimeType: 'image/png')],
+      [
+        XFile(
+          output.path,
+          mimeType: 'image/png',
+        ),
+      ],
       text: 'My meal analysis: ${result.overallScore.round()}/100 with Quinone.',
       subject: 'My Quinone meal analysis',
       sharePositionOrigin: box == null
