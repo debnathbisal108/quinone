@@ -534,7 +534,7 @@ async def load_draft_meal_guidance_suggestions(
             target_domains=[],
             target_nutrients=low_nutrients[:12],
             local_hour=request.local_hour,
-            maximum_candidates=16,
+            maximum_candidates=8,
             fallback_candidates=FOOD_RECOMMENDATION_CATALOG,
         )
         guidance = build_draft_meal_guidance(
@@ -734,6 +734,7 @@ def _run_analysis_engine_locked(
         return analyze_meal(
             image_paths=image_paths,
             profile=profile_data,
+            assume_meal_images=True,
         )
 
 
@@ -773,6 +774,8 @@ def _run_label_only_engine_locked(
 
 
 @app.post("/analyze/start")
+@app.post("/analyze/meal/start")
+@app.post("/api/v1/analyze/meal/start", include_in_schema=False)
 async def start_analysis_job(
     images: list[UploadFile] = File(...),
     profile: str | None = Form(default=None),
