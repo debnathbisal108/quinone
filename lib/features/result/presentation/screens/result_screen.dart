@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -12,16 +13,7 @@ import '../widgets/macro_circle.dart';
 import '../widgets/micronutrient_bar.dart';
 import '../widgets/nutrient_target_view_data.dart';
 import '../widgets/score_gauge.dart';
-
-// import 'package:flutter/material.dart';
-// import 'package:go_router/go_router.dart';
-// import 'package:quinone/features/result/models/analysis_result.dart';
-
-// import '../widgets/food_card.dart';
-// import '../widgets/health_score_card.dart';
-// import '../widgets/macro_circle.dart';
-// import '../widgets/micronutrient_bar.dart';
-// import '../widgets/score_gauge.dart';
+import '../../share/services/meal_share_service.dart';
 
 class ResultScreen extends ConsumerStatefulWidget {
   const ResultScreen({
@@ -43,8 +35,39 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
   bool _recommendationsLoading = false;
   String? _recommendationError;
   String? _applyingRecommendationId;
+  late List<String> _mealImagePaths;
 
   AnalysisResult get result => widget.result;
+
+  @override
+  void initState() {
+    super.initState();
+    _mealImagePaths = List<String>.from(widget.result.mealImagePaths);
+    if (_mealImagePaths.isEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _resolveHistoryImages());
+    }
+  }
+
+  Future<void> _resolveHistoryImages() async {
+    final id = _analysisId(widget.rawResult);
+    if (!mounted || id == null || id.isEmpty) return;
+    for (final record in ref.read(analysisHistoryProvider)) {
+      if (record.analysisId != id) continue;
+      if (record.mealImagePaths.isNotEmpty && mounted) {
+        setState(() => _mealImagePaths = List<String>.from(record.mealImagePaths));
+      }
+      return;
+    }
+  }
+
+  Future<void> _shareMeal() async {
+    try {
+      await MealShareService.instance.shareMeal(context: context, result: result, imagePaths: _mealImagePaths);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not create the share card: $error')));
+    }
+  }
 
   Future<void> _loadRecommendations() async {
     if (!mounted) return;
@@ -555,6 +578,13 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
               : context.go('/app'),
           icon: const Icon(Icons.arrow_back_rounded),
         ),
+        actions: [
+          IconButton(
+            tooltip: 'Share meal analysis',
+            onPressed: _shareMeal,
+            icon: const Icon(Icons.ios_share_rounded),
+          ),
+        ],
       ),
       body: SafeArea(
         child: LayoutBuilder(
@@ -578,18 +608,21 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                     children: [
                       Text(
                         result.mealName,
-                        style: theme.textTheme.headlineMedium?.copyWith(
-                          fontWeight: FontWeight.w800,
-                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800),
                       ),
+                      if (_mealImagePaths.isNotEmpty) ...[
+                        const SizedBox(height: 14),
+                        _MealPhotoStrip(paths: _mealImagePaths),
+                      ],
                       if (result.summary != null && result.summary!.trim().isNotEmpty) ...[
                         const SizedBox(height: 8),
                         Text(
                           result.summary!,
-                          style: theme.textTheme.bodyLarge?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
-                            height: 1.45,
-                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant, height: 1.3),
                         ),
                       ],
                       const SizedBox(height: 24),
@@ -605,7 +638,7 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                       ),
                       if (result.displayFoods.isNotEmpty) ...[
                         const SizedBox(height: 28),
-                        const _SectionTitle('Detected foods'),
+                        const _SectionTitle('Detected foods', icon: Icons.restaurant_rounded),
                         const SizedBox(height: 14),
                         ...result.displayFoods.map(
                           (food) => Padding(
@@ -615,7 +648,7 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                         ),
                       ],
                       const SizedBox(height: 28),
-                      const _SectionTitle('Macronutrients'),
+                      const _SectionTitle('Macronutrients', icon: Icons.pie_chart_outline_rounded),
                       const SizedBox(height: 14),
                       LayoutBuilder(
                         builder: (context, gridConstraints) {
@@ -647,7 +680,7 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                                         unit: 'g',
                                         summaryTitle: 'How the total is covered',
                                         summaryNote:
-                                            'The total-fat value is authoritative. Fat databases often report only part of the fatty-acid composition, so the subtype rows may not add up to the total.',
+                                            'Total fat is authoritative; reported subtypes may not add up.',
                                         summaryValues: [
                                           _NutrientDetailItem(
                                             label: 'Total fat',
@@ -672,7 +705,7 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                                         ],
                                         breakdownTitle: 'Reported fat details',
                                         breakdownNote:
-                                            'Saturated, monounsaturated, and polyunsaturated fat are major classes. Omega-3 and omega-6 are subsets of polyunsaturated fat, while trans fat is reported separately and cholesterol is not part of total fat. Do not add every row together.',
+                                            'Saturated, mono- and polyunsaturated fat are the main classes. Omega-3/6 are polyunsaturated subsets.',
                                         contributorTitle:
                                             'Total-fat contributors',
                                         contributorNote:
@@ -756,7 +789,7 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                                         unit: 'g',
                                         breakdownTitle: 'Carbohydrate composition',
                                         breakdownNote:
-                                            'Sugars, starch, and dietary fiber are components of total carbohydrate, not extra amounts to add on top. Only components reported by the nutrition source are shown.',
+                                            'Sugars, starch and fiber are components of total carbohydrate.',
                                         relatedValues:
                                             _carbohydrateDetails(),
                                       );
@@ -780,7 +813,7 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                       ),
                       if (result.healthScores.isNotEmpty) ...[
                         const SizedBox(height: 32),
-                        const _SectionTitle('Health scores'),
+                        const _SectionTitle('Health scores', icon: Icons.favorite_rounded),
                         const SizedBox(height: 14),
                         ...result.healthScores.map(
                           (score) => Padding(
@@ -798,7 +831,7 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                       ],
                       if (result.micronutrients.isNotEmpty) ...[
                         const SizedBox(height: 32),
-                        const _SectionTitle('Micronutrients'),
+                        const _SectionTitle('Micronutrients', icon: Icons.science_outlined),
                         const SizedBox(height: 14),
                         Column(
                           children: [
@@ -835,8 +868,8 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                         const SizedBox(height: 12),
                         Text(
                           result.personalizationApplied
-                              ? 'Tap a nutrient to see food contributors. Percentages use your personalized daily target when available. Above 100% of a minimum adequacy target is not automatically excessive; red appears only beyond a real upper limit or range.'
-                              : 'Tap a nutrient to see food contributors. Percentages use general daily reference values. Above 100% of a minimum adequacy reference is not automatically excessive.',
+                              ? 'Tap a nutrient for contributors. Percentages use your personalized target.'
+                              : 'Tap a nutrient for contributors. Percentages use general references.',
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: theme.colorScheme.onSurfaceVariant,
                             height: 1.4,
@@ -846,7 +879,7 @@ class _ResultScreenState extends ConsumerState<ResultScreen> {
                       if (result.personalizationApplied &&
                           result.nutrientRiskFlags.isNotEmpty) ...[
                         const SizedBox(height: 22),
-                        const _SectionTitle('Personalization notes'),
+                        const _SectionTitle('Personalization notes', icon: Icons.tune_rounded),
                         const SizedBox(height: 12),
                         ...result.nutrientRiskFlags.map(
                           (flag) => Padding(
@@ -956,9 +989,9 @@ class _RecommendationSection extends StatelessWidget {
                     ),
                     Text(
                       loading
-                          ? 'Calculating food options…'
+                          ? 'Finding safe food options…'
                           : recommendations == null
-                              ? 'Food recommendations are calculated only when you ask.'
+                              ? 'Get a few targeted food swaps.'
                               : '${recommendations!.mealsIncluded} '
                                   '${recommendations!.mealsIncluded == 1 ? 'meal' : 'meals'} '
                                   'included · ${recommendations!.context}',
@@ -1148,10 +1181,9 @@ class _FoodRecommendationCard extends StatelessWidget {
           const SizedBox(height: 5),
           Text(
             item.reason,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: scheme.onSurfaceVariant,
-              height: 1.4,
-            ),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant, height: 1.25),
           ),
           const SizedBox(height: 10),
           if (item.targetDomain != null)
@@ -1218,6 +1250,32 @@ String _displayFeatureName(String value) {
             '${word.substring(1).toLowerCase()}',
       )
       .join(' ');
+}
+
+class _MealPhotoStrip extends StatelessWidget {
+  const _MealPhotoStrip({required this.paths});
+  final List<String> paths;
+
+  @override
+  Widget build(BuildContext context) {
+    final existing = paths.where((path) => File(path).existsSync()).toList(growable: false);
+    if (existing.isEmpty) return const SizedBox.shrink();
+    return SizedBox(
+      height: 210,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: existing.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 10),
+        itemBuilder: (context, index) => ClipRRect(
+          borderRadius: BorderRadius.circular(22),
+          child: SizedBox(
+            width: existing.length == 1 ? (MediaQuery.sizeOf(context).width - 40).clamp(260.0, 820.0).toDouble() : 300,
+            child: Image.file(File(existing[index]), fit: BoxFit.cover, errorBuilder: (_, __, ___) => Center(child: Icon(Icons.broken_image_outlined, color: Theme.of(context).colorScheme.onSurfaceVariant))),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _OverviewCard extends StatelessWidget {
@@ -1354,18 +1412,20 @@ class _RiskFlagCard extends StatelessWidget {
 }
 
 class _SectionTitle extends StatelessWidget {
-  const _SectionTitle(this.text);
-
+  const _SectionTitle(this.text, {this.icon});
   final String text;
+  final IconData? icon;
 
   @override
   Widget build(BuildContext context) {
-    return Text(
-      text,
-      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-            fontWeight: FontWeight.w800,
-          ),
-    );
+    final theme = Theme.of(context);
+    return Row(children: [
+      if (icon != null) ...[
+        Icon(icon, size: 22, color: theme.colorScheme.primary),
+        const SizedBox(width: 9),
+      ],
+      Expanded(child: Text(text, style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800))),
+    ]);
   }
 }
 
