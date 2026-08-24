@@ -65,6 +65,10 @@ dependencies:
   reorderables: ^0.6.0
   cached_network_image: ^3.4.1
 
+  # share
+
+  share_plus: ^10.1.4
+
   # -------------------------------
   # JSON
   # -------------------------------
