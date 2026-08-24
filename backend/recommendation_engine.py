@@ -1028,7 +1028,7 @@ def _candidate_portions(candidate: dict[str, Any], calorie_cap: float) -> list[f
     per100_energy = max(0.0, float((candidate.get("nutrients") or {}).get("energy_kcal", 0.0)))
     portions = {
         round(max(5.0, serving * factor), 1)
-        for factor in (0.5, 0.75, 1.0, 1.25, 1.5)
+        for factor in (0.75, 1.0, 1.25)
     }
     if per100_energy > 0:
         portions = {
@@ -1613,11 +1613,15 @@ async def recommend_after_analysis(
     context, calorie_cap, remaining_occasions = _time_context(hour)
     root = _unwrap_result(current_result)
     meal_type = str(root.get("meal", {}).get("meal_type") or "Current meal")
-    baseline_analysis = await _analyze_food_set(
-        current_foods,
-        normalized_profile,
-        meal_type=meal_type,
-    )
+    existing_domains = _domain_score_items(root)
+    if existing_domains:
+        baseline_analysis = root
+    else:
+        baseline_analysis = await _analyze_food_set(
+            current_foods,
+            normalized_profile,
+            meal_type=meal_type,
+        )
     before_overall, before_domain_numbers = _overall_score(baseline_analysis)
     before_domains = _domain_score_items(baseline_analysis)
     ranked_targets = _target_domains(baseline_analysis, maximum=8)
@@ -1640,20 +1644,35 @@ async def recommend_after_analysis(
     # A few of the very weakest domains may have no safe/compatible candidate,
     # so inspect every low domain exposed by _target_domains (up to eight) and
     # still return only `maximum_results` cards at the end.
-    target_window = min(len(ranked_targets), 8)
+    target_window = min(len(ranked_targets), 4)
     if requested:
         preferred = [
             item for item in ranked_targets if item[0].strip().lower() in requested
         ]
         remaining = [item for item in ranked_targets if item not in preferred]
         targets_to_improve = [*preferred, *remaining][
-            : max(target_window, min(len(preferred), 5))
+            : min(len(ranked_targets), max(target_window, min(len(preferred), 4)))
         ]
     else:
         targets_to_improve = ranked_targets[:target_window]
     targets = _resolved_targets(normalized_profile)
     before_totals = _sum_nutrients(current_foods)
     before_balance = _target_score(before_totals, targets)
+
+    simulation_cache: dict[tuple, dict[str, Any]] = {}
+
+    async def simulate(foods: list[dict[str, Any]]) -> dict[str, Any]:
+        key = tuple(
+            (str(food.get("id") or food.get("fdc_id") or food.get("name") or ""),
+             round(_number(food.get("estimated_weight_g")) or _number(food.get("quantity")) or 0.0, 2))
+            for food in foods
+        )
+        cached = simulation_cache.get(key)
+        if cached is not None:
+            return cached
+        analyzed = await _analyze_food_set(foods, normalized_profile, meal_type=meal_type)
+        simulation_cache[key] = analyzed
+        return analyzed
 
     planner_domains = [
         {
@@ -1671,7 +1690,7 @@ async def recommend_after_analysis(
         target_domains=planner_domains,
         target_nutrients=_shortfall_nutrient_keys(before_totals, targets),
         local_hour=hour,
-        maximum_candidates=10,
+        maximum_candidates=8,
         fallback_candidates=FOOD_RECOMMENDATION_CATALOG,
     )
 
@@ -1692,7 +1711,7 @@ async def recommend_after_analysis(
             continue
         dynamic_pool.append(fallback)
         seen_candidate_ids.add(identity)
-        if len(dynamic_pool) >= 16:
+        if len(dynamic_pool) >= 10:
             break
     candidate_pool = dynamic_pool
     if isinstance(candidate_provider, dict):
@@ -1745,7 +1764,7 @@ async def recommend_after_analysis(
             ),
             reverse=True,
         )
-        for candidate in ranked_candidates[:6]:
+        for candidate in ranked_candidates[:3]:
             if _candidate_already_present(candidate, current_foods):
                 continue
             allowed, audit, _ = _candidate_eligibility(candidate, normalized_profile)
@@ -1784,11 +1803,7 @@ async def recommend_after_analysis(
             if adequacy_delta < 2.0:
                 continue
 
-            simulated = await _analyze_food_set(
-                simulated_foods,
-                normalized_profile,
-                meal_type=meal_type,
-            )
+            simulated = await simulate(simulated_foods)
             after_domains = _domain_score_items(simulated)
             if _protected_domain_decline_items(
                 before_domains,
@@ -1891,9 +1906,7 @@ async def recommend_after_analysis(
         after_amount = max(0.0, after_totals.get(nutrient_key, 0.0))
         if after_amount >= before_totals.get(nutrient_key, 0.0):
             continue
-        simulated = await _analyze_food_set(
-            simulated_foods, normalized_profile, meal_type=meal_type
-        )
+        simulated = await simulate(simulated_foods)
         after_domains = _domain_score_items(simulated)
         if _protected_domain_decline_items(before_domains, after_domains, normalized_profile) > 0.75:
             continue
@@ -1970,7 +1983,7 @@ async def recommend_after_analysis(
 
     for target_key, target_item in targets_to_improve:
         reduction_first = _requires_reduction(target_item)
-        for candidate in candidate_pool:
+        for candidate in candidate_pool[:6]:
             if _candidate_already_present(candidate, current_foods):
                 continue
             allowed, audit, _ = _candidate_eligibility(candidate, normalized_profile)
@@ -1986,11 +1999,7 @@ async def recommend_after_analysis(
                 upper_safe, _ = _personalized_upper_limit_safe(candidate, normalized_profile, before_totals, serving_g=grams)
                 if not upper_safe:
                     continue
-                simulated = await _analyze_food_set(
-                    simulated_foods,
-                    normalized_profile,
-                    meal_type=meal_type,
-                )
+                simulated = await simulate(simulated_foods)
                 after_domains = _domain_score_items(simulated)
                 if _protected_domain_decline_items(before_domains, after_domains, normalized_profile) > 0.75:
                     continue
@@ -2077,7 +2086,7 @@ async def recommend_after_analysis(
                 reduced if food.get("id") == offender.get("id") else copy.deepcopy(food)
                 for food in current_foods
             ]
-            simulated = await _analyze_food_set(simulated_foods, normalized_profile, meal_type=meal_type)
+            simulated = await simulate(simulated_foods)
             after_domains = _domain_score_items(simulated)
             _, _, target_delta = _domain_delta(before_domains, after_domains, target_key)
             collateral = _collateral_decline(before_domains, after_domains, target_key)
@@ -2118,7 +2127,7 @@ async def recommend_after_analysis(
 
             # Also simulate a real swap when a compatible catalogue food
             # carries materially less of the implicated excess nutrient.
-            for candidate in candidate_pool:
+            for candidate in candidate_pool[:6]:
                 if _candidate_already_present(candidate, current_foods):
                     continue
                 allowed, audit, _ = _candidate_eligibility(candidate, normalized_profile)
@@ -2139,11 +2148,7 @@ async def recommend_after_analysis(
                     else copy.deepcopy(food)
                     for food in current_foods
                 ]
-                replaced_analysis = await _analyze_food_set(
-                    replaced_foods,
-                    normalized_profile,
-                    meal_type=meal_type,
-                )
+                replaced_analysis = await simulate(replaced_foods)
                 replaced_domains = _domain_score_items(replaced_analysis)
                 if _protected_domain_decline_items(before_domains, replaced_domains, normalized_profile) > 0.75:
                     continue
