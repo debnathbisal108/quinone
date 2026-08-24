@@ -1,8 +1,11 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../providers/analysis_history_provider.dart';
+import '../../../result/models/analysis_result.dart';
+import '../../../share/services/meal_share_service.dart';
 
 class HistoryScreen extends ConsumerWidget {
   const HistoryScreen({super.key});
@@ -92,14 +95,9 @@ class HistoryScreen extends ConsumerWidget {
                           padding: const EdgeInsets.all(16),
                           child: Row(
                             children: [
-                              CircleAvatar(
-                                radius: 26,
-                                backgroundColor:
-                                    theme.colorScheme.primaryContainer,
-                                child: Icon(
-                                  Icons.restaurant_rounded,
-                                  color: theme.colorScheme.onPrimaryContainer,
-                                ),
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(14),
+                                child: SizedBox(width: 58, height: 58, child: _HistoryThumbnail(paths: record.mealImagePaths, theme: theme)),
                               ),
                               const SizedBox(width: 14),
                               Expanded(
@@ -136,17 +134,22 @@ class HistoryScreen extends ConsumerWidget {
                               Column(
                                 crossAxisAlignment: CrossAxisAlignment.end,
                                 children: [
-                                  Text(
-                                    '${record.calories.round()} kcal',
-                                    style: theme.textTheme.titleSmall
-                                        ?.copyWith(fontWeight: FontWeight.w800),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    '${protein.toStringAsFixed(1)} g protein',
-                                    style: theme.textTheme.bodySmall?.copyWith(
-                                      color: theme.colorScheme.onSurfaceVariant,
-                                    ),
+                                  Text('${record.calories.round()} kcal', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800)),
+                                  const SizedBox(height: 2),
+                                  Text('${protein.toStringAsFixed(1)} g protein', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                                  const SizedBox(height: 2),
+                                  IconButton(
+                                    tooltip: 'Share meal',
+                                    visualDensity: VisualDensity.compact,
+                                    onPressed: record.rawResult.isEmpty ? null : () async {
+                                      try {
+                                        await MealShareService.instance.shareMeal(context: context, result: AnalysisResult.fromJson(record.rawResult), imagePaths: record.mealImagePaths);
+                                      } catch (error) {
+                                        if (!context.mounted) return;
+                                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not create the share card: $error')));
+                                      }
+                                    },
+                                    icon: const Icon(Icons.ios_share_rounded, size: 20),
                                   ),
                                 ],
                               ),
@@ -160,6 +163,21 @@ class HistoryScreen extends ConsumerWidget {
               ),
             ),
     );
+  }
+}
+
+class _HistoryThumbnail extends StatelessWidget {
+  const _HistoryThumbnail({required this.paths, required this.theme});
+  final List<String> paths;
+  final ThemeData theme;
+
+  @override
+  Widget build(BuildContext context) {
+    final path = paths.firstWhere((item) => item.trim().isNotEmpty && File(item).existsSync(), orElse: () => '');
+    if (path.isEmpty) {
+      return ColoredBox(color: theme.colorScheme.primaryContainer, child: Icon(Icons.restaurant_rounded, color: theme.colorScheme.onPrimaryContainer));
+    }
+    return Image.file(File(path), fit: BoxFit.cover, errorBuilder: (_, __, ___) => ColoredBox(color: theme.colorScheme.primaryContainer, child: Icon(Icons.restaurant_rounded, color: theme.colorScheme.onPrimaryContainer)));
   }
 }
 
