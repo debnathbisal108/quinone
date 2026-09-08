@@ -1,275 +1,469 @@
-# Nutrica Backend
+# Quinone
 
-Nutrica Backend is a FastAPI service used by the Nutrica mobile application. It receives meal images, extracts structured food information with Gemini, resolves foods against USDA FoodData Central, attaches nutrients, computes derived features, evaluates nutrition evidence, and calculates health-domain scores.
+### AI-Powered Nutrition Intelligence Platform
 
-## Current pipeline
+Quinone is a full-stack AI nutrition platform that turns meal images into structured nutrition data, health insights, and personalized recommendations.
 
-```text
-Mobile app
-    |
-    v
-server.py
-    |
-    v
-analysis_engine.py
-    |
-    v
-food_resolver.py
-    |
-    v
-nutrient_profile.py
-    |
-    v
-feature_engineering.py
-    |
-    v
-evidence_engine.py
-    |
-    v
-health_domain_scoring.py
-    |
-    v
-JSON response
-```
+**Image → Food & Ingredient Analysis → Nutrition Resolution → Health Scoring → Personalized Guidance**
 
-## Repository structure
+---
+
+## Product
+
+Quinone goes beyond calorie tracking by combining AI vision, nutrition databases, evidence processing, health-domain scoring, personalization, and recommendation logic into a single workflow.
+
+### Core workflow
 
 ```text
-nutrica-backend/
-├── server.py
-├── analysis_engine.py
-├── food_resolver.py
-├── nutrient_profile.py
-├── feature_engineering.py
-├── evidence_engine.py
-├── health_domain_scoring.py
-├── requirements.txt
-├── render.yaml
-├── .python-version
-├── .env.example
-├── .gitignore
-└── README.md
+                    MEAL IMAGE
+                        │
+                        ▼
+                AI FOOD ANALYSIS
+                        │
+                        ▼
+             FOOD / INGREDIENT RESOLUTION
+                        │
+                        ▼
+              USDA NUTRITION DATA
+                        │
+                        ▼
+              NUTRIENT PROCESSING
+                        │
+                        ▼
+             EVIDENCE & FEATURES
+                        │
+                        ▼
+              HEALTH-DOMAIN SCORING
+                        │
+                        ▼
+                 PERSONALIZATION
+                        │
+                        ▼
+             RECOMMENDATION ENGINE
+                        │
+                        ▼
+                  USER GUIDANCE
 ```
 
-This API does not render web pages, so it does not need `templates/` or `static/` directories. Uploaded images are stored in request-local temporary directories and removed after processing.
+---
 
-## Module responsibilities
+## What Quinone does
 
-### `server.py`
+### 📸 AI Meal Analysis
 
-Defines FastAPI endpoints, validates uploads, manages temporary files and back-label sessions, runs the analysis pipeline, and returns JSON.
+Analyzes meal images and extracts structured information about foods and ingredients.
 
-### `analysis_engine.py`
+### 🧾 Food Resolution
 
-Sends meal and nutrition-label images to the Gemini API and returns structured meal JSON.
+Maps detected foods and ingredients to nutrition records using USDA FoodData Central.
 
-### `food_resolver.py`
+### 🧬 Nutrition Intelligence
 
-Resolves detected foods, ingredients, and spices to USDA FoodData Central records.
+Processes macro- and micronutrient information and derives additional nutritional features.
 
-### `nutrient_profile.py`
+### 🩺 Health Scoring
 
-Downloads and normalizes nutrient data for resolved FDC records.
+Evaluates nutrition-related health domains using evidence, thresholds, coefficients, interactions, and population modifiers.
 
-### `feature_engineering.py`
+### 🎯 Personalization
 
-Calculates derived nutrition features, including nutrient densities, ratios, amino-acid indicators, and other analysis inputs.
+Uses user profile information, dietary preferences, and health-related constraints to personalize analysis and recommendations.
 
-### `evidence_engine.py`
+### 💡 Targeted Recommendations
 
-Applies scientific thresholds, coefficients, interactions, confidence values, mechanisms, pathways, and optional population modifiers.
+Identifies nutritional gaps and generates food recommendations intended to address specific nutritional or health needs.
 
-### `health_domain_scoring.py`
+### 📊 Nutrition Insights
 
-Groups evidence by canonical health domain and calculates score, confidence, coverage, reliability, and top contributors.
+Provides users with a structured view of nutritional intake, health scores, contributors, and areas requiring attention.
 
-## API endpoints
+---
 
-### Health check
+## System Architecture
 
-```http
-GET /health
+```text
+┌───────────────────────────────┐
+│        Flutter Application    │
+│                               │
+│  Home · Upload · Analysis     │
+│  Health · Insights · Guidance │
+└───────────────┬───────────────┘
+                │
+                ▼
+┌───────────────────────────────┐
+│          FastAPI Backend      │
+└───────────────┬───────────────┘
+                │
+       ┌────────┴────────┐
+       ▼                 ▼
+┌─────────────┐   ┌───────────────┐
+│ AI Analysis │   │ Food Resolver │
+│   Gemini    │   │     USDA      │
+└──────┬──────┘   └───────┬───────┘
+       │                  │
+       └────────┬─────────┘
+                ▼
+       ┌─────────────────┐
+       │ Nutrient Layer  │
+       └────────┬────────┘
+                ▼
+       ┌─────────────────┐
+       │ Feature Engine  │
+       └────────┬────────┘
+                ▼
+       ┌─────────────────┐
+       │ Evidence Engine │
+       └────────┬────────┘
+                ▼
+       ┌─────────────────┐
+       │ Health Scoring  │
+       └────────┬────────┘
+                ▼
+       ┌─────────────────────┐
+       │ Personalization &   │
+       │ Recommendation      │
+       └─────────────────────┘
 ```
 
-Expected response:
+---
 
-```json
-{
-  "status": "healthy"
-}
+## AI & Data Pipeline
+
+Quinone separates AI interpretation from deterministic nutrition processing.
+
+```text
+Image
+  ↓
+Gemini-based interpretation
+  ↓
+Structured food representation
+  ↓
+Food normalization
+  ↓
+USDA candidate search
+  ↓
+Candidate validation
+  ↓
+Nutrient retrieval
+  ↓
+Feature engineering
+  ↓
+Evidence evaluation
+  ↓
+Health-domain scoring
+  ↓
+Personalized recommendation
 ```
 
-### Analyze a meal
+This separation allows AI-generated food descriptions to be validated against structured nutrition data instead of treating model output as the final source of truth.
 
-```http
-POST /analyze
+---
+
+## Recommendation Architecture
+
+Recommendations are generated from multiple inputs rather than from a static list of generic "healthy foods".
+
+```text
+User Profile
+     +
+Current Nutrition
+     +
+Nutrient Targets
+     +
+Health Scores
+     +
+Dietary Preferences
+     +
+Health Constraints
+          │
+          ▼
+   Candidate Generation
+          │
+          ▼
+      Filtering
+          │
+          ▼
+      Validation
+          │
+          ▼
+       Ranking
+          │
+          ▼
+ Quantity / Target Calculation
+          │
+          ▼
+ Personalized Recommendation
 ```
 
-Multipart form fields:
+The recommendation layer is separated from nutrition analysis so that recommendations can evolve without changing the underlying food-analysis pipeline.
 
-- `image`: required meal image
-- `profile`: optional JSON string containing user-supplied profile information
-- `front_label`: optional packaged-food front-label image
-- `back_label`: optional nutrition-label image
+---
 
-The exact accepted fields depend on the current `server.py` implementation.
+## Health Intelligence
 
-### Continue nutrition-label analysis
+The backend separates several stages of health analysis:
 
-```http
-POST /analyze/back-label
+```text
+Nutrition Data
+      ↓
+Feature Engineering
+      ↓
+Evidence Evaluation
+      ↓
+Health Domain Aggregation
+      ↓
+Score + Confidence + Coverage
+      ↓
+Top Contributors
 ```
 
-Used when the first analysis response requests a separate back-label image.
+The evidence layer can incorporate:
 
-## Local setup
+* nutrient thresholds
+* coefficients
+* interactions
+* confidence
+* mechanisms
+* pathways
+* population modifiers
 
-### 1. Create a virtual environment
+This allows health scoring logic to remain separate from raw nutrient retrieval.
+
+---
+
+## Key Engineering Decisions
+
+### AI is not treated as the final data source
+
+AI is used for interpreting unstructured inputs such as meal images.
+
+Structured nutrition information is subsequently resolved and validated against nutrition data sources.
+
+### Analysis and recommendations are separate
+
+The system first determines what the meal contains and what its nutritional properties are.
+
+Recommendation logic operates on those results rather than directly on the original image.
+
+### Modular backend
+
+Major responsibilities are separated into modules for:
+
+* API handling
+* AI analysis
+* food resolution
+* nutrient processing
+* feature engineering
+* evidence evaluation
+* health scoring
+* personalization
+* recommendations
+
+### Temporary image processing
+
+Uploaded images are processed using temporary storage rather than being treated as permanent backend files.
+
+### Secrets remain outside the application
+
+External API credentials are supplied through environment variables rather than embedded in application code.
+
+---
+
+## Repository Structure
+
+```text
+quinone/
+│
+├── backend/
+│   ├── server.py
+│   ├── analysis_engine.py
+│   ├── food_resolver.py
+│   ├── nutrient_profile.py
+│   ├── feature_engineering.py
+│   ├── evidence_engine.py
+│   ├── health_domain_scoring.py
+│   ├── personalization_engine.py
+│   ├── recommendation_engine.py
+│   └── ...
+│
+├── lib/
+│   ├── core/
+│   ├── features/
+│   └── main.dart
+│
+├── .github/
+│   └── workflows/
+│
+├── pubspec.yaml
+├── README.md
+└── ...
+```
+
+---
+
+## Technology Stack
+
+| Layer           | Technology            |
+| --------------- | --------------------- |
+| Mobile          | Flutter / Dart        |
+| Backend         | Python / FastAPI      |
+| AI              | Gemini                |
+| Nutrition Data  | USDA FoodData Central |
+| Computer Vision | AI vision analysis    |
+| API             | REST                  |
+| Deployment      | Render                |
+| CI/CD           | GitHub Actions        |
+
+---
+
+## Engineering Challenges
+
+### Unstructured food descriptions
+
+Food detected from images does not always correspond directly to a nutrition database record.
+
+Quinone therefore introduces a resolution layer between AI analysis and nutrient retrieval.
+
+### Nutrition data reliability
+
+Candidate food records require validation before their nutrition information is used downstream.
+
+### Multi-stage health analysis
+
+Raw nutrient quantities are not directly equivalent to health scores. Quinone therefore separates nutrient processing, feature engineering, evidence evaluation, and domain-level scoring.
+
+### Personalized recommendations
+
+A recommendation must account for more than nutrient deficiency. Dietary preferences, user profile information, health constraints, current intake, and target nutrients can influence candidate selection.
+
+---
+
+## Development Approach
+
+Quinone was developed as an iterative AI-assisted product rather than as a single model or API experiment.
+
+The development process follows:
+
+```text
+Problem
+  ↓
+Requirements
+  ↓
+Architecture
+  ↓
+Module Design
+  ↓
+AI-Assisted Implementation
+  ↓
+Testing
+  ↓
+Failure Investigation
+  ↓
+Root-Cause Analysis
+  ↓
+Fix
+  ↓
+Regression Testing
+  ↓
+Iteration
+```
+
+AI is used as a development accelerator, while system architecture, interfaces, validation rules, and product behavior remain explicitly defined.
+
+---
+
+## Local Development
+
+### Backend
 
 ```bash
+cd backend
+
 python -m venv .venv
-```
 
-Activate it on Windows:
-
-```powershell
+# Windows
 .venv\Scripts\activate
-```
 
-Activate it on Linux or macOS:
-
-```bash
+# Linux / macOS
 source .venv/bin/activate
-```
 
-### 2. Install dependencies
-
-```bash
-pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 3. Configure environment variables
+Create `.env`:
 
-Create a local `.env` file from `.env.example`, or configure variables in your shell:
-
-```text
+```env
 GEMINI_API_KEY=your_key
 USDA_API_KEY=your_key
-NUTRICA_LOG_LEVEL=INFO
 ```
 
-The application code must read both API keys from environment variables. Do not hard-code credentials in Python files.
-
-### 4. Run the API
-
-Linux or macOS:
+Run:
 
 ```bash
-export GEMINI_API_KEY="your_key"
-export USDA_API_KEY="your_key"
 uvicorn server:app --reload
 ```
 
-Windows PowerShell:
-
-```powershell
-$env:GEMINI_API_KEY="your_key"
-$env:USDA_API_KEY="your_key"
-uvicorn server:app --reload
-```
-
-Open:
+API documentation:
 
 ```text
 http://127.0.0.1:8000/docs
 ```
 
-## Deploy to Render
+### Flutter
 
-The repository includes `render.yaml`, which defines one Python web service.
-
-1. Push the repository to GitHub.
-2. Sign in to Render.
-3. Select **New +** and then **Blueprint**.
-4. Connect the GitHub repository.
-5. Render detects `render.yaml`.
-6. Enter secret values for:
-   - `GEMINI_API_KEY`
-   - `USDA_API_KEY`
-7. Deploy the Blueprint.
-8. Test:
-
-```text
-https://YOUR-SERVICE-NAME.onrender.com/health
-```
-
-Render uses:
-
-```text
-Build command:
-pip install --upgrade pip && pip install -r requirements.txt
-
-Start command:
-uvicorn server:app --host 0.0.0.0 --port $PORT
-```
-
-## Mobile-app connection
-
-Use the deployed Render base URL in Flutter:
-
-```dart
-const String apiBaseUrl =
-    'https://YOUR-SERVICE-NAME.onrender.com';
-```
-
-Do not place Gemini or USDA secret keys in the Flutter application. All requests requiring those keys must pass through this backend.
-
-## Important deployment notes
-
-### API keys
-
-Before uploading to GitHub, search every Python file for hard-coded keys:
+From the repository root:
 
 ```bash
-grep -R "API_KEY" .
+flutter pub get
+flutter run
 ```
 
-Move real keys to environment variables. If a real key has already been shared or committed, revoke or rotate it.
+Configure the backend base URL according to the environment being used.
 
-The resolver and nutrient modules should use:
+---
 
-```python
-USDA_API_KEY = os.environ.get("USDA_API_KEY")
+## Project Status
 
-if not USDA_API_KEY:
-    raise RuntimeError("USDA_API_KEY is not configured.")
-```
+Quinone is an actively developed MVP.
 
-### Temporary storage
+The core product architecture includes:
 
-Render's local filesystem is ephemeral. This project already uses temporary upload directories, which is appropriate. Do not rely on local files for permanent user data.
+* AI meal analysis
+* Food and ingredient resolution
+* USDA nutrition enrichment
+* Nutrient processing
+* Feature engineering
+* Evidence evaluation
+* Health-domain scoring
+* Personalization
+* Recommendation workflows
+* Flutter mobile interface
+* Backend API
+* Deployment configuration
+* CI workflow
 
-Optional USDA cache paths are blank by default. Configure persistent storage before enabling disk-backed cache files.
+The system continues to evolve through testing, edge-case handling, recommendation refinement, and UX iteration.
 
-### Free service behavior
+---
 
-A free Render web service is suitable for development and demonstrations, but it can spin down while inactive and may have limited CPU and memory. Production traffic should use a paid instance.
+## Future Direction
 
-## GitHub checklist
+Planned areas include:
 
-Before the first push:
+* broader food coverage
+* improved food-resolution confidence
+* stronger recommendation ranking
+* expanded health domains
+* improved validation and observability
+* richer longitudinal nutrition insights
+* production-scale infrastructure
 
-- Rename `health_domain_scoring_modified.py` to `health_domain_scoring.py`.
-- Use the updated `server.py`.
-- Confirm all imports match the final filenames.
-- Remove notebooks, combined scratch files, pasted-text files, and duplicate code unless intentionally retained.
-- Remove all hard-coded Gemini and USDA keys.
-- Add real secrets only in the Render dashboard.
-- Test `python -m compileall .`.
-- Test `uvicorn server:app --reload`.
-- Test `/health`, `/analyze`, and `/analyze/back-label`.
+---
 
-## License
+## Author
 
-Add the appropriate license before making the repository public.
+**Bisal Debnath**
+
+AI / Full-Stack Product Builder
+
+[GitHub](https://github.com/debnathbisal108)
