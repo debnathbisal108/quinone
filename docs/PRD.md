@@ -1,6 +1,6 @@
 # Quinone — Product Requirements Document
 
-## 1. Product
+## 1. The Product
 
 Quinone is an AI-powered nutrition intelligence platform that converts meal images and user nutrition information into structured nutrition insights, health-domain scores, and personalized recommendations.
 
